@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 🏥 GeoClinic Analyst — Streamlit-версия
-Анализ локации под многофункциональную клинику (взрослые, 60%ж/40%м, ~40 лет)
+Анализ локации под многофункциональную клинику
 """
 
 import streamlit as st
@@ -539,8 +539,8 @@ with st.sidebar:
 
     address = st.text_input(
         "📍 Адрес объекта",
-        value="Красноярск Ладо Кецховели 34",
-        help="Введите полный адрес для геокодирования",
+        value="Город, улица, дом",
+        help="Введите полный адрес для геокодирования. Например: Москва, Арбат, 10",
     )
     radius_km = st.slider(
         "🔍 Радиус анализа, км",
@@ -550,10 +550,19 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🎯 Целевая аудитория")
-    st.markdown("- Возраст: **~40 лет**")
-    st.markdown("- Женщины: **60%**")
-    st.markdown("- Мужчины: **40%**")
-    st.info("Параметры ЦА учитываются в весовых коэффициентах анализа.")
+
+    target_age = st.number_input(
+        "Средний возраст, лет",
+        min_value=18, max_value=90, value=40, step=1,
+        help="Средний возраст целевой аудитории клиники",
+    )
+    women_pct = st.slider(
+        "Доля женщин, %",
+        min_value=0, max_value=100, value=60, step=5,
+        help="Остаток автоматически идёт на мужчин",
+    )
+    men_pct = 100 - women_pct
+    st.markdown(f"- Мужчины: **{men_pct}%**")
 
     st.divider()
     run_analysis = st.button("🚀 Запустить анализ", use_container_width=True, type="primary")
@@ -565,7 +574,7 @@ st.markdown('<div class="main-header">🏥 GeoClinic Analyst</div>', unsafe_allo
 st.markdown('<div class="sub-header">Геомаркетинговая аналитика для открытия многофункциональной клиники</div>', unsafe_allow_html=True)
 
 if not run_analysis:
-    st.info("👈 Введите адрес в боковой панели и нажмите **Запустить анализ**.")
+    st.info("👈 Введите адрес и параметры ЦА в боковой панели, затем нажмите **Запустить анализ**.")
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════
@@ -592,7 +601,7 @@ with col2:
 with col3:
     st.metric("Радиус", f"{radius_km} км")
 with col4:
-    st.metric("ЦА", "40+ лет, 60%Ж")
+    st.metric("ЦА", f"{target_age} лет, {women_pct}%Ж")
 
 st.divider()
 
