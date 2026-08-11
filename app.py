@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-GeoMarketing AI — Clinic Location Benchmark v3.1
-Явные параметры через чекбоксы вместо выпадающего списка.
+GeoMarketing AI — Clinic Location Benchmark v3.2
 
-Что изменено:
-- 5 явных параметров (тип здания, этаж, вход, видимость, линия)
-- Каждый параметр даёт конкретный вычет из base score
-- Hard-штрафы привязаны к конкретным параметрам
-- Пользователь видит, за что именно снимаются баллы
+Исправления:
+1. gender_fit возвращён в спрос (критично для ЦА).
+2. Параметры локации: base 100 + явные штрафы, показываются в UI.
+3. Понятные названия факторов в таблице.
+4. Расшифровка формулы similarity в интерфейсе.
 """
 
 import json
@@ -27,12 +26,12 @@ from pydantic import BaseModel, Field
 # STREAMLIT CONFIG
 # ==============================================================================
 st.set_page_config(
-    page_title="Геомаркетинг клиники — Benchmark v3.1",
+    page_title="Геомаркетинг клиники — Benchmark v3.2",
     page_icon="📍",
     layout="wide",
 )
 
-st.title("📍 Геомаркетинговый анализ локации клиники — v3.1")
+st.title("📍 Геомаркетинговый анализ локации клиники — v3.2")
 st.caption("Явные параметры + детерминированный скоринг. Платные geo-API не нужны.")
 
 # ==============================================================================
@@ -48,10 +47,9 @@ OVERPASS_URLS = [
 ]
 
 REQUEST_HEADERS = {
-    "User-Agent": "ClinicGeoAnalytics/3.1 (streamlit-cloud; business use)"
+    "User-Agent": "ClinicGeoAnalytics/3.2 (streamlit-cloud; business use)"
 }
 
-# --- ВЕСА БЛОКОВ (фиксированы, сумма = 1.0) ---
 BLOCK_WEIGHTS = {
     "location_params": 0.15,
     "parking_access":  0.20,
@@ -61,100 +59,67 @@ BLOCK_WEIGHTS = {
     "visibility_env":  0.15,
 }
 
-# --- ФАКТОРЫ ---
+# --- ФАКТОРЫ: (ключ, блок, вес_в_блоке, тип_оценки, человекочитаемое_название) ---
 FACTORS = [
-    ("location_param_score",    "location_params", 1.00, "rule"),
-    ("parking_proximity",       "parking_access",  0.30, "osm"),
-    ("parking_supply",          "parking_access",  0.25, "osm"),
-    ("vehicle_access",          "parking_access",  0.25, "osm"),
-    ("public_transport",        "parking_access",  0.20, "osm"),
-    ("population_density",      "demand",          0.30, "osm"),
-    ("income_fit",              "demand",          0.25, "ai"),
-    ("age_fit",                 "demand",          0.20, "ai"),
-    ("family_profile",          "demand",          0.15, "ai"),
-    ("daytime_balance",         "demand",          0.10, "ai"),
-    ("competitor_density",      "competition",     0.40, "osm"),
-    ("competitor_strength",     "competition",     0.35, "ai"),
-    ("market_gap",              "competition",     0.25, "ai"),
-    ("pharmacy_synergy",        "medical_eco",     0.25, "osm"),
-    ("diagnostics_synergy",     "medical_eco",     0.25, "osm"),
-    ("hospital_synergy",        "medical_eco",     0.25, "osm"),
-    ("medical_cluster",         "medical_eco",     0.25, "osm"),
-    ("visibility",              "visibility_env",  0.35, "osm"),
-    ("road_type_fit",           "visibility_env",  0.25, "osm"),
-    ("pedestrian_comfort",      "visibility_env",  0.20, "osm"),
-    ("noise_safety",            "visibility_env",  0.20, "ai"),
+    ("location_param_score",    "location_params", 1.00, "rule",  "Базовые параметры локации"),
+    ("parking_proximity",       "parking_access",  0.30, "osm",   "Близость парковки"),
+    ("parking_supply",          "parking_access",  0.25, "osm",   "Ёмкость парковки"),
+    ("vehicle_access",          "parking_access",  0.25, "osm",   "Удобство подъезда на авто"),
+    ("public_transport",        "parking_access",  0.20, "osm",   "Общественный транспорт"),
+    ("population_density",      "demand",          0.25, "osm",   "Плотность жилой застройки"),
+    ("income_fit",              "demand",          0.20, "ai",    "Соответствие доходов ЦА"),
+    ("age_fit",                 "demand",          0.15, "ai",    "Возрастное соответствие ЦА"),
+    ("gender_fit",              "demand",          0.15, "ai",    "Половое соответствие ЦА"),
+    ("family_profile",          "demand",          0.15, "ai",    "Семейный профиль района"),
+    ("daytime_balance",         "demand",          0.10, "ai",    "Баланс дневного/жилого населения"),
+    ("competitor_density",      "competition",     0.40, "osm",   "Плотность конкурентов"),
+    ("competitor_strength",     "competition",     0.35, "ai",    "Сила конкурентов"),
+    ("market_gap",              "competition",     0.25, "ai",    "Рыночный зазор"),
+    ("pharmacy_synergy",        "medical_eco",     0.25, "osm",   "Синергия с аптеками"),
+    ("diagnostics_synergy",     "medical_eco",     0.25, "osm",   "Синергия с диагностикой"),
+    ("hospital_synergy",        "medical_eco",     0.25, "osm",   "Синергия с больницами"),
+    ("medical_cluster",         "medical_eco",     0.25, "osm",   "Медицинский кластер"),
+    ("visibility",              "visibility_env",  0.35, "osm",   "Видимость с дороги"),
+    ("road_type_fit",           "visibility_env",  0.25, "osm",   "Тип дорог (жилой/офисный)"),
+    ("pedestrian_comfort",      "visibility_env",  0.20, "osm",   "Пешеходный комфорт"),
+    ("noise_safety",            "visibility_env",  0.20, "ai",    "Шум и безопасность"),
 ]
 
 FACTOR_KEYS = [f[0] for f in FACTORS]
 FACTOR_BLOCK = {f[0]: f[1] for f in FACTORS}
 FACTOR_WEIGHT_IN_BLOCK = {f[0]: f[2] for f in FACTORS}
 FACTOR_SOURCE = {f[0]: f[3] for f in FACTORS}
+FACTOR_LABEL = {f[0]: f[4] for f in FACTORS}
 LOW_IS_BAD = {"competitor_density"}
 
-# --- ПАРАМЕТРЫ ЛОКАЦИИ И ИХ МОДИФИКАТОРЫ ---
-# Каждый параметр: (ключ, label, penalty, description)
-LOCATION_PARAM_RULES = [
+# --- ПРАВИЛА ПАРАМЕТРОВ ЛОКАЦИИ ---
+LOC_PARAM_RULES = [
     ("floor_upper", "Объект на 2+ этаже", 25, "Нет видимости, сложная навигация, барьер для пациентов"),
     ("no_separate_entrance", "Нет отдельного входа", 20, "Вход через подъезд, лестницу, охрану БЦ — барьер"),
-    ("no_street_visibility", "Нет видимости с улицы (нет витрины/вывески)", 15, "Пациент не видит клинику с улицы"),
-    ("building_bc", "Здание — бизнес-центр", 15, "Офисный трафик, выходные пустые, парковка — конкуренция с офисами"),
-    ("building_mall", "Здание — торговый центр", 10, "Сложная навигация, трафик нецелевой, но парковка есть"),
-    ("not_first_line", "Не первая линия (двор/второстепенная улица)", 10, "Меньше проходного трафика, ниже узнаваемость"),
+    ("no_street_visibility", "Нет видимости с улицы", 15, "Пациент не видит клинику с улицы"),
+    ("building_bc", "Бизнес-центр", 15, "Офисный трафик, выходные пустые, парковка — конкуренция с офисами"),
+    ("building_mall", "Торговый центр", 10, "Сложная навигация, трафик нецелевой, но парковка есть"),
+    ("not_first_line", "Не первая линия", 10, "Меньше проходного трафика, ниже узнаваемость"),
 ]
 
-# --- ЭТАЛОНЫ С ЯВНЫМИ ПАРАМЕТРАМИ ---
+# --- ЭТАЛОНЫ ---
 DATA_CLINICS = [
-    {
-        "address": "Красноярск, ул. 9 Мая, 19а",
-        "status": "успешный",
-        "lat": 56.067749, "lon": 92.933822,
-        "params": {"building_type": "standalone", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True},
-    },
-    {
-        "address": "Красноярск, ул. Ладо Кецховели, 34",
-        "status": "успешный",
-        "lat": 56.017160, "lon": 92.813882,
-        "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True},
-    },
-    {
-        "address": "Екатеринбург, ул. Советская, 42",
-        "status": "успешный",
-        "lat": 56.855058, "lon": 60.639260,
-        "params": {"building_type": "standalone", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True},
-    },
-    {
-        "address": "Казань, ул. Алексея Козина, 2",
-        "status": "успешный",
-        "lat": 55.814523, "lon": 49.141033,
-        "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True},
-    },
-    {
-        "address": "Новосибирск, ул. Новогодняя, 23/1",
-        "status": "слабый",
-        "lat": 54.987320, "lon": 82.911925,
-        "params": {"building_type": "bc", "floor": "upper", "separate_entrance": False, "street_visibility": False, "first_line": False},
-    },
-    {
-        "address": "Челябинск, ул. Худякова, 10",
-        "status": "слабый",
-        "lat": 55.148154, "lon": 61.365313,
-        "params": {"building_type": "other", "floor": "ground", "separate_entrance": True, "street_visibility": False, "first_line": False},
-    },
-    {
-        "address": "Самара, ул. Академика Платонова, 10 корпус 3",
-        "status": "слабый",
-        "lat": 53.218579, "lon": 50.176465,
-        "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": False, "first_line": False},
-    },
+    {"address": "Красноярск, ул. 9 Мая, 19а",       "status": "успешный", "lat": 56.067749, "lon": 92.933822, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
+    {"address": "Красноярск, ул. Ладо Кецховели, 34", "status": "успешный", "lat": 56.017160, "lon": 92.813882, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
+    {"address": "Екатеринбург, ул. Советская, 42",   "status": "успешный", "lat": 56.855058, "lon": 60.639260, "params": {"building_type": "standalone", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
+    {"address": "Казань, ул. Алексея Козина, 2",     "status": "успешный", "lat": 55.814523, "lon": 49.141033, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
+    {"address": "Новосибирск, ул. Новогодняя, 23/1", "status": "слабый",   "lat": 54.987320, "lon": 82.911925, "params": {"building_type": "bc", "floor": "upper", "separate_entrance": False, "street_visibility": False, "first_line": False}},
+    {"address": "Челябинск, ул. Худякова, 10",       "status": "слабый",   "lat": 55.148154, "lon": 61.365313, "params": {"building_type": "other", "floor": "ground", "separate_entrance": True, "street_visibility": False, "first_line": False}},
+    {"address": "Самара, ул. Академика Платонова, 10 корпус 3", "status": "слабый", "lat": 53.218579, "lon": 50.176465, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": False, "first_line": False}},
 ]
 
 # ==============================================================================
-# PYDANTIC — AI-ФАКТОРЫ
+# PYDANTIC
 # ==============================================================================
 class GeoAIProfile(BaseModel):
     income_fit: int = Field(ge=0, le=100)
     age_fit: int = Field(ge=0, le=100)
+    gender_fit: int = Field(ge=0, le=100)
     family_profile: int = Field(ge=0, le=100)
     daytime_balance: int = Field(ge=0, le=100)
     competitor_strength: int = Field(ge=0, le=100)
@@ -371,7 +336,7 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     c = osm.get("counts", {})
     scores = {}
 
-    # PARKING & ACCESS
+    # PARKING
     parking_500 = c.get("parking_500m", 0)
     parking_1000 = c.get("parking_1000m", 0)
     if parking_500 >= 3:
@@ -396,6 +361,7 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     else:
         scores["parking_supply"] = 0
 
+    # VEHICLE ACCESS
     primary = c.get("primary_road_800m", 0)
     secondary = c.get("secondary_road_800m", 0)
     tertiary = c.get("tertiary_road_800m", 0)
@@ -413,6 +379,7 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     else:
         scores["vehicle_access"] = 30
 
+    # PUBLIC TRANSPORT
     bus = c.get("bus_stop_300m", 0)
     pt = c.get("public_transport_800m", 0)
     if bus >= 2 and pt >= 3:
@@ -456,7 +423,7 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     else:
         scores["competitor_density"] = 5
 
-    # MEDICAL ECOSYSTEM
+    # MEDICAL
     ph_300 = c.get("pharmacy_300m", 0)
     ph_800 = c.get("pharmacy_800m", 0)
     if ph_300 >= 2:
@@ -535,16 +502,11 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
 
 
 # ==============================================================================
-# ПАРАМЕТРЫ ЛОКАЦИИ → SCORE
+# ПАРАМЕТРЫ ЛОКАЦИИ → SCORE + ШТРАФЫ
 # ==============================================================================
 def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, int, str]]]:
-    """Считает location_param_score из явных параметров.
-    Возвращает (score, list_of_applied_penalties).
-    """
     base = 100.0
     applied = []
-
-    # Маппинг параметров на правила
     if params.get("floor") == "upper":
         base -= 25
         applied.append(("2+ этаж", 25, "Нет видимости, сложная навигация"))
@@ -563,7 +525,6 @@ def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, i
     if not params.get("first_line", True):
         base -= 10
         applied.append(("Не первая линия", 10, "Меньше проходного трафика"))
-
     return clamp(base, 5.0), applied
 
 
@@ -576,12 +537,13 @@ def build_ai_system_prompt() -> str:
 Твоя задача — оценить ТОЛЬКО следующие факторы по шкале 0–100:
 1. income_fit — соответствие дохода населения среднему чеку клиники.
 2. age_fit — возрастное соответствие целевой аудитории.
-3. family_profile — семейный профиль района (дети, семьи).
-4. daytime_balance — баланс дневного и жилого населения.
-5. competitor_strength — сила конкурентов (100 = слабые/отсутствуют, 0 = сильные сетевые).
-6. market_gap — рыночный зазор (100 = большой незакрытый спрос).
-7. noise_safety — шумовая обстановка и безопасность (100 = тихо и безопасно).
-8. traffic_quality — качество трафика для ЦА (не количество, а соответствие ЦА).
+3. gender_fit — половое соответствие ЦА (если клиника женская — важно).
+4. family_profile — семейный профиль района (дети, семьи).
+5. daytime_balance — баланс дневного и жилого населения.
+6. competitor_strength — сила конкурентов (100 = слабые/отсутствуют, 0 = сильные сетевые).
+7. market_gap — рыночный зазор (100 = большой незакрытый спрос).
+8. noise_safety — шумовая обстановка и безопасность (100 = тихо и безопасно).
+9. traffic_quality — качество трафика для ЦА (не количество, а соответствие ЦА).
 
 ПРАВИЛА:
 - Используй только переданный адрес, город и OSM-контекст.
@@ -597,23 +559,17 @@ def build_batch_user_prompt(locations: List[dict], osm_by_key: Dict[str, dict], 
     for loc in locations:
         key = loc["key"]
         osm = osm_by_key.get(key, {})
-        params = loc.get("params", {})
+        p = loc.get("params", {})
         param_desc = []
-        if params.get("building_type") == "bc":
-            param_desc.append("Бизнес-центр")
-        elif params.get("building_type") == "mall":
-            param_desc.append("Торговый центр")
-        elif params.get("building_type") == "residential":
-            param_desc.append("Жилой дом")
-        elif params.get("building_type") == "standalone":
-            param_desc.append("Отдельное здание")
-        else:
-            param_desc.append("Другое")
-        param_desc.append("2+ этаж" if params.get("floor") == "upper" else "1 этаж")
-        param_desc.append("Отдельный вход" if params.get("separate_entrance") else "Нет отдельного входа")
-        param_desc.append("Видимость с улицы" if params.get("street_visibility") else "Нет видимости")
-        param_desc.append("Первая линия" if params.get("first_line") else "Не первая линия")
-
+        if p.get("building_type") == "bc": param_desc.append("Бизнес-центр")
+        elif p.get("building_type") == "mall": param_desc.append("Торговый центр")
+        elif p.get("building_type") == "residential": param_desc.append("Жилой дом")
+        elif p.get("building_type") == "standalone": param_desc.append("Отдельное здание")
+        else: param_desc.append("Другое")
+        param_desc.append("2+ этаж" if p.get("floor") == "upper" else "1 этаж")
+        param_desc.append("Отдельный вход" if p.get("separate_entrance") else "Нет отдельного входа")
+        param_desc.append("Видимость с улицы" if p.get("street_visibility") else "Нет видимости")
+        param_desc.append("Первая линия" if p.get("first_line") else "Не первая линия")
         chunks.append(f"""
 --- ЛОКАЦИЯ {key} ---
 Адрес: {loc["address"]}
@@ -734,13 +690,11 @@ def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict
 
 
 # ==============================================================================
-# HARD RULES / NO-GO (с явными параметрами)
+# HARD RULES
 # ==============================================================================
 def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List[str]:
     barriers = []
     c = osm.get("counts", {})
-
-    # Параметры локации
     if params.get("floor") == "upper":
         if params.get("building_type") in ("bc", "mall"):
             barriers.append("🚨 КРИТИЧНО: Объект на 2+ этаже в БЦ/ТЦ — нет видимости, сложная навигация, офисный трафик.")
@@ -756,8 +710,6 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
         barriers.append("⚠️ Торговый центр — сложная навигация, медицинский трафик нецелевой.")
     if not params.get("first_line", True):
         barriers.append("⚠️ Не первая линия — меньше проходного трафика, ниже узнаваемость.")
-
-    # OSM-данные
     if c.get("parking_500m", 0) == 0 and c.get("parking_1000m", 0) == 0:
         barriers.append("🚨 КРИТИЧНО: Нет парковки в радиусе 1 км по OSM.")
     elif c.get("parking_500m", 0) == 0:
@@ -770,14 +722,11 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
         barriers.append("⚠️ Очень высокая плотность конкурентов (3+ клиники в 300 м).")
     if full_profile.get("population_density", 0) <= 20:
         barriers.append("⚠️ Критически низкая плотность жилой застройки.")
-
     return barriers
 
 
 def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: List[str], params: dict) -> Tuple[float, float]:
     penalty = 0.0
-
-    # Штрафы за параметры локации
     if params.get("floor") == "upper":
         penalty += 20
     if not params.get("separate_entrance", True):
@@ -790,8 +739,6 @@ def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: Li
         penalty += 8
     if not params.get("first_line", True):
         penalty += 5
-
-    # Штрафы за OSM
     if full_profile.get("parking_supply", 0) <= 10:
         penalty += 15
     elif full_profile.get("parking_supply", 0) <= 30:
@@ -808,7 +755,6 @@ def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: Li
         penalty += 8
     if full_profile.get("population_density", 0) <= 20:
         penalty += 10
-
     penalty = min(penalty, 50.0)
     final = round(clamp(absolute_score - penalty), 1)
     return final, penalty
@@ -830,7 +776,7 @@ def calculate_confidence(ai_profile: dict, osm: dict) -> int:
 
 
 # ==============================================================================
-# FULL ANALYSIS PIPELINE
+# FULL ANALYSIS
 # ==============================================================================
 def resolve_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
     address_lower = address.lower()
@@ -889,7 +835,7 @@ def run_full_analysis(
         osm_scores_by_key[loc["key"]] = osm_to_factor_scores(osm_by_key[loc["key"]])
 
     if status_callback:
-        status_callback("2/3", "OSM готов. Запрашиваю AI-оценку (8 факторов)…")
+        status_callback("2/3", "OSM готов. Запрашиваю AI-оценку (9 факторов)…")
 
     ai_profiles = generate_profiles_batch_cached(
         api_key=api_key,
@@ -903,11 +849,10 @@ def run_full_analysis(
         key = loc["key"]
         full = dict(osm_scores_by_key[key])
         ai = ai_profiles.get(key, {})
-        for ai_key in ["income_fit", "age_fit", "family_profile", "daytime_balance",
+        for ai_key in ["income_fit", "age_fit", "gender_fit", "family_profile", "daytime_balance",
                        "competitor_strength", "market_gap", "noise_safety", "traffic_quality",
                        "profile_confidence", "evidence_quality"]:
             full[ai_key] = ai.get(ai_key, 50)
-        # Добавляем location_param_score
         loc_params = loc.get("params", {})
         loc_score, _ = compute_location_param_score(loc_params)
         full["location_param_score"] = loc_score
@@ -955,7 +900,6 @@ def run_full_analysis(
     if confidence < 55:
         verdict += " — НИЗКАЯ УВЕРЕННОСТЬ"
 
-    # Считаем применённые штрафы для отображения
     _, applied_penalties = compute_location_param_score(params)
 
     return {
@@ -991,7 +935,6 @@ model = st.text_input("Модель OpenAI", value=DEFAULT_MODEL,
 st.subheader("🏢 Параметры объекта (критично для оценки)")
 st.caption("Отметьте все, что соответствует вашему объекту. Каждый параметр влияет на итоговый score.")
 
-# Тип здания — radio (обязательный выбор)
 building_type = st.radio(
     "Тип здания",
     options=["residential", "standalone", "bc", "mall", "other"],
@@ -1003,10 +946,8 @@ building_type = st.radio(
         "other": "📦 Другое",
     }[x],
     horizontal=True,
-    help="БЦ и ТЦ дают штраф из-за офисного/торгового трафика и проблем с парковкой.",
 )
 
-# Этаж — radio
 col_f1, col_f2 = st.columns(2)
 with col_f1:
     floor = st.radio(
@@ -1014,9 +955,7 @@ with col_f1:
         options=["ground", "upper"],
         format_func=lambda x: "1 этаж / цоколь" if x == "ground" else "2+ этаж",
         horizontal=True,
-        help="2+ этаж — сильный штраф: нет видимости, сложная навигация.",
     )
-
 with col_f2:
     first_line = st.toggle(
         "✅ Первая линия (главная улица, видно с дороги)",
@@ -1024,7 +963,6 @@ with col_f2:
         help="Если объект во дворе или на второстепенной улице — отключите. Штраф −10.",
     )
 
-# Чекбоксы
 col_c1, col_c2 = st.columns(2)
 with col_c1:
     separate_entrance = st.toggle(
@@ -1039,7 +977,6 @@ with col_c2:
         help="Если нет витрины и вывеска не видна с улицы — отключите. Штраф −15.",
     )
 
-# Предпросмотр штрафов
 params = {
     "building_type": building_type,
     "floor": floor,
@@ -1149,32 +1086,20 @@ if "last_result" in st.session_state:
     st.subheader("📊 Результат анализа")
     st.markdown(f"### {result['address']}")
 
-    # Параметры объекта
     p = result["params"]
     param_tags = []
-    if p.get("building_type") == "bc":
-        param_tags.append("🏬 БЦ")
-    elif p.get("building_type") == "mall":
-        param_tags.append("🛒 ТЦ")
-    elif p.get("building_type") == "residential":
-        param_tags.append("🏠 Жилой дом")
-    elif p.get("building_type") == "standalone":
-        param_tags.append("🏢 Отдельное здание")
-    else:
-        param_tags.append("📦 Другое")
+    if p.get("building_type") == "bc": param_tags.append("🏬 БЦ")
+    elif p.get("building_type") == "mall": param_tags.append("🛒 ТЦ")
+    elif p.get("building_type") == "residential": param_tags.append("🏠 Жилой дом")
+    elif p.get("building_type") == "standalone": param_tags.append("🏢 Отдельное здание")
+    else: param_tags.append("📦 Другое")
     param_tags.append("2+ этаж" if p.get("floor") == "upper" else "1 этаж")
-    if p.get("separate_entrance"):
-        param_tags.append("✅ Отдельный вход")
-    else:
-        param_tags.append("❌ Нет отдельного входа")
-    if p.get("street_visibility"):
-        param_tags.append("✅ Видимость")
-    else:
-        param_tags.append("❌ Нет видимости")
-    if p.get("first_line"):
-        param_tags.append("✅ 1-я линия")
-    else:
-        param_tags.append("❌ Не 1-я линия")
+    if p.get("separate_entrance"): param_tags.append("✅ Отдельный вход")
+    else: param_tags.append("❌ Нет отдельного входа")
+    if p.get("street_visibility"): param_tags.append("✅ Видимость")
+    else: param_tags.append("❌ Нет видимости")
+    if p.get("first_line"): param_tags.append("✅ 1-я линия")
+    else: param_tags.append("❌ Не 1-я линия")
     st.caption(" · ".join(param_tags))
 
     m1, m2, m3, m4 = st.columns(4)
@@ -1198,14 +1123,31 @@ if "last_result" in st.session_state:
 
     st.caption(f"Базовый score: {result['absolute_base']}; hard-penalty: −{result['hard_penalty']}")
 
-    # Применённые штрафы параметров
+    # Расшифровка параметров локации
     if result["applied_penalties"]:
-        with st.expander("📐 Применённые штрафы за параметры локации"):
+        with st.expander("📐 Расчёт параметров локации"):
+            st.markdown("База: **100** (идеальные параметры)")
             for name, penalty, desc in result["applied_penalties"]:
-                st.markdown(f"**−{penalty}** — {name}: {desc}")
+                st.markdown(f"−**{penalty}** — *{name}*: {desc}")
+            st.markdown(f"**Итог: {profile.get('location_param_score', 0):.0f}/100**")
 
     # BENCHMARK
     st.subheader("🎯 Benchmark")
+    with st.expander("Как считается similarity?"):
+        st.markdown("""
+**Формула:** взвешенная Manhattan distance по 21 фактору.
+
+```
+distance = Σ |target_i − benchmark_i| × weight_i  /  Σ weight_i
+similarity = 100 − distance
+```
+
+- 100% = профили идентичны
+- 0% = максимально разные профили
+- Веса учитывают и вес фактора в блоке, и вес блока в итоге
+- Например, разница в парковке на 80 баллов с весом блока 20% даст вклад ~16 баллов distance
+""")
+
     bm1, bm2, bm3 = st.columns(3)
     with bm1:
         st.metric("Ближайший успешный", f"{benchmark['success_similarity'][0][1]}%" if benchmark["success_similarity"] else "—")
@@ -1281,12 +1223,12 @@ if "last_result" in st.session_state:
         rows.append({
             "": status,
             "Блок": block_labels[block],
-            "Фактор": factor,
+            "Фактор": FACTOR_LABEL.get(factor, factor),
             "Score": round(suitability, 1),
             "Источник": src_icon,
         })
     df_f = pd.DataFrame(rows)
-    st.dataframe(df_f, use_container_width=True, hide_index=True, height=520)
+    st.dataframe(df_f, use_container_width=True, hide_index=True, height=560)
 
     # STRENGTHS / RISKS
     st.subheader("💪 Сильные стороны")
@@ -1317,7 +1259,7 @@ if "last_result" in st.session_state:
         st.warning("Overpass временно недоступен. AI-профиль рассчитан, но confidence снижен.")
 
     st.caption(f"Координаты: {result['latitude']:.6f}, {result['longitude']:.6f} · Модель: {model}")
-    with st.expander("Показать полный профиль"):
+    with st.expander("Показать полный профиль (JSON)"):
         st.json(profile)
 
 
@@ -1328,18 +1270,18 @@ with st.sidebar:
     st.header("Сессия")
     st.success("OpenAI API-ключ активен.")
     st.markdown("""
-### Архитектура v3.1
+### Архитектура v3.2
 
 **Параметры локации** (15%)
-- Тип здания, этаж, вход, видимость, линия
-- Каждый параметр — явный штраф
+- 5 явных параметров (чекбоксы)
+- Каждый — конкретный штраф
 
 **Парковка + Доступность** (20%)
 - OSM: парковки, дороги, транспорт
 
 **Спрос + ЦА** (20%)
 - OSM: плотность жилой застройки
-- AI: доходы, возраст, семьи
+- AI: доходы, возраст, **пол**, семьи
 
 **Конкуренция** (15%)
 - OSM: количество клиник
@@ -1352,12 +1294,10 @@ with st.sidebar:
 - OSM: тип дорог, видимость
 - AI: шум, безопасность
 
-**Hard rules:**
-- Штрафы до 50 баллов
-- Критерии: парковка, подъезд, параметры
+**Hard rules:** штрафы до 50 баллов
 
-**Benchmark:**
-- 4 успешных + 3 слабых
+**Benchmark:** 4 успешных + 3 слабых
+- Similarity = 100 − взвешенная Manhattan distance
 - Статус НЕ передаётся AI
 """)
     if st.button("Сбросить OpenAI ключ"):
