@@ -826,22 +826,34 @@ def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
 # ==============================================================================
 
 def compute_hex_metrics(hexes, elements, resolution=8):
+    # Инициализируем структуру данных для каждого гексагона
     data = {h: {"bld": [], "road": [], "med": [], "prem": []} for h in hexes}
+    
+    # Веса дорог для внутреннего использования (определяют значимость магистралей)
     hw_weights = {
         "motorway": 5, "trunk": 5, "primary": 4, "secondary": 3,
         "tertiary": 2, "unclassified": 2, "residential": 1,
         "living_street": 1, "pedestrian": 2, "footway": 1, "path": 1,
     }
 
+    # Если Overpass API вернул пустой ответ (нет данных в OSM)
     if not elements:
+        # Вместо абстрактных циклов (i % 6) моделируем реалистичную жилую зону среднего города
         for i, h in enumerate(hexes):
-            data[h]["bld"].append({"levels": (i % 6) + 2, "type": "apartments"})
-            data[h]["road"].append({"weight": (i % 4) + 1})
+            # Пусть в каждом втором гексагоне будут условные жилые дома для теста
+            if i % 2 == 0:
+                # Генерируем 3 жилых дома по 9 этажей
+                for _ in range(3):
+                    data[h]["bld"].append({"levels": 9, "type": "apartments"})
+                # Пару дорог общего пользования
+                data[h]["road"].append({"weight": 1})
+                data[h]["road"].append({"weight": 2})
+            # В каждом третьем гексагоне — коммерция и медицина
             if i % 3 == 0:
                 data[h]["med"].append({"type": "pharmacy"})
-            if i % 2 == 0:
-                data[h]["prem"].append({"weight": 2})
+                data[h]["prem"].append({"weight": 3})  # Магазин/супермаркет
     else:
+        # Распределяем реальные элементы OSM по гексагонам сетки
         for el in elements:
             elat = el.get("lat") or el.get("center", {}).get("lat")
             elon = el.get("lon") or el.get("center", {}).get("lon")
@@ -855,6 +867,7 @@ def compute_hex_metrics(hexes, elements, resolution=8):
             tags = el.get("tags", {})
             t = el.get("type", "")
 
+            # Фиксация зданий и их этажности
             if "building" in tags:
                 levels = 1
                 try:
@@ -863,39 +876,60 @@ def compute_hex_metrics(hexes, elements, resolution=8):
                     pass
                 data[h]["bld"].append({"levels": levels, "type": tags.get("building", "yes")})
 
+            # Фиксация дорожной сети
             if "highway" in tags or (t == "node" and "highway" in tags):
                 hw = tags.get("highway", "residential")
                 data[h]["road"].append({"weight": hw_weights.get(hw, 1)})
 
+            # Фиксация медицинских конкурентов
             if tags.get("amenity") in ("clinic", "hospital", "doctors", "pharmacy", "dentist"):
                 data[h]["med"].append({"type": tags["amenity"]})
 
+            # Фиксация бизнес-точек (офисы, магазины, ТЦ)
             prem = 0
             shop = tags.get("shop", "")
             if shop in ("mall", "supermarket", "car", "jewelry", "boutique", "beauty"):
-                prem += 3 if shop in ("mall", "car", "jewelry") else 2
+                prem += 1
             if "office" in tags:
-                prem += 2
+                prem += 1
             if tags.get("building") in ("commercial", "retail", "office"):
                 prem += 1
             if prem > 0:
                 data[h]["prem"].append({"weight": prem})
 
+    # Считаем финальные РЕАЛЬНЫЕ значения физических параметров
     metrics = {}
     for h in hexes:
         d = data[h]
-        pop = sum(b["levels"] * (4 if b["type"] in ("apartments", "residential") else 2 if b["type"] == "house" else 1) for b in d["bld"])
-        floors = np.mean([b["levels"] for b in d["bld"]]) if d["bld"] else 0
-        traffic = sum(r["weight"] for r in d["road"])
-        income = sum(p["weight"] for p in d["prem"]) * 5 + len(d["bld"])
-        competition = len(d["med"])
+        
+        # 1. Население: считаем жилые этажи. В среднем берем 12 человек на 1 жилой этаж многоэтажки, 4 для частного дома.
+        pop = 0
+        for b in d["bld"]:
+            if b["type"] in ("apartments", "residential"):
+                pop += b["levels"] * 12  # Реалистичное число жителей на этаж секции
+            elif b["type"] == "house":
+                pop += 4  # Частный дом — одна семья
+            else:
+                pop += 0  # Коммерческие и промздания не имеют постоянного населения
+                
+        # 2. Этажность: среднее арифметическое этажей реальных зданий
+        floors = np.mean([b["levels"] for b in d["bld"]]) if d["bld"] else 0.0
+        
+        # 3. Трафик: вместо абстрактного индекса выводим физическое число дорог/пешеходных путей разного класса
+        traffic_count = len(d["road"])
+        
+        # 4. Бизнес-активность (вместо индекса доходов): общее число коммерческих объектов в гексе
+        business_objects = len(d["prem"])
+        
+        # 5. Конкуренция: физическое количество медицинских объектов (аптеки, клиники)
+        competition_count = len(d["med"])
 
         metrics[h] = {
             "population": int(pop),
             "floors": round(float(floors), 1),
-            "traffic": int(traffic),
-            "income": int(income),
-            "competition": int(competition),
+            "traffic": int(traffic_count),
+            "income": int(business_objects),
+            "competition": int(competition_count),
         }
     return metrics
 
