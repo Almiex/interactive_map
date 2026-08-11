@@ -988,13 +988,42 @@ if "last_result" in st.session_state:
                 st_folium(
                     m,
                     width="100%",
-                    height=600,returned_objects=[],key="map_fixed_v5_final")st.caption("Справочно: топ-5 гексов по выбранному показателю")df_hex = pd.DataFrame([{"h3_index": h, **vals} for h, vals in hex_metrics.items()])if not df_hex.empty:df_hex = df_hex.sort_values(by=filter_key, ascending=False).head(5)st.dataframe(df_hex, use_container_width=True, hide_index=True)except Exception as e:st.error(f"Ошибка построения карты: {e}")else:st.info("Запустите анализ локации, чтобы построить карту с гексами.")
+                    height=600,
+                    returned_objects=[],
+                    key="map_fixed_v5_final"
+                )
 
+                st.caption("Справочно: топ-5 гексов по выбранному показателю")
+                
+                df_hex = pd.DataFrame([
+                    {"h3_index": h, **vals} for h, vals in hex_metrics.items()
+                ])
+                
+                if not df_hex.empty:
+                    df_hex = df_hex.sort_values(by=filter_key, ascending=False).head(5)
+                    st.dataframe(df_hex, use_container_width=True, hide_index=True)
+
+        except Exception as e:
+            st.error(f"Ошибка построения карты: {e}")
+            
+else:
+    st.info("Запустите анализ локации, чтобы построить карту с гексами.")
 #==============================================================================
 #4. БОКОВАЯ ПАНЕЛЬ СЕССИИ
 #==============================================================================
-with st.sidebar:st.header("Сессия")st.success("OpenAI API-ключ активен для текущей сессии.")if st.button("Сбросить OpenAI ключ"):st.session_state.clear()st.cache_data.clear()st.rerun()st.caption("После изменения портрета пациента или адреса просто нажмите ""«Запустить анализ». Ключ повторно вводить не нужно.")
-
+with st.sidebar:
+    st.header("Сессия")
+    st.success("OpenAI API-ключ активен для текущей сессии.")
+    
+    if st.button("Сбросить OpenAI ключ"):
+        st.session_state.clear()
+        st.cache_data.clear()
+        st.rerun()
+        
+    st.caption(
+        "После изменения портрета пациента или адреса просто нажмите "
+        "«Запустить анализ». Ключ повторно вводить не нужно."
+    )
 
 
 
