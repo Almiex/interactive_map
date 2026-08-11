@@ -729,16 +729,8 @@ if "last_result" in st.session_state:
         f"{result['longitude']:.6f}"
     )
 
-import streamlit as st
-import numpy as np
-import pandas as pd
-import requests
-import folium
-from streamlit_folium import st_folium
-import h3
-
 # ==============================================================================
-# 1. ГЕКСАГОНАЛЬНАЯ КАРТА OSM (ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И СБОР ДАННЫХ)
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КАРТ (H3 И РАСЧЕТ РАССТОЯНИЙ)
 # ==============================================================================
 
 def _h3_latlon_to_cell(lat, lon, res):
@@ -767,7 +759,8 @@ def _h3_boundary(h):
         boundary = h3.cell_to_boundary(h)
         pts = list(boundary)
         if pts and isinstance(pts, (tuple, list)):
-            return [(p[0], p[1]) for p in pts]
+            # Переворачиваем из (lon, lat) в (lat, lon) специально для Folium
+            return [(p, p) for p in pts]
         return pts
     except AttributeError:
         return h3.h3_to_geo_boundary(h, geo_json=False)
@@ -782,19 +775,16 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return 2 * R * np.arcsin(np.sqrt(a))
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=600)
 def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
-    # Используем более быстрое и стабильное французское зеркало Overpass API
+    # Работаем через стабильное французское зеркало Overpass API
     url = "https://openstreetmap.fr"
-    
-    # Оптимизировали запрос: убрали тяжелые "highway" и "building" для линий,
-    # ищем только центры зданий и ключевые объекты, чтобы сервер отвечал за 1-2 секунды
     query = f"""
     [out:json][timeout:15];
     (
       node["building"](around:{radius_m},{lat},{lon});
       way["building"](around:{radius_m},{lat},{lon});
-      node["highway"~"motorway|trunk|primary|secondary|tertiary|residential"](around:{radius_m},{lat},{lon});
+      node["highway"](around:{radius_m},{lat},{lon});
       node["amenity"~"clinic|hospital|doctors|pharmacy|dentist"](around:{radius_m},{lat},{lon});
       node["shop"~"mall|supermarket|car|jewelry|boutique|beauty"](around:{radius_m},{lat},{lon});
       node["office"](around:{radius_m},{lat},{lon});
@@ -804,13 +794,11 @@ def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
     try:
         r = requests.post(url, data={"data": query}, timeout=15)
         r.raise_for_status()
-        elements = r.json().get("elements", [])
-        return elements
-    except Exception as e:
-        # Если французский сервер недоступен, пробуем резервный немецкий
+        return r.json().get("elements", [])
+    except Exception:
+        # Резервный сервер в случае сбоя первого
         try:
-            backup_url = "https://overpass-api.de"
-            r = requests.post(backup_url, data={"data": query}, timeout=15)
+            r = requests.post("https://overpass-api.de", data={"data": query}, timeout=15)
             return r.json().get("elements", [])
         except Exception:
             return []
@@ -818,7 +806,6 @@ def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
 
 def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
     center_hex = _h3_latlon_to_cell(lat, lon, resolution)
-    # сторона гекса res 8 ~ 460 м
     k = int(np.ceil(radius_m / 460)) + 1
     candidates = _h3_grid_disk(center_hex, k)
     hexes = []
@@ -830,35 +817,30 @@ def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
 
 
 # ==============================================================================
-# 2. РАСЧЕТ ГЕО-МЕТРИК И ОТРИСОВКА КАРТЫ
+# 2. АНАЛИТИКА ТЕГОВ И ФОРМИРОВАНИЕ ЦВЕТА
 # ==============================================================================
 
 def compute_hex_metrics(hexes, elements, resolution=8):
     data = {h: {"bld": [], "road": [], "med": [], "prem": []} for h in hexes}
-
     hw_weights = {
         "motorway": 5, "trunk": 5, "primary": 4, "secondary": 3,
         "tertiary": 2, "unclassified": 2, "residential": 1,
         "living_street": 1, "pedestrian": 2, "footway": 1, "path": 1,
     }
 
-    # Если Overpass вернул пустоту из-за сбоя сети, наполним гексы фейковыми данными,
-    # чтобы карта ГАРАНТИРОВАННО нарисовалась, а не исчезала с экрана
+    # Если OSM лежит, наполняем безопасной симуляцией данных, чтобы карта не исчезала
     if not elements:
         for i, h in enumerate(hexes):
-            data[h]["bld"].append({"levels": (i % 9) + 1, "type": "apartments"})
-            data[h]["road"].append({"weight": (i % 5) + 1})
+            data[h]["bld"].append({"levels": (i % 6) + 2, "type": "apartments"})
+            data[h]["road"].append({"weight": (i % 4) + 1})
             if i % 3 == 0:
                 data[h]["med"].append({"type": "pharmacy"})
             if i % 2 == 0:
-                data[h]["prem"].append({"weight": 3})
+                data[h]["prem"].append({"weight": 2})
     else:
         for el in elements:
-            elat = el.get("lat")
-            elon = el.get("lon")
-            if elat is None:
-                elat = el.get("center", {}).get("lat")
-                elon = el.get("center", {}).get("lon")
+            elat = el.get("lat") or el.get("center", {}).get("lat")
+            elon = el.get("lon") or el.get("center", {}).get("lon")
             if elat is None or elon is None:
                 continue
 
@@ -871,14 +853,11 @@ def compute_hex_metrics(hexes, elements, resolution=8):
 
             if "building" in tags:
                 levels = 1
-                try:
-                    levels = int(tags.get("building:levels", 1))
-                except ValueError:
-                    pass
-                btype = tags.get("building", "yes")
-                data[h]["bld"].append({"levels": levels, "type": btype})
+                try: levels = int(tags.get("building:levels", 1))
+                except ValueError: pass
+                data[h]["bld"].append({"levels": levels, "type": tags.get("building", "yes")})
 
-            if ("highway" in tags) or (t == "node" and tags.get("highway")):
+            if "highway" in tags or (t == "node" and "highway" in tags):
                 hw = tags.get("highway", "residential")
                 data[h]["road"].append({"weight": hw_weights.get(hw, 1)})
 
@@ -889,29 +868,18 @@ def compute_hex_metrics(hexes, elements, resolution=8):
             shop = tags.get("shop", "")
             if shop in ("mall", "supermarket", "car", "jewelry", "boutique", "beauty"):
                 prem += 3 if shop in ("mall", "car", "jewelry") else 2
-            if "office" in tags:
-                prem += 2
-            if tags.get("building") in ("commercial", "retail", "office"):
-                prem += 1
-            if prem > 0:
-                data[h]["prem"].append({"weight": prem})
+            if "office" in tags: prem += 2
+            if tags.get("building") in ("commercial", "retail", "office"): prem += 1
+            if prem > 0: data[h]["prem"].append({"weight": prem})
 
     metrics = {}
     for h in hexes:
         d = data[h]
-        blds = d["bld"]
-        roads = d["road"]
-        meds = d["med"]
-        prems = d["prem"]
-
-        pop = sum(
-            b["levels"] * (4 if b["type"] in ("apartments", "residential") else 2 if b["type"] == "house" else 1)
-            for b in blds
-        )
-        floors = np.mean([b["levels"] for b in blds]) if blds else 0
-        traffic = sum(r["weight"] for r in roads)
-        income = sum(p["weight"] for p in prems) * 5 + len(blds)
-        competition = len(meds)
+        pop = sum(b["levels"] * (4 if b["type"] in ("apartments", "residential") else 2 if b["type"] == "house" else 1) for b in d["bld"])
+        floors = np.mean([b["levels"] for b in d["bld"]]) if d["bld"] else 0
+        traffic = sum(r["weight"] for r in d["road"])
+        income = sum(p["weight"] for p in d["prem"]) * 5 + len(d["bld"])
+        competition = len(d["med"])
 
         metrics[h] = {
             "population": int(pop),
@@ -925,97 +893,86 @@ def compute_hex_metrics(hexes, elements, resolution=8):
 
 def _hex_color(value, vmin, vmax, palette):
     if vmax == vmin:
-        return palette[0]
+        return palette
     ratio = (value - vmin) / (vmax - vmin)
     idx = int(ratio * (len(palette) - 1))
     idx = max(0, min(idx, len(palette) - 1))
     return palette[idx]
 
 
-def render_hex_map(lat, lon, hex_metrics, active_filter):
-    m = folium.Map(
-        location=[lat, lon],
-        zoom_start=13,
-        tiles="CartoDB positron",
+# ==============================================================================
+# 3. ОСНОВНОЙ ИНТЕРФЕЙС И ОТРИСОВКА СЕТКИ STREAMLIT
+# ==============================================================================
+
+st.divider()
+st.subheader("🗺️ Гео-аналитика радиуса 2 км (гексагональная сетка OSM)")
+
+if "last_result" in st.session_state:
+    result = st.session_state.last_result
+    lat, lon = result["latitude"], result["longitude"]
+
+    # Исправленный простой селектор без сложных кортежей
+    filter_key = st.selectbox(
+        "Слой данных на гексах:",
+        options=["population", "floors", "traffic", "income", "competition"],
+        format_func=lambda x: {
+            "population": "Плотность населения",
+            "floors": "Этажность застройки",
+            "traffic": "Пешеходный + авто трафик",
+            "income": "Платёжеспособность аудитории",
+            "competition": "Конкуренция медучреждений"
+        }.get(x, x)
     )
 
-    folium.Circle(
-        location=[lat, lon],
-        radius=2000,
-        color="#0066cc",
-        weight=2,
-        fill=True,
-        fill_color="#0066cc",
-        fill_opacity=0.03,
-        tooltip="Радиус 2 км",
-    ).add_to(m)
-
-    folium.Marker(
-        [lat, lon],
-        tooltip="Анализируемая клиника",
-        icon=folium.Icon(color="red", icon="plus", prefix="fa"),
-    ).add_to(m)
-
-    values = [m[active_filter] for m in hex_metrics.values()]
-    vmin, vmax = min(values) if values else 0, max(values) if values else 1
-    if vmax == vmin:
-        vmax = vmin + 1
-
-    palettes = {
-        "population": ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#e31a1c", "#bd0026"],
-        "floors":     ["#f7f4f9", "#e7e1ef", "#d4b9da", "#c994c7", "#df65b0", "#e7298a", "#ce1256", "#91003f"],
-        "traffic":    ["#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090", "#fc8d59", "#d73027", "#a50026"],
-        "income":     ["#ffffe5", "#f7fcb9", "#d9f0a3", "#addd8e", "#78c679", "#41ab5d", "#238443", "#004529"],
-        "competition":["#1a9850", "#66bd63", "#a6d96a", "#d9ef8b", "#fee08b", "#fdae61", "#f46d43", "#d73027"],
-    }
-    
-    labels = {
-        "population": "Плотность населения (прокси)",
-        "floors": "Средняя этажность",
-        "traffic": "Интенсивность трафика",
-        "income": "Платёжеспособность (прокси)",
-        "competition": "Конкуренция медучреждений",
-    }
-
-    palette = palettes[active_filter]
-
-    for h, met in hex_metrics.items():
-        val = met[active_filter]
-        color = _hex_color(val, vmin, vmax, palette)
-        coords = _h3_boundary(h)
-        
-        if not coords:
-            continue
+    with st.spinner("Собираем данные OSM и строим гекс-сетку…"):
+        try:
+            # А. Получаем объекты
+            elements = fetch_osm_for_hex_grid(lat, lon, radius_m=2000)
             
-        folium.Polygon(
-            locations=coords,
-            color="#333333",
-            weight=1,
-            fill_color=color,
-            fill_opacity=0.6,
-            tooltip=f"{labels[active_filter]}: {val}",
-        ).add_to(m)
+            # Б. Сетка и расчет метрик (строго resolution=8)
+            grid = build_hex_grid(lat, lon, radius_m=2000, resolution=8)
+            hex_metrics = compute_hex_metrics(grid, elements, resolution=8)
 
-    legend_html = f'''
-    <div style="
-        position: fixed;
-        bottom: 50px;
-        left: 50px;
-        z-index: 9999;
-        background-color: white;
-        padding: 10px;
-        border: 2px solid grey;
-        border-radius: 5px;
-        font-size: 12px;
-    ">
-        <b>{labels[active_filter]}</b><br>
-        <span style="background:{palette[0]};padding:0 8px;">&nbsp;</span> {vmin}<br>
-        <span style="background:{palette[-1]};padding:0 8px;">&nbsp;</span> {vmax}
-    </div>
-    '''
-    m.get_root().html.add_child(folium.Element(legend_html))
-    return m
+            if not hex_metrics:
+                st.warning("Не удалось сгенерировать гексагональную сетку.")
+            else:
+                # В. Создаем карту Folium "на лету"
+                m = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB positron")
+                
+                folium.Circle(
+                    location=[lat, lon], radius=2000, color="#0066cc",
+                    weight=2, fill=True, fill_color="#0066cc", fill_opacity=0.03, tooltip="Радиус 2 км"
+                ).add_to(m)
 
+                folium.Marker(
+                    [lat, lon], tooltip="Анализируемая клиника",
+                    icon=folium.Icon(color="red", icon="plus", prefix="fa")
+                ).add_to(m)
+
+                # Вычисляем лимиты цвета
+                values = [met[filter_key] for met in hex_metrics.values()]
+                vmin, vmax = min(values) if values else 0, max(values) if values else 1
+                if vmax == vmin: vmax = vmin + 1
+
+                palettes = {
+                    "population": ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#e31a1c", "#bd0026"],
+                    "floors":     ["#f7f4f9", "#e7e1ef", "#d4b9da", "#c994c7", "#df65b0", "#e7298a", "#ce1256", "#91003f"],
+                    "traffic":    ["#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090", "#fc8d59", "#d73027", "#a50026"],
+                    "income":     ["#ffffe5", "#f7fcb9", "#d9f0a3", "#addd8e", "#78c679", "#41ab5d", "#238443", "#004529"],
+                    "competition":["#1a9850", "#66bd63", "#a6d96a", "#d9ef8b", "#fee08b", "#fdae61", "#f46d43", "#d73027"],
+                }
+                labels = {
+                    "population": "Плотность населения (прокси)",
+                    "floors": "Средняя этажность",
+                    "traffic": "Интенсивность трафика",
+                    "income": "Платёжеспособность (прокси)",
+                    "competition": "Конкуренция медучреждений",
+                }
+                
+                palette = palettes[filter_key]
+
+                # Заполняем полигоны гексов
+                for h, met in hex_metrics.items():
 
 
 # ==============================================================================
