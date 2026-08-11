@@ -684,7 +684,7 @@ if "last_result" in st.session_state:
     for factor, label in FACTOR_NAMES.items():
         value = getattr(scores, factor)
 
-        if value >= 85:
+        if value >= 75:
             advantages.append(
                 f"**{label}** — {value}/100"
             )
@@ -694,7 +694,7 @@ if "last_result" in st.session_state:
             st.markdown(f"🟢 {item}")
     else:
         st.write(
-            "Явно выраженных сверхвысоких показателей (>85) не обнаружено."
+            "Явно выраженных сверхвысоких показателей (>75) не обнаружено."
         )
 
     st.subheader("⚠️ Выявленные барьеры, риски и ограничения")
@@ -711,7 +711,7 @@ if "last_result" in st.session_state:
                 "Потенциально блокирующий фактор."
             )
 
-        elif value < 75:
+        elif value < 70:
             risks.append(
                 f"🟡 **{label}** — {value}/100: "
                 "ограничение по фактору, требует контроля "
