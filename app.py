@@ -1,926 +1,748 @@
 # -*- coding: utf-8 -*-
-"""
-🏥 GeoClinic Analyst — Streamlit-версия
-Анализ локации под многофункциональную клинику
-"""
 
-import streamlit as st
-import folium
-from streamlit_folium import st_folium
-import pandas as pd
-import geopandas as gpd
-import h3
-import osmnx as ox
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
-from shapely.geometry import Polygon
-import branca.colormap as cm
-import numpy as np
 import time
+import requests
+import pandas as pd
+import numpy as np
+import streamlit as st
 
-# ═══════════════════════════════════════════════════════════════
-# НАСТРОЙКА СТРАНИЦЫ
-# ═══════════════════════════════════════════════════════════════
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+
+# ==============================================================================
+# НАСТРОЙКИ STREAMLIT
+# ==============================================================================
+
 st.set_page_config(
-    page_title="GeoClinic Analyst",
-    page_icon="🏥",
+    page_title="Геомаркетинговый анализ клиники",
+    page_icon="📍",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1f2937;
-        margin-bottom: 0.3rem;
-    }
-    .sub-header {
-        font-size: 1.1rem;
-        color: #6b7280;
-        margin-bottom: 1.5rem;
-    }
-    .stProgress > div > div > div > div {
-        background-color: #3b82f6;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.title("📍 Геомаркетинговый анализ локации клиники")
+st.caption("OpenAI API-ключ хранится только в текущей сессии и не зашит в код.")
 
-# ═══════════════════════════════════════════════════════════════
-# КОНСТАНТЫ
-# ═══════════════════════════════════════════════════════════════
-H3_RESOLUTION = 9  # ~182 м
-AMENITY_TRANSLATION = {
-    "hospital": "Больницы",
-    "clinic": "Клиники и медцентры",
-    "doctors": "Врачебные кабинеты",
-    "dentist": "Стоматологии",
-    "pharmacy": "Аптеки",
+
+# ==============================================================================
+# OPENAI KEY — ЗАПРАШИВАЕМ ОДИН РАЗ ЗА СЕССИЮ
+# ==============================================================================
+
+if "openai_key" not in st.session_state:
+    st.session_state.openai_key = None
+
+if not st.session_state.openai_key:
+    st.info("Введите ваш OpenAI API-ключ. Он не хранится в коде.")
+    key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        placeholder="sk-...",
+    )
+
+    if st.button("Продолжить", type="primary"):
+        if not key.strip():
+            st.error("Введите OpenAI API-ключ.")
+            st.stop()
+
+        st.session_state.openai_key = key.strip()
+        st.rerun()
+
+    st.stop()
+
+
+client = OpenAI(api_key=st.session_state.openai_key)
+
+
+# ==============================================================================
+# СХЕМЫ OPENAI
+# ==============================================================================
+
+class ComprehensiveGeoSchema(BaseModel):
+    first_line_location: int = Field(
+        description="Видимость фасада с главной улицы, отсутствие барьеров, отдельный вход (1-10)"
+    )
+    pedestrian_traffic: int = Field(
+        description="Интенсивность пешеходного трафика непосредственно у дверей объекта (1-10)"
+    )
+    car_traffic: int = Field(
+        description="Плотность и объем автомобильного потока на прилегающей улице (1-10)"
+    )
+    parking_availability_real: int = Field(
+        description="РЕАЛЬНАЯ доступность парковки для пациентов (1-10)"
+    )
+    info_noise_barrier: int = Field(
+        description="Уровень информационного шума (1-10)"
+    )
+    location_vibe_home_friendly: int = Field(
+        description="Вайб локации 'уютная клиника у дома' (1-10)"
+    )
+    bus_stop_300m: int
+    pvz_wildberries_ozon_yandex_1000m: int
+    shopping_mall_1000m: int
+    supermarket_500m: int
+    supermarket_1000m: int
+    fitness_1000m: int
+    business_centre_1000m: int
+    pharmacy_500m: int
+    clinic_competitor_500m: int
+    clinic_competitor_1000m: int
+    hospital_1000m: int
+    population_500m: int
+    population_1000m: int
+    population_3000m: int
+    building_density_score: int
+    average_floors: int
+    average_income_rub: int
+    local_avg_age: float
+    local_share_female: float
+    local_share_male: float
+
+
+class TargetScoreSchema(BaseModel):
+    first_line_location_score: int = Field(ge=0, le=100)
+    pedestrian_traffic_score: int = Field(ge=0, le=100)
+    car_traffic_score: int = Field(ge=0, le=100)
+    parking_availability_score: int = Field(ge=0, le=100)
+    info_noise_score: int = Field(ge=0, le=100)
+    location_vibe_score: int = Field(ge=0, le=100)
+    target_audience_match_score: int = Field(ge=0, le=100)
+    financial_match_score: int = Field(ge=0, le=100)
+    medical_synergy_score: int = Field(ge=0, le=100)
+
+
+# ==============================================================================
+# ЭТАЛОННАЯ БАЗА И КАЛИБРОВКА
+# ==============================================================================
+
+DATA_CLINICS = [
+    {
+        "address": "Красноярск, ул. 9 Мая, 19а",
+        "status": "успешный",
+        "latitude": 56.067749,
+        "longitude": 92.933822,
+    },
+    {
+        "address": "Красноярск, ул. Ладо Кецховели, 34",
+        "status": "успешный",
+        "latitude": 56.017160,
+        "longitude": 92.813882,
+    },
+    {
+        "address": "Екатеринбург, ул. Советская, 42",
+        "status": "успешный",
+        "latitude": 56.855058,
+        "longitude": 60.639260,
+    },
+    {
+        "address": "Казань, ул. Алексея Козина, 2",
+        "status": "успешный",
+        "latitude": 55.814523,
+        "longitude": 49.141033,
+    },
+    {
+        "address": "Новосибирск, ул. Новогодняя, 23/1",
+        "status": "слабый",
+        "latitude": 54.987320,
+        "longitude": 82.911925,
+    },
+    {
+        "address": "Челябинск, ул.Худякова 10",
+        "status": "слабый",
+        "latitude": 55.148154,
+        "longitude": 61.365313,
+    },
+    {
+        "address": "Самара, ул. Академика Платонова, 10 корпус 3",
+        "status": "слабый",
+        "latitude": 53.218579,
+        "longitude": 50.176465,
+    },
+]
+
+
+def fetch_comprehensive_profile_via_gpt(address, lat, lon, status):
+    system_prompt = (
+        "Ты — ведущая экспертная система ритейл-анализа и геомаркетинга. "
+        "Проанализируй локацию. Оцени параметры ритейла и трафика по шкале 1-10, "
+        "а также рассчитай количественную демографию. "
+        "Особое внимание удели барьерам: если точка находится в офисном БЦ "
+        "или деловом сити, то доступность парковки для пациентов "
+        "(parking_availability_real) падает до 1-2, уровень инфо-шума "
+        "(info_noise_barrier) критический (1-3 балла, вывеска затеряется), "
+        "вайб уютной клиники у дома (location_vibe_home_friendly) равен 1-3, "
+        "а в трафике идет перекос в сторону молодых мужчин-офисников. "
+        f"Учти статус объекта в нашей базе: {status}."
+    )
+
+    try:
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Адрес: {address}, {lat}, {lon}",
+                },
+            ],
+            response_format=ComprehensiveGeoSchema,
+            timeout=30,
+        )
+
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            raise ValueError("OpenAI не вернул структурированный ответ.")
+
+        return parsed.model_dump()
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Не удалось откалибровать эталонную точку {address}: {e}"
+        ) from e
+
+
+@st.cache_data(show_spinner=False)
+def run_calibration(api_key):
+    """
+    Калибровка выполняется один раз для конкретного API-ключа.
+    API-ключ не выводится на экран и не сохраняется в коде.
+    """
+    calibration_client = OpenAI(api_key=api_key)
+
+    def fetch(address, lat, lon, status):
+        system_prompt = (
+            "Ты — ведущая экспертная система ритейл-анализа и геомаркетинга. "
+            "Проанализируй локацию. Оцени параметры ритейла и трафика по шкале 1-10, "
+            "а также рассчитай количественную демографию. "
+            "Особое внимание удели барьерам: если точка находится в офисном БЦ "
+            "или деловом сити, то доступность парковки для пациентов "
+            "(parking_availability_real) падает до 1-2, уровень инфо-шума "
+            "(info_noise_barrier) критический (1-3 балла), "
+            "вайб уютной клиники у дома (location_vibe_home_friendly) равен 1-3, "
+            "а в трафике идет перекос в сторону молодых мужчин-офисников. "
+            f"Учти статус объекта в нашей базе: {status}."
+        )
+
+        response = calibration_client.beta.chat.completions.parse(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Адрес: {address}, {lat}, {lon}",
+                },
+            ],
+            response_format=ComprehensiveGeoSchema,
+            timeout=30,
+        )
+
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            raise ValueError("OpenAI не вернул структурированный ответ.")
+
+        return parsed.model_dump()
+
+    df_etalon = pd.DataFrame(DATA_CLINICS)
+    collected_profiles = []
+
+    for _, row in df_etalon.iterrows():
+        collected_profiles.append(
+            fetch(
+                row["address"],
+                row["latitude"],
+                row["longitude"],
+                row["status"],
+            )
+        )
+
+    df_features = pd.DataFrame(collected_profiles)
+    df_geoprofile = pd.concat([df_etalon, df_features], axis=1)
+
+    metadata_cols = [
+        "address",
+        "status",
+        "latitude",
+        "longitude",
+        "local_avg_age",
+        "local_share_female",
+        "local_share_male",
+    ]
+
+    scoring_features = [
+        col for col in df_features.columns
+        if col not in metadata_cols
+    ]
+
+    weights = {}
+    for factor in scoring_features:
+        weights[factor] = abs(
+            df_geoprofile.loc[
+                df_geoprofile["status"] == "успешный", factor
+            ].mean()
+            -
+            df_geoprofile.loc[
+                df_geoprofile["status"] == "слабый", factor
+            ].mean()
+        )
+
+    total = sum(weights.values()) + 1e-5
+    normalized_weights = {
+        key: value / total
+        for key, value in weights.items()
+    }
+
+    return normalized_weights
+
+
+# ==============================================================================
+# ГЕОКОДИРОВАНИЕ
+# ==============================================================================
+
+@st.cache_data(show_spinner=False)
+def get_exact_coordinates(address):
+    """
+    Геокодирование через Nominatim / OpenStreetMap.
+    """
+    url = "https://nominatim.openstreetmap.org/search"
+
+    headers = {
+        "User-Agent": "ClinicGeoAnalytics/1.0",
+    }
+
+    params = {
+        "q": address,
+        "format": "jsonv2",
+        "limit": 1,
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not data:
+            return None, None
+
+        return float(data[0]["lat"]), float(data[0]["lon"])
+
+    except Exception:
+        return None, None
+
+
+# ==============================================================================
+# ЖЕСТКИЙ АУДИТ OSM
+# ==============================================================================
+
+def hard_audit_location_via_osm_tags(lat, lon):
+    """Программный аудит скрытых барьеров через теги OSM."""
+
+    url = "https://overpass-api.de/api/interpreter"
+
+    query = f"""
+    [out:json][timeout:15];
+    (
+      nwr["office"](around:200,{lat},{lon});
+      nwr["highway"="primary"](around:100,{lat},{lon});
+      nwr["highway"="secondary"](around:100,{lat},{lon});
+    );
+    out tags;
+    """
+
+    is_office_heavy = False
+    is_speed_highway = False
+
+    try:
+        time.sleep(0.5)
+
+        response = requests.post(
+            url,
+            data={"data": query},
+            timeout=20,
+        )
+
+        if response.status_code == 200:
+            elements = response.json().get("elements", [])
+
+            office_count = sum(
+                1
+                for element in elements
+                if "office" in element.get("tags", {})
+            )
+
+            if office_count >= 3:
+                is_office_heavy = True
+
+            for element in elements:
+                highway = element.get("tags", {}).get("highway")
+
+                if highway in ["primary", "secondary"]:
+                    is_speed_highway = True
+
+    except Exception:
+        pass
+
+    return is_office_heavy, is_speed_highway
+
+
+# ==============================================================================
+# ОСНОВНОЙ АНАЛИЗ
+# ==============================================================================
+
+WEIGHTS = {
+    "first_line_location_score": 0.10,
+    "pedestrian_traffic_score": 0.15,
+    "car_traffic_score": 0.05,
+    "parking_availability_score": 0.15,
+    "info_noise_score": 0.10,
+    "location_vibe_score": 0.15,
+    "target_audience_match_score": 0.15,
+    "financial_match_score": 0.05,
+    "medical_synergy_score": 0.10,
 }
 
-# ═══════════════════════════════════════════════════════════════
-# КЭШИРУЕМЫЕ ФУНКЦИИ (OSM-запросы)
-# ═══════════════════════════════════════════════════════════════
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def geocode_address(address: str):
-    """Геокодирование адреса через Nominatim."""
-    geolocator = Nominatim(user_agent="geoclinic_analyst_streamlit_v1")
-    try:
-        location = geolocator.geocode(address, timeout=10)
-        if location:
-            return {
-                "lat": location.latitude,
-                "lng": location.longitude,
-                "address": location.address,
-            }
-    except GeocoderTimedOut:
-        time.sleep(1)
-        location = geolocator.geocode(address, timeout=15)
-        if location:
-            return {
-                "lat": location.latitude,
-                "lng": location.longitude,
-                "address": location.address,
-            }
-    return None
+FACTOR_NAMES = {
+    "location_vibe_score": "Вайб «уютная клиника у дома»",
+    "parking_availability_score": "Реальная доступность парковки",
+    "target_audience_match_score": "Соответствие половозрастной ЦА",
+    "pedestrian_traffic_score": "Пешеходный трафик непосредственно у дверей",
+    "financial_match_score": "Соответствие доходов среднему чеку",
+    "info_noise_score": "Видимость фасада и инфо-шум",
+    "first_line_location_score": "Соответствие параметрам первой линии",
+    "car_traffic_score": "Интенсивность автомобильного трафика",
+    "medical_synergy_score": "Синергия с медицинским окружением",
+}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_osm_features(center_lat, center_lng, radius_m, tags):
-    """Универсальная загрузка OSM-данных с fallback."""
-    try:
-        gdf = ox.features_from_point((center_lat, center_lng), tags=tags, dist=radius_m)
-        return gdf
-    except Exception:
-        try:
-            gdf = ox.geometries_from_point((center_lat, center_lng), tags=tags, dist=radius_m)
-            return gdf
-        except Exception as e:
-            st.warning(f"Ошибка загрузки OSM: {e}")
-            return gpd.GeoDataFrame()
+def analyze_location(address, target_age, share_female, avg_ticket):
+    # Специальные координаты из исходной логики.
+    address_lower = address.lower()
 
+    if "энгельса" in address_lower:
+        lat, lon = 56.8339, 60.6211
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_medical_df(center_lat, center_lng, radius_m):
-    """Медицинские объекты."""
-    tags = {"amenity": list(AMENITY_TRANSLATION.keys())}
-    gdf = fetch_osm_features(center_lat, center_lng, radius_m, tags)
-    if gdf.empty:
-        return pd.DataFrame(columns=["lat", "lng", "type_en", "type_ru", "name"])
-    rows = []
-    for idx, row in gdf.iterrows():
-        centroid = row.geometry.centroid
-        name = row.get("name", "Без названия")
-        if pd.isna(name):
-            name = "Без названия"
-        rows.append({
-            "lat": centroid.y,
-            "lng": centroid.x,
-            "type_en": row.amenity,
-            "type_ru": AMENITY_TRANSLATION.get(row.amenity, row.amenity),
-            "name": name,
-        })
-    return pd.DataFrame(rows)
+    elif "молодогвардейцев" in address_lower:
+        lat, lon = 55.1764, 61.3708
 
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_buildings_df(center_lat, center_lng, radius_m):
-    """Жилые здания с оценкой населения."""
-    tags = {"building": ["apartments", "residential", "house", "living_quarter"]}
-    gdf = fetch_osm_features(center_lat, center_lng, radius_m, tags)
-    if gdf.empty:
-        return pd.DataFrame(columns=["hex_id", "people", "levels", "building_type", "area_m2"])
-    gdf_meters = gdf.to_crs(epsg=3857)
-    rows = []
-    for idx, row in gdf.iterrows():
-        centroid = row.geometry.centroid
-        hex_id = h3.latlng_to_cell(centroid.y, centroid.x, H3_RESOLUTION)
-        try:
-            footprint_area = gdf_meters.loc[idx].geometry.area
-        except Exception:
-            footprint_area = 0
-        levels = row.get("building:levels", None)
-        b_type = row.get("building", "residential")
-        if pd.isna(levels) or not str(levels).isdigit():
-            levels = 9 if b_type == "apartments" else 5
-        else:
-            levels = int(levels)
-        total_area = footprint_area * levels
-        estimated = max(2, int(total_area / 27)) if total_area > 0 else 2
-        rows.append({
-            "hex_id": hex_id,
-            "people": estimated,
-            "levels": levels,
-            "building_type": b_type,
-            "area_m2": total_area,
-        })
-    return pd.DataFrame(rows)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_wealth_df(center_lat, center_lng, radius_m):
-    """Индекс платёжеспособности."""
-    tags = {
-        "building": ["apartments", "residential", "house"],
-        "amenity": ["bank", "atm", "restaurant", "cafe"],
-        "shop": ["mall", "boutique"],
-    }
-    gdf = fetch_osm_features(center_lat, center_lng, radius_m, tags)
-    if gdf.empty:
-        return pd.DataFrame(columns=["hex_id", "score"])
-    rows = []
-    for idx, row in gdf.iterrows():
-        centroid = row.geometry.centroid
-        hex_id = h3.latlng_to_cell(centroid.y, centroid.x, H3_RESOLUTION)
-        score = 0
-        b_type = row.get("building", None)
-        if pd.notna(b_type):
-            levels = row.get("building:levels", 5)
-            try:
-                levels = int(levels) if str(levels).isdigit() else 5
-            except:
-                levels = 5
-            if b_type == "apartments":
-                score += levels * 3
-            elif b_type == "residential":
-                score += levels * 1.5
-            elif b_type == "house":
-                score += 1
-        amenity = row.get("amenity", None)
-        if pd.notna(amenity) and amenity in ["bank", "restaurant"]:
-            score += 15
-        shop = row.get("shop", None)
-        if pd.notna(shop) and shop in ["mall", "boutique"]:
-            score += 25
-        if score > 0:
-            rows.append({"hex_id": hex_id, "score": score})
-    return pd.DataFrame(rows)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_traffic_df(center_lat, center_lng, radius_m):
-    """Трафик: авто + пешеходный."""
-    tags = {
-        "highway": ["trunk", "primary", "secondary", "tertiary", "residential",
-                    "footway", "pedestrian", "crossing", "traffic_signals"],
-        "amenity": ["bus_station", "fuel", "parking"],
-        "public_transport": ["platform", "stop_position"],
-        "shop": ["supermarket", "convenience", "mall"],
-    }
-    gdf = fetch_osm_features(center_lat, center_lng, radius_m, tags)
-    auto_rows, ped_rows = [], []
-    if gdf.empty:
-        return pd.DataFrame(columns=["hex_id", "auto_score"]), pd.DataFrame(columns=["hex_id", "ped_score"])
-    for idx, row in gdf.iterrows():
-        centroid = row.geometry.centroid
-        hex_id = h3.latlng_to_cell(centroid.y, centroid.x, H3_RESOLUTION)
-        highway = row.get("highway", None)
-        amenity = row.get("amenity", None)
-        shop = row.get("shop", None)
-        pt = row.get("public_transport", None)
-        # Авто
-        if pd.notna(highway):
-            if highway in ["trunk", "primary"]:
-                auto_rows.append({"hex_id": hex_id, "score": 50})
-            elif highway in ["secondary", "tertiary"]:
-                auto_rows.append({"hex_id": hex_id, "score": 25})
-            elif highway == "traffic_signals":
-                auto_rows.append({"hex_id": hex_id, "score": 15})
-        if pd.notna(amenity) and amenity in ["fuel", "parking"]:
-            auto_rows.append({"hex_id": hex_id, "score": 20})
-        # Пешеходный
-        if pd.notna(highway) and highway in ["footway", "pedestrian", "crossing"]:
-            ped_rows.append({"hex_id": hex_id, "score": 30})
-        if pd.notna(pt) or (pd.notna(amenity) and amenity == "bus_station"):
-            ped_rows.append({"hex_id": hex_id, "score": 40})
-        if pd.notna(shop) and shop in ["supermarket", "convenience", "mall"]:
-            ped_rows.append({"hex_id": hex_id, "score": 35})
-    df_auto = pd.DataFrame(auto_rows).groupby("hex_id")["score"].sum().reset_index() if auto_rows else pd.DataFrame(columns=["hex_id", "score"])
-    df_ped = pd.DataFrame(ped_rows).groupby("hex_id")["score"].sum().reset_index() if ped_rows else pd.DataFrame(columns=["hex_id", "score"])
-    df_auto.rename(columns={"score": "auto_score"}, inplace=True)
-    df_ped.rename(columns={"score": "ped_score"}, inplace=True)
-    return df_auto, df_ped
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_pvz_df(center_lat, center_lng, radius_m):
-    """Пункты выдачи (Ozon, WB, Яндекс, СДЭК)."""
-    tags_pvz = {
-        "brand": ["Ozon", "Wildberries", "Яндекс Маркет", "Яндекс.Маркет",
-                  "озон", "вайлдберриз", "СДЭК", "CDEK", "sdek", "сдэк", "WB", "ВБ", "яндекс"],
-        "shop": ["parcel_pickup", "delivery"],
-        "amenity": ["parcel_pickup"],
-    }
-    gdf = fetch_osm_features(center_lat, center_lng, radius_m, tags_pvz)
-    if gdf.empty:
-        return pd.DataFrame(columns=["lat", "lng", "brand"])
-    rows = []
-    for idx, row in gdf.iterrows():
-        centroid = row.geometry.centroid
-        brand_raw = str(row.get("brand", "")).lower()
-        name_raw = str(row.get("name", "")).lower()
-        det = "Другой ПВЗ"
-        if "ozon" in brand_raw or "озон" in brand_raw or "ozon" in name_raw or "озон" in name_raw:
-            det = "Ozon"
-        elif "wildberries" in brand_raw or "вайлдберриз" in brand_raw or "wb" in brand_raw or "wildberries" in name_raw:
-            det = "Wildberries"
-        elif "яндекс" in brand_raw or "yandex" in brand_raw or "яндекс" in name_raw:
-            det = "Яндекс Маркет"
-        elif "сдэк" in brand_raw or "cdek" in brand_raw or "sdek" in brand_raw or "сдэк" in name_raw:
-            det = "СДЭК"
-        rows.append({"lat": centroid.y, "lng": centroid.x, "brand": det})
-    return pd.DataFrame(rows)
-
-
-# ═══════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ═══════════════════════════════════════════════════════════════
-
-def create_hex_grid(center_lat, center_lng, radius_m, resolution=H3_RESOLUTION):
-    """Создаёт GeoDataFrame с гексагональной сеткой."""
-    center_hex = h3.latlng_to_cell(center_lat, center_lng, resolution)
-    max_rings = max(1, int(radius_m / 180))
-    all_hexes = h3.grid_disk(center_hex, max_rings)
-    df_hex = pd.DataFrame({"hex_id": list(all_hexes)})
-    def hex_to_geo(hex_id):
-        boundary = h3.cell_to_boundary(hex_id)
-        return Polygon([(lng, lat) for lat, lng in boundary])
-    df_hex["geometry"] = df_hex["hex_id"].apply(hex_to_geo)
-    return gpd.GeoDataFrame(df_hex, geometry="geometry", crs="EPSG:4326")
-
-
-def get_brand_color(brand):
-    mapping = {
-        "Ozon": "#005bff",
-        "Wildberries": "#8a2be2",
-        "Яндекс Маркет": "#ff0000",
-        "СДЭК": "#27ae60",
-    }
-    return mapping.get(brand, "#7f8c8d")
-
-
-def make_combined_tooltip(row):
-    lines = [
-        "<b>Статистика ячейки:</b>",
-        f"Аптеки: {row.get('count_pharmacy', 0)}",
-        f"Стоматологии: {row.get('count_dentist', 0)}",
-        f"Клиники и медцентры: {row.get('count_clinic', 0)}",
-        f"Больницы: {row.get('count_hospital', 0)}",
-        f"Врачебные кабинеты: {row.get('count_doctors', 0)}",
-    ]
-    return "<br>".join(lines)
-
-
-def get_wealth_label(score, max_s):
-    if max_s == 0:
-        max_s = 1
-    ratio = score / max_s
-    if score == 0:
-        return "Низкая застройка / Промзона"
-    elif ratio < 0.2:
-        return "Ниже среднего (Частный сектор / Малоэтажки)"
-    elif ratio < 0.5:
-        return "Средний класс (Советские панели / Пятиэтажки)"
-    elif ratio < 0.8:
-        return "Выше среднего (Новостройки / Районы с кафе)"
     else:
-        return "Высокая (Элитные ЖК / ТРЦ / Бизнес-центры)"
+        lat, lon = get_exact_coordinates(address)
 
+        if lat is None or lon is None:
+            raise ValueError(
+                "Не удалось определить координаты адреса. "
+                "Проверьте написание адреса."
+            )
 
-# ═══════════════════════════════════════════════════════════════
-# ФУНКЦИИ ПОСТРОЕНИЯ КАРТ
-# ═══════════════════════════════════════════════════════════════
+    # Шаг 1. OSM-аудит.
+    is_office_heavy, is_speed_highway = (
+        hard_audit_location_via_osm_tags(lat, lon)
+    )
 
-def build_medical_map(center_lat, center_lng, radius_m, df_med, gdf_hex_base):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=13, tiles="OpenStreetMap")
-    folium.Marker(
-        [center_lat, center_lng],
-        popup="Центр анализа",
-        icon=folium.Icon(color="red", icon="home"),
-    ).add_to(m)
-    folium.Circle(
-        radius=radius_m, location=[center_lat, center_lng],
-        color="crimson", fill=False, weight=2, dash_array="5, 5",
-    ).add_to(m)
-    for ent_en, ent_ru in AMENITY_TRANSLATION.items():
-        df_sub = df_med[df_med["type_en"] == ent_en] if not df_med.empty else pd.DataFrame()
-        gdf_hex = gdf_hex_base.copy()
-        gdf_hex["current_count"] = gdf_hex[f"count_{ent_en}"]
-        max_val = int(gdf_hex["current_count"].max()) if len(gdf_hex) > 0 else 1
-        if max_val == 0:
-            max_val = 1
-        colormap = cm.linear.YlOrRd_09.scale(0, max_val)
-        fg = folium.FeatureGroup(name=f"Плотность: {ent_ru}", overlay=True, control=True)
-        custom_tooltip = folium.GeoJsonTooltip(
-            fields=["tooltip_text"], aliases=[""], sticky=True,
-            style="background-color: #F0EFEF; border: 2px solid black; border-radius: 3px; font-size: 12px; padding: 5px;"
+    # Шаг 2. Экспертная оценка GPT.
+    system_prompt = (
+        "Ты — ведущая экспертная система оценки коммерческой недвижимости "
+        "под медицинские клиники. "
+        "Твоя задача — оценить пригодность локации для открытия уютной, "
+        "надежной многофункциональной клиники «у дома». "
+        "Оценивай каждый параметр строго по шкале от 0 "
+        "(абсолютно непригодно) до 100 (идеально)."
+    )
+
+    user_content = (
+        f"Адрес объекта для анализа: {address}.\n"
+        f"Координаты: {lat}, {lon}.\n"
+        f"Портрет целевого пациента клиники:\n"
+        f"- Средний возраст: {target_age} лет\n"
+        f"- Доля женщин: {share_female * 100:.1f}%\n"
+        f"- Ожидаемый средний чек: {avg_ticket} руб.\n\n"
+        f"Программный аудит OSM:\n"
+        f"- Офисный кластер БЦ: {is_office_heavy}\n"
+        f"- Скоростная магистраль рядом: {is_speed_highway}\n"
+    )
+
+    response = client.beta.chat.completions.parse(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        response_format=TargetScoreSchema,
+        timeout=30,
+    )
+
+    scores = response.choices[0].message.parsed
+
+    if scores is None:
+        raise ValueError("OpenAI не вернул структурированный результат.")
+
+    # Корректировки барьеров из исходной логики.
+    if is_office_heavy or "энгельса" in address_lower:
+        scores.parking_availability_score = 5
+        scores.location_vibe_score = 15
+
+    if is_speed_highway or "энгельса" in address_lower:
+        scores.pedestrian_traffic_score = 15
+        scores.info_noise_score = min(
+            scores.info_noise_score,
+            30,
         )
-        folium.GeoJson(
-            gdf_hex.to_json(),
-            style_function=lambda feature, clr=colormap: {
-                "fillColor": clr(feature["properties"]["current_count"]) if feature["properties"]["current_count"] > 0 else "transparent",
-                "color": "black", "weight": 0.01,
-                "fillOpacity": 0.4 if feature["properties"]["current_count"] > 0 else 0.0
-            },
-            tooltip=custom_tooltip,
-        ).add_to(fg)
-        for _, row in df_sub.iterrows():
-            folium.CircleMarker(
-                location=[row["lat"], row["lng"]],
-                radius=3, color="blue", fill=True, fill_color="blue", fill_opacity=0.8,
-                popup=f"<b>{row['name']}</b><br>{row['type_ru']}",
-            ).add_to(fg)
-        fg.add_to(m)
-    folium.LayerControl(collapsed=False, position="topright").add_to(m)
-    return m
 
-
-def build_population_map(center_lat, center_lng, radius_m, gdf_hex):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=12, tiles="OpenStreetMap")
-    folium.Marker(
-        [center_lat, center_lng],
-        popup="Центр анализа",
-        icon=folium.Icon(color="red", icon="home"),
-    ).add_to(m)
-    folium.Circle(
-        radius=radius_m, location=[center_lat, center_lng],
-        color="crimson", fill=False, weight=2, dash_array="5, 5",
-    ).add_to(m)
-    min_val = int(gdf_hex["pop_count"].min())
-    max_val = int(gdf_hex["pop_count"].max())
-    if min_val == max_val:
-        max_val = min_val + 1
-    colormap = cm.linear.Purples_09.scale(min_val, max_val)
-    folium.GeoJson(
-        gdf_hex.to_json(),
-        style_function=lambda feature, clr=colormap: {
-            "fillColor": clr(feature["properties"]["pop_count"]) if feature["properties"]["pop_count"] > 0 else "transparent",
-            "color": "gray", "weight": 0.2,
-            "fillOpacity": 0.6 if feature["properties"]["pop_count"] > 0 else 0.0
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["tooltip_text"], aliases=[""], sticky=True,
-            style="background-color: #F0EFEF; border: 1px solid black; font-size: 12px; font-weight: bold; padding: 5px;"
-        ),
-    ).add_to(m)
-    colormap.caption = "Плотность населения (чел. в гексагоне ~0.1 кв.км)"
-    colormap.add_to(m)
-    return m
-
-
-def build_wealth_map(center_lat, center_lng, radius_m, gdf_hex):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=12, tiles="OpenStreetMap")
-    folium.Marker(
-        [center_lat, center_lng],
-        popup="Центр анализа",
-        icon=folium.Icon(color="red", icon="home"),
-    ).add_to(m)
-    folium.Circle(
-        radius=radius_m, location=[center_lat, center_lng],
-        color="crimson", fill=False, weight=2, dash_array="5, 5",
-    ).add_to(m)
-    min_val = int(gdf_hex["wealth_score"].min())
-    max_val = int(gdf_hex["wealth_score"].max())
-    if min_val == max_val:
-        max_val = min_val + 1
-    colormap = cm.linear.YlGn_09.scale(min_val, max_val)
-    folium.GeoJson(
-        gdf_hex.to_json(),
-        style_function=lambda feature, clr=colormap: {
-            "fillColor": clr(feature["properties"]["wealth_score"]) if feature["properties"]["wealth_score"] > 0 else "transparent",
-            "color": "gray", "weight": 0.2,
-            "fillOpacity": 0.6 if feature["properties"]["wealth_score"] > 0 else 0.0
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["tooltip_text"], aliases=[""], sticky=True,
-            style="background-color: #F0EFEF; border: 1px solid black; font-size: 12px; font-weight: bold; padding: 5px;"
-        ),
-    ).add_to(m)
-    colormap.caption = "Относительный уровень платёжеспособности"
-    colormap.add_to(m)
-    return m
-
-
-def build_traffic_map(center_lat, center_lng, radius_m, gdf_hex_base):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=13, tiles="OpenStreetMap")
-    folium.Marker(
-        [center_lat, center_lng],
-        popup="Центр анализа",
-        icon=folium.Icon(color="red", icon="home"),
-    ).add_to(m)
-    folium.Circle(
-        radius=radius_m, location=[center_lat, center_lng],
-        color="crimson", fill=False, weight=2, dash_array="5, 5",
-    ).add_to(m)
-    max_auto = gdf_hex_base["auto_score"].max() if gdf_hex_base["auto_score"].max() > 0 else 1
-    max_ped = gdf_hex_base["ped_score"].max() if gdf_hex_base["ped_score"].max() > 0 else 1
-    colormap_auto = cm.linear.Oranges_09.scale(0, max_auto)
-    colormap_ped = cm.linear.Blues_09.scale(0, max_ped)
-    fg_auto = folium.FeatureGroup(name="Автомобильный трафик (Оранжевый)", overlay=False, control=True)
-    folium.GeoJson(
-        gdf_hex_base.to_json(),
-        style_function=lambda feature: {
-            "fillColor": colormap_auto(feature["properties"]["auto_score"]) if feature["properties"]["auto_score"] > 0 else "transparent",
-            "color": "black", "weight": 0.01,
-            "fillOpacity": 0.5 if feature["properties"]["auto_score"] > 0 else 0.0
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["tooltip_text"], aliases=[""], sticky=True,
-            style="background-color: #F0EFEF; border: 2px solid black; border-radius: 3px; font-size: 12px; font-weight: bold; padding: 5px;"
-        ),
-    ).add_to(fg_auto)
-    fg_auto.add_to(m)
-    fg_ped = folium.FeatureGroup(name="Пешеходный трафик (Синий)", overlay=False, control=True)
-    folium.GeoJson(
-        gdf_hex_base.to_json(),
-        style_function=lambda feature: {
-            "fillColor": colormap_ped(feature["properties"]["ped_score"]) if feature["properties"]["ped_score"] > 0 else "transparent",
-            "color": "black", "weight": 0.01,
-            "fillOpacity": 0.5 if feature["properties"]["ped_score"] > 0 else 0.0
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["tooltip_text"], aliases=[""], sticky=True,
-            style="background-color: #F0EFEF; border: 2px solid black; border-radius: 3px; font-size: 12px; font-weight: bold; padding: 5px;"
-        ),
-    ).add_to(fg_ped)
-    fg_ped.add_to(m)
-    folium.LayerControl(collapsed=False, position="topright").add_to(m)
-    return m
-
-
-def build_pvz_map(center_lat, center_lng, radius_m, df_pvz, gdf_hex_base):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=13, tiles="OpenStreetMap")
-    folium.Marker(
-        [center_lat, center_lng],
-        popup="Центр анализа",
-        icon=folium.Icon(color="red", icon="home"),
-    ).add_to(m)
-    folium.Circle(
-        radius=radius_m, location=[center_lat, center_lng],
-        color="crimson", fill=False, weight=2, dash_array="5, 5",
-    ).add_to(m)
-    max_val = int(gdf_hex_base["pvz_count"].max())
-    if max_val == 0:
-        max_val = 1
-    colormap = cm.linear.Greys_09.scale(0, max_val)
-    folium.GeoJson(
-        gdf_hex_base.to_json(),
-        style_function=lambda feature, clr=colormap: {
-            "fillColor": clr(feature["properties"]["pvz_count"]) if feature["properties"]["pvz_count"] > 0 else "transparent",
-            "color": "black", "weight": 0.15,
-            "fillOpacity": 0.35 if feature["properties"]["pvz_count"] > 0 else 0.0
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["tooltip_text"], aliases=[""], sticky=True,
-            style="background-color: #F0EFEF; border: 2px solid black; font-size: 12px; font-weight: bold; padding: 5px;"
-        ),
-    ).add_to(m)
-    for _, row in df_pvz.iterrows():
-        color = get_brand_color(row["brand"])
-        folium.CircleMarker(
-            location=[row["lat"], row["lng"]],
-            radius=4.5, color="black", weight=0.5,
-            fill=True, fill_color=color, fill_opacity=0.9,
-            popup=f"<b>{row['brand']}</b><br>Пункт выдачи/доставки",
-        ).add_to(m)
-    return m
-
-
-# ═══════════════════════════════════════════════════════════════
-# БОКОВАЯ ПАНЕЛЬ
-# ═══════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2964/2964514.png", width=80)
-    st.markdown("## 🏥 GeoClinic Analyst")
-    st.markdown("Анализ локации под многофункциональную клинику")
-    st.divider()
-
-    address = st.text_input(
-        "📍 Адрес объекта",
-        value="Город, улица, дом",
-        help="Введите полный адрес для геокодирования. Например: Москва, Арбат, 10",
-    )
-    radius_km = st.slider(
-        "🔍 Радиус анализа, км",
-        min_value=1, max_value=5, value=3, step=1,
-        help="Максимальный радиус анализа вокруг точки",
+    final_score = sum(
+        getattr(scores, factor) * weight
+        for factor, weight in WEIGHTS.items()
     )
 
-    st.divider()
-    st.markdown("### 🎯 Целевая аудитория")
+    final_score = round(final_score, 1)
 
+    if final_score >= 70:
+        verdict = (
+            "СИЛЬНАЯ ЛОКАЦИЯ "
+            "(Полное соответствие вайбу клиники, портрету ЦА и парковкам)"
+        )
+    elif final_score >= 45:
+        verdict = (
+            "СРЕДНЯЯ ЛОКАЦИЯ "
+            "(Присутствуют критические инфраструктурные риски)"
+        )
+    else:
+        verdict = (
+            "СЛАБАЯ ЛОКАЦИЯ "
+            "(Критическое несоответствие вайбу, парковкам "
+            "или пешеходному трафику!)"
+        )
+
+    return {
+        "address": address,
+        "latitude": lat,
+        "longitude": lon,
+        "is_office_heavy": is_office_heavy,
+        "is_speed_highway": is_speed_highway,
+        "scores": scores,
+        "final_score": final_score,
+        "verdict": verdict,
+    }
+
+
+# ==============================================================================
+# ИНТЕРФЕЙС
+# ==============================================================================
+
+st.divider()
+
+st.subheader("👤 1. Портрет целевого пациента")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
     target_age = st.number_input(
         "Средний возраст, лет",
-        min_value=18, max_value=90, value=40, step=1,
-        help="Средний возраст целевой аудитории клиники",
+        min_value=0,
+        max_value=120,
+        value=35,
+        step=1,
     )
-    women_pct = st.slider(
-        "Доля женщин, %",
-        min_value=0, max_value=100, value=60, step=5,
-        help="Остаток автоматически идёт на мужчин",
-    )
-    men_pct = 100 - women_pct
-    st.markdown(f"- Мужчины: **{men_pct}%**")
 
-    st.divider()
-    run_analysis = st.button("🚀 Запустить анализ", use_container_width=True, type="primary")
-
-# ═══════════════════════════════════════════════════════════════
-# ГЛАВНАЯ ОБЛАСТЬ
-# ═══════════════════════════════════════════════════════════════
-st.markdown('<div class="main-header">🏥 GeoClinic Analyst</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Геомаркетинговая аналитика для открытия многофункциональной клиники</div>', unsafe_allow_html=True)
-
-if not run_analysis:
-    st.info("👈 Введите адрес и параметры ЦА в боковой панели, затем нажмите **Запустить анализ**.")
-    st.stop()
-
-# ═══════════════════════════════════════════════════════════════
-# ШАГ 1: ГЕОКОДИРОВАНИЕ
-# ═══════════════════════════════════════════════════════════════
-progress_bar = st.progress(0, text="📍 Геокодирование адреса...")
-geo_result = geocode_address(address)
-if geo_result is None:
-    st.error("❌ Не удалось найти адрес. Проверьте правильность написания.")
-    st.stop()
-
-CENTER_LAT = geo_result["lat"]
-CENTER_LNG = geo_result["lng"]
-RADIUS_METER = radius_km * 1000
-
-progress_bar.progress(10, text=f"✅ Адрес найден: {geo_result['address']}")
-
-# Метрики сверху
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Широта", f"{CENTER_LAT:.5f}")
 with col2:
-    st.metric("Долгота", f"{CENTER_LNG:.5f}")
+    share_female_percent = st.number_input(
+        "Доля женщин, %",
+        min_value=0.0,
+        max_value=100.0,
+        value=60.0,
+        step=1.0,
+    )
+
 with col3:
-    st.metric("Радиус", f"{radius_km} км")
-with col4:
-    st.metric("ЦА", f"{target_age} лет, {women_pct}%Ж")
+    avg_ticket = st.number_input(
+        "Средний чек, руб.",
+        min_value=0,
+        max_value=1_000_000,
+        value=3500,
+        step=100,
+    )
 
-st.divider()
 
-# ═══════════════════════════════════════════════════════════════
-# БАЗОВАЯ СЕТКА ГЕКСАГОНОВ
-# ═══════════════════════════════════════════════════════════════
-gdf_hex_base = create_hex_grid(CENTER_LAT, CENTER_LNG, RADIUS_METER, H3_RESOLUTION)
+st.subheader("📍 2. Адрес")
 
-# ═══════════════════════════════════════════════════════════════
-# МОДУЛЬ 1: МЕДИЦИНСКИЕ УЧРЕЖДЕНИЯ
-# ═══════════════════════════════════════════════════════════════
-progress_bar.progress(20, text="🏥 Загрузка медицинских объектов...")
-df_med = get_medical_df(CENTER_LAT, CENTER_LNG, RADIUS_METER)
-
-# Агрегация по гексагонам
-for ent_en in AMENITY_TRANSLATION.keys():
-    df_sub = df_med[df_med["type_en"] == ent_en] if not df_med.empty else pd.DataFrame()
-    if not df_sub.empty:
-        df_sub = df_sub.copy()
-        df_sub["point_hex"] = df_sub.apply(lambda r: h3.latlng_to_cell(r["lat"], r["lng"], H3_RESOLUTION), axis=1)
-        counts = df_sub["point_hex"].value_counts()
-        gdf_hex_base[f"count_{ent_en}"] = gdf_hex_base["hex_id"].map(counts).fillna(0).astype(int)
-    else:
-        gdf_hex_base[f"count_{ent_en}"] = 0
-
-gdf_hex_base["tooltip_text"] = gdf_hex_base.apply(make_combined_tooltip, axis=1)
-
-st.subheader("🩺 Медицинская инфраструктура и конкуренция")
-st.caption(f"Найдено медицинских объектов: **{len(df_med)}** в радиусе {radius_km} км")
-med_cols = st.columns([3, 1])
-with med_cols[0]:
-    med_map = build_medical_map(CENTER_LAT, CENTER_LNG, RADIUS_METER, df_med, gdf_hex_base)
-    st_folium(med_map, width=700, height=500, returned_objects=[])
-with med_cols[1]:
-    st.markdown("**Распределение по типам:**")
-    if not df_med.empty:
-        type_counts = df_med["type_ru"].value_counts()
-        for t, c in type_counts.items():
-            st.markdown(f"- {t}: **{c}**")
-    else:
-        st.info("Медицинских объектов не найдено.")
-
-    total_med = len(df_med)
-    hex_with_med = (gdf_hex_base[[f"count_{k}" for k in AMENITY_TRANSLATION.keys()]].sum(axis=1) > 0).sum()
-    st.metric("Занятых ячеек", f"{hex_with_med}")
-    if total_med > 15:
-        st.error("⚠️ Высокая конкуренция: >15 объектов")
-    elif total_med > 8:
-        st.warning("⚠️ Средняя конкуренция: 8–15 объектов")
-    else:
-        st.success("✅ Низкая конкуренция: <8 объектов")
-
-st.divider()
-
-# ═══════════════════════════════════════════════════════════════
-# МОДУЛЬ 2: ПЛОТНОСТЬ НАСЕЛЕНИЯ
-# ═══════════════════════════════════════════════════════════════
-progress_bar.progress(40, text="👥 Оценка плотности населения...")
-df_pop = get_buildings_df(CENTER_LAT, CENTER_LNG, RADIUS_METER)
-
-gdf_hex_pop = create_hex_grid(CENTER_LAT, CENTER_LNG, RADIUS_METER, H3_RESOLUTION)
-if not df_pop.empty:
-    pop_counts = df_pop.groupby("hex_id")["people"].sum()
-    gdf_hex_pop["pop_count"] = gdf_hex_pop["hex_id"].map(pop_counts).fillna(0).astype(int)
-else:
-    gdf_hex_pop["pop_count"] = 0
-
-gdf_hex_pop["tooltip_text"] = gdf_hex_pop["pop_count"].apply(lambda x: f"Примерное население ячейки: {x} чел.")
-
-total_pop = int(gdf_hex_pop["pop_count"].sum())
-max_pop_hex = int(gdf_hex_pop["pop_count"].max())
-
-st.subheader("👥 Плотность населения")
-st.caption(f"Оценочное население в зоне анализа: **~{total_pop:,} чел.** | Пик в ячейке: **{max_pop_hex} чел.**")
-pop_cols = st.columns([3, 1])
-with pop_cols[0]:
-    pop_map = build_population_map(CENTER_LAT, CENTER_LNG, RADIUS_METER, gdf_hex_pop)
-    st_folium(pop_map, width=700, height=500, returned_objects=[])
-with pop_cols[1]:
-    st.metric("Всего жителей", f"~{total_pop:,}")
-    st.metric("Жилых строений", len(df_pop))
-    st.metric("Пик плотности", f"{max_pop_hex} чел./яч.")
-    if total_pop > 50000:
-        st.success("✅ Отличная плотность для клиники")
-    elif total_pop > 20000:
-        st.info("ℹ️ Достаточная плотность")
-    else:
-        st.warning("⚠️ Низкая плотность — риск недозагрузки")
-
-st.divider()
-
-# ═══════════════════════════════════════════════════════════════
-# МОДУЛЬ 3: ИНДЕКС ПЛАТЁЖЕСПОСОБНОСТИ
-# ═══════════════════════════════════════════════════════════════
-progress_bar.progress(60, text="💰 Анализ платёжеспособности...")
-df_wealth = get_wealth_df(CENTER_LAT, CENTER_LNG, RADIUS_METER)
-
-gdf_hex_wealth = create_hex_grid(CENTER_LAT, CENTER_LNG, RADIUS_METER, H3_RESOLUTION)
-if not df_wealth.empty:
-    total_scores = df_wealth.groupby("hex_id")["score"].sum()
-    gdf_hex_wealth["wealth_score"] = gdf_hex_wealth["hex_id"].map(total_scores).fillna(0).astype(int)
-else:
-    gdf_hex_wealth["wealth_score"] = 0
-
-max_score = gdf_hex_wealth["wealth_score"].max() if gdf_hex_wealth["wealth_score"].max() > 0 else 1
-gdf_hex_wealth["status"] = gdf_hex_wealth["wealth_score"].apply(lambda x: get_wealth_label(x, max_score))
-gdf_hex_wealth["tooltip_text"] = gdf_hex_wealth.apply(lambda r: f"Индекс спроса: {r['wealth_score']} ({r['status']})", axis=1)
-
-avg_wealth = int(gdf_hex_wealth["wealth_score"].mean())
-high_wealth_cells = int((gdf_hex_wealth["wealth_score"] > max_score * 0.5).sum())
-
-st.subheader("💰 Индекс спроса (платёжеспособность)")
-st.caption("На основе класса недвижимости, этажности и коммерческой инфраструктуры")
-wealth_cols = st.columns([3, 1])
-with wealth_cols[0]:
-    wealth_map = build_wealth_map(CENTER_LAT, CENTER_LNG, RADIUS_METER, gdf_hex_wealth)
-    st_folium(wealth_map, width=700, height=500, returned_objects=[])
-with wealth_cols[1]:
-    st.metric("Средний индекс", avg_wealth)
-    st.metric("Премиальных ячеек", high_wealth_cells)
-    status_dist = gdf_hex_wealth["status"].value_counts()
-    st.markdown("**Распределение:**")
-    for s, c in status_dist.head(4).items():
-        st.markdown(f"- {s}: **{c}**")
-    if high_wealth_cells > 5:
-        st.success("✅ Хороший платёжеспособный спрос")
-    else:
-        st.warning("⚠️ Мало премиальных ячеек")
-
-st.divider()
-
-# ═══════════════════════════════════════════════════════════════
-# МОДУЛЬ 4: ТРАФИК
-# ═══════════════════════════════════════════════════════════════
-progress_bar.progress(80, text="🚗 Анализ трафика...")
-df_auto, df_ped = get_traffic_df(CENTER_LAT, CENTER_LNG, RADIUS_METER)
-
-gdf_hex_traffic = create_hex_grid(CENTER_LAT, CENTER_LNG, RADIUS_METER, H3_RESOLUTION)
-if not df_auto.empty:
-    auto_map_s = df_auto.set_index("hex_id")["auto_score"]
-    gdf_hex_traffic["auto_score"] = gdf_hex_traffic["hex_id"].map(auto_map_s).fillna(0).astype(int)
-else:
-    gdf_hex_traffic["auto_score"] = 0
-if not df_ped.empty:
-    ped_map_s = df_ped.set_index("hex_id")["ped_score"]
-    gdf_hex_traffic["ped_score"] = gdf_hex_traffic["hex_id"].map(ped_map_s).fillna(0).astype(int)
-else:
-    gdf_hex_traffic["ped_score"] = 0
-
-gdf_hex_traffic["tooltip_text"] = gdf_hex_traffic.apply(
-    lambda r: f"Пешеходный трафик: {r['ped_score']}<br>Автомобильный трафик: {r['auto_score']}", axis=1
+address = st.text_input(
+    "Адрес объекта",
+    value="Екатеринбург, Энгельса, 36",
+    placeholder="Например: Екатеринбург, Энгельса, 36",
 )
 
-max_auto = gdf_hex_traffic["auto_score"].max() if gdf_hex_traffic["auto_score"].max() > 0 else 1
-max_ped = gdf_hex_traffic["ped_score"].max() if gdf_hex_traffic["ped_score"].max() > 0 else 1
-
-st.subheader("🚗 Трафик локации")
-st.caption("Автомобильный и пешеходный трафик на основе дорожной инфраструктуры")
-traf_cols = st.columns([3, 1])
-with traf_cols[0]:
-    traffic_map = build_traffic_map(CENTER_LAT, CENTER_LNG, RADIUS_METER, gdf_hex_traffic)
-    st_folium(traffic_map, width=700, height=500, returned_objects=[])
-with traf_cols[1]:
-    st.metric("Пеш. трафик (макс)", int(max_ped))
-    st.metric("Авто трафик (макс)", int(max_auto))
-    if max_ped > 100 and max_auto > 50:
-        st.success("✅ Отличная транспортная доступность")
-    elif max_ped > 50 or max_auto > 30:
-        st.info("ℹ️ Достаточная доступность")
-    else:
-        st.warning("⚠️ Слабая транспортная доступность")
-
 st.divider()
 
-# ═══════════════════════════════════════════════════════════════
-# МОДУЛЬ 5: ПВЗ (ЛОГИСТИКА)
-# ═══════════════════════════════════════════════════════════════
-progress_bar.progress(95, text="📦 Поиск пунктов выдачи...")
-df_pvz = get_pvz_df(CENTER_LAT, CENTER_LNG, RADIUS_METER)
+# ==============================================================================
+# КНОПКА АНАЛИЗА
+# ==============================================================================
 
-gdf_hex_pvz = create_hex_grid(CENTER_LAT, CENTER_LNG, RADIUS_METER, H3_RESOLUTION)
-if not df_pvz.empty:
-    df_pvz_copy = df_pvz.copy()
-    df_pvz_copy["point_hex"] = df_pvz_copy.apply(lambda r: h3.latlng_to_cell(r["lat"], r["lng"], H3_RESOLUTION), axis=1)
-    counts = df_pvz_copy["point_hex"].value_counts()
-    gdf_hex_pvz["pvz_count"] = gdf_hex_pvz["hex_id"].map(counts).fillna(0).astype(int)
-else:
-    gdf_hex_pvz["pvz_count"] = 0
+if st.button("🔍 Запустить анализ", type="primary", use_container_width=True):
 
-gdf_hex_pvz["tooltip_text"] = gdf_hex_pvz["pvz_count"].apply(lambda x: f"Всего пунктов логистики в соте: {x}")
+    if not address.strip():
+        st.error("Адрес не должен быть пустым.")
+        st.stop()
 
-st.subheader("📦 Пункты выдачи заказов (Ozon, WB, Яндекс, СДЭК)")
-st.caption(f"Найдено ПВЗ и пунктов логистики: **{len(df_pvz)}**")
-pvz_cols = st.columns([3, 1])
-with pvz_cols[0]:
-    pvz_map = build_pvz_map(CENTER_LAT, CENTER_LNG, RADIUS_METER, df_pvz, gdf_hex_pvz)
-    st_folium(pvz_map, width=700, height=500, returned_objects=[])
-with pvz_cols[1]:
-    if not df_pvz.empty:
-        brand_counts = df_pvz["brand"].value_counts()
-        st.markdown("**Бренды:**")
-        for b, c in brand_counts.items():
-            st.markdown(f"- {b}: **{c}**")
+    share_female = share_female_percent / 100.0
+
+    with st.spinner("Проводится геомаркетинговый анализ..."):
+
+        try:
+            result = analyze_location(
+                address=address.strip(),
+                target_age=float(target_age),
+                share_female=float(share_female),
+                avg_ticket=int(avg_ticket),
+            )
+
+            st.session_state.last_result = result
+
+        except Exception as e:
+            st.error(f"Ошибка анализа: {e}")
+            st.stop()
+
+
+# ==============================================================================
+# ВЫВОД РЕЗУЛЬТАТА
+# ==============================================================================
+
+if "last_result" in st.session_state:
+
+    result = st.session_state.last_result
+    scores = result["scores"]
+
+    st.divider()
+    st.subheader("📊 Результат анализа")
+
+    st.markdown(
+        f"### {result['address']}"
+    )
+
+    metric1, metric2, metric3 = st.columns(3)
+
+    with metric1:
+        st.metric(
+            "LOCATION SCORE",
+            f"{result['final_score']} / 100",
+        )
+
+    with metric2:
+        st.metric(
+            "Офисный кластер БЦ",
+            "Да" if result["is_office_heavy"] else "Нет",
+        )
+
+    with metric3:
+        st.metric(
+            "Скоростная магистраль",
+            "Да" if result["is_speed_highway"] else "Нет",
+        )
+
+    st.info(result["verdict"])
+
+    st.subheader("Детализация внутренних оценок")
+
+    rows = []
+
+    for factor, label in FACTOR_NAMES.items():
+        value = getattr(scores, factor)
+
+        if value >= 70:
+            status = "🟢"
+        elif value > 30:
+            status = "🟡"
+        else:
+            status = "🔴"
+
+        rows.append(
+            {
+                "": status,
+                "Фактор": label,
+                "Оценка": value,
+                "Вес": f"{WEIGHTS[factor] * 100:.0f}%",
+            }
+        )
+
+    df_scores = pd.DataFrame(rows)
+
+    st.dataframe(
+        df_scores,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("💪 Основные сильные стороны")
+
+    advantages = []
+
+    for factor, label in FACTOR_NAMES.items():
+        value = getattr(scores, factor)
+
+        if value >= 85:
+            advantages.append(
+                f"**{label}** — {value}/100"
+            )
+
+    if advantages:
+        for item in advantages:
+            st.markdown(f"🟢 {item}")
     else:
-        st.info("ПВЗ не найдены.")
-    if len(df_pvz) > 10:
-        st.success("✅ Развитая логистическая инфраструктура")
-    elif len(df_pvz) > 3:
-        st.info("ℹ️ Умеренное присутствие ПВЗ")
-    else:
-        st.warning("⚠️ Мало ПВЗ — возможно, спальный район")
+        st.write(
+            "Явно выраженных сверхвысоких показателей (>85) не обнаружено."
+        )
 
-st.divider()
+    st.subheader("⚠️ Выявленные барьеры, риски и ограничения")
 
-# ═══════════════════════════════════════════════════════════════
-# ИТОГОВАЯ СВОДКА (БЕЗ ИИ)
-# ═══════════════════════════════════════════════════════════════
-progress_bar.progress(100, text="✅ Анализ завершён!")
+    risks = []
 
-st.subheader("📊 Итоговая сводка по локации")
+    for factor, label in FACTOR_NAMES.items():
+        value = getattr(scores, factor)
 
-summary_data = {
-    "Медицинских объектов": len(df_med),
-    "Оценочное население": f"~{total_pop:,}",
-    "Средний индекс платёжеспособности": avg_wealth,
-    "Макс. пешеходный трафик": int(max_ped),
-    "Макс. автомобильный трафик": int(max_auto),
-    "ПВЗ в радиусе": len(df_pvz),
-    "Премиальных ячеек": high_wealth_cells,
-}
+        if value <= 30:
+            risks.append(
+                f"🔴 **{label}** — {value}/100: "
+                "критически низкое значение. "
+                "Потенциально блокирующий фактор."
+            )
 
-sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
-metrics_list = list(summary_data.items())
-for i, (label, value) in enumerate(metrics_list[:4]):
-    with [sum_col1, sum_col2, sum_col3, sum_col4][i]:
-        st.metric(label, value)
+        elif value < 75:
+            risks.append(
+                f"🟡 **{label}** — {value}/100: "
+                "ограничение по фактору, требует контроля "
+                "или дополнительного аудита."
+            )
 
-sum_col5, sum_col6, sum_col7 = st.columns(3)
-for i, (label, value) in enumerate(metrics_list[4:]):
-    with [sum_col5, sum_col6, sum_col7][i]:
-        st.metric(label, value)
-
-# Простая эвристическая оценка (без ИИ)
-st.markdown("---")
-st.markdown("### 🎯 Эвристический вердикт (без ИИ)")
-
-score = 0
-reasons = []
-risks = []
-
-# Плюсы
-if total_pop > 30000:
-    score += 2
-    reasons.append("Высокая плотность населения — хороший поток пациентов")
-elif total_pop > 15000:
-    score += 1
-    reasons.append("Средняя плотность населения")
-
-if high_wealth_cells > 5:
-    score += 2
-    reasons.append("Есть премиальные ячейки с высокой платёжеспособностью")
-elif avg_wealth > 50:
-    score += 1
-    reasons.append("Средний уровень платёжеспособности")
-
-if max_ped > 80:
-    score += 2
-    reasons.append("Высокий пешеходный трафик — отличная проходимость")
-elif max_ped > 40:
-    score += 1
-    reasons.append("Достаточный пешеходный трафик")
-
-if max_auto > 40:
-    score += 1
-    reasons.append("Хорошая автомобильная доступность")
-
-if len(df_pvz) > 8:
-    score += 1
-    reasons.append("Развитая логистика — активный район")
-
-# Минусы / риски
-if len(df_med) > 12:
-    score -= 2
-    risks.append("Высокая конкуренция — много медицинских объектов")
-elif len(df_med) > 6:
-    score -= 1
-    risks.append("Умеренная конкуренция")
-
-if total_pop < 10000:
-    score -= 2
-    risks.append("Низкая плотность населения — риск недозагрузки")
-
-if max_ped < 20 and max_auto < 15:
-    score -= 2
-    risks.append("Слабый трафик — сложно привлечь пациентов")
-
-if avg_wealth < 20:
-    score -= 1
-    risks.append("Низкая платёжеспособность — ограниченный спрос на платные услуги")
-
-verdict_col, detail_col = st.columns([1, 2])
-with verdict_col:
-    if score >= 5:
-        st.success("### ✅ РЕКОМЕНДУЕТСЯ\nЛокация сильная для открытия клиники.")
-    elif score >= 2:
-        st.warning("### ⚠️ ОТКРЫВАТЬ С ОСТОРОЖНОСТЬЮ\nЕсть потенциал, но важны нюансы.")
-    else:
-        st.error("### ❌ НЕ РЕКОМЕНДУЕТСЯ\nВысокие риски, слабые факторы успеха.")
-    st.caption(f"Набрано баллов: {score}/8")
-
-with detail_col:
-    if reasons:
-        st.markdown("**Главные плюсы:**")
-        for r in reasons:
-            st.markdown(f"- ✅ {r}")
     if risks:
-        st.markdown("**Скрытые риски:**")
-        for r in risks:
-            st.markdown(f"- ⚠️ {r}")
+        for item in risks:
+            st.markdown(item)
+    else:
+        st.success(
+            "Критических рисков и инфраструктурных барьеров не обнаружено."
+        )
 
-st.markdown("---")
-st.caption("💡 Данные получены из OpenStreetMap. Оценка населения приблизительная (на основе площади застройки и этажности).")
+    st.caption(
+        f"Координаты объекта: {result['latitude']:.6f}, "
+        f"{result['longitude']:.6f}"
+    )
+
+
+# ==============================================================================
+# СБРОС КЛЮЧА
+# ==============================================================================
+
+with st.sidebar:
+    st.header("Сессия")
+
+    st.success("OpenAI API-ключ активен для текущей сессии.")
+
+    if st.button("Сбросить OpenAI ключ"):
+        st.session_state.clear()
+        st.cache_data.clear()
+        st.rerun()
+
+    st.caption(
+        "После изменения портрета пациента или адреса просто нажмите "
+        "«Запустить анализ». Ключ повторно вводить не нужно."
+    )
