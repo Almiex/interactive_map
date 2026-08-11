@@ -738,7 +738,7 @@ from streamlit_folium import st_folium
 import h3
 
 # ==============================================================================
-# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КАРТ (H3 И РАСЧЕТ РАССТОЯНИЙ)
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ H3 КАРТ
 # ==============================================================================
 
 def _h3_latlon_to_cell(lat, lon, res):
@@ -767,8 +767,7 @@ def _h3_boundary(h):
         boundary = h3.cell_to_boundary(h)
         pts = list(boundary)
         if pts and isinstance(pts, (tuple, list)):
-            # Переворачиваем из (lon, lat) в (lat, lon) специально для Folium
-            return [(p[1], p[0]) for p in pts]
+            return [(p[0], p[1]) for p in pts]
         return pts
     except AttributeError:
         return h3.h3_to_geo_boundary(h, geo_json=False)
@@ -823,7 +822,7 @@ def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
 
 
 # ==============================================================================
-# 2. АНАЛИТИКА ТЕГОВ И ФОРМИРОВАНИЕ ЦВЕТА
+# 2. АНАЛИТИКА МЕТРИК
 # ==============================================================================
 
 def compute_hex_metrics(hexes, elements, resolution=8):
@@ -911,7 +910,7 @@ def _hex_color(value, vmin, vmax, palette):
 
 
 # ==============================================================================
-# 3. ОСНОВНОЙ ИНТЕРФЕЙС И ОТРИСОВКА СЕТКИ STREAMLIT
+# 3. ИНТЕРФЕЙС И КАРТА
 # ==============================================================================
 
 st.divider()
@@ -980,11 +979,14 @@ if "last_result" in st.session_state:
                     val = met[filter_key]
                     color = _hex_color(val, vmin, vmax, palette)
                     coords = _h3_boundary(h)
-                    if not coords:
-                        continue
-                    
-                    folium.Polygon(
-                        locations=coords, color="#333333", weight=1,
+                    if coords:
+                        folium.Polygon(
+                            locations=coords, color="#333333", weight=1,
+                            fill_color=color, fill_opacity=0.6, tooltip=f"{labels[filter_key]}: {val}"
+                        ).add_to(m)
+
+                legend_html = f'''
+
 
 
 # ==============================================================================
