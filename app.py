@@ -959,6 +959,14 @@ def compute_hex_metrics(hexes, elements, resolution=9):
         }
     return metrics
 
+def _hex_color(value, vmin, vmax, palette):
+    if vmax == vmin:
+        return palette[0]
+    ratio = (value - vmin) / (vmax - vmin)
+    idx = int(ratio * (len(palette) - 1))
+    idx = max(0, min(idx, len(palette) - 1))
+    return palette[idx]
+
 
 # ==============================================================================
 # 3. ИНТЕРФЕЙС И ДИНАМИЧЕСКАЯ ФИЛЬТРАЦИЯ СЛОЕВ КАРТЫ
