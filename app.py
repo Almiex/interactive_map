@@ -730,138 +730,178 @@ if "last_result" in st.session_state:
         f"Координаты объекта: {result['latitude']:.6f}, "
         f"{result['longitude']:.6f}"
     )
+#========
+#==КАРТА
+#========
 
 import streamlit as st
-import numpy as np
 import pandas as pd
-import requests
-import folium
-from streamlit_folium import st_folium
+import numpy as np
 import h3
+import folium
+import requests
+import pyproj
+from streamlit_folium import st_folium
+from shapely.geometry import Polygon
+from shapely.ops import transform
 
-def get_clean_hex_analytics(center_lat, center_lng, radius_meter=2000, h3_resolution=9):
+# ==============================================================================
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И СБОР ДАННЫХ
+# ==============================================================================
+
+@st.cache_data(show_spinner=False, ttl=600)
+def fetch_osm_data_fast(lat, lon, radius_m=2000):
+    """Быстрый и надежный сбор данных через Overpass API"""
+    url = "https://openstreetmap.fr"
+    # Запрашиваем ВСЕ здания (включая building=yes) и инфраструктуру
+    query = f"""
+    [out:json][timeout:25];
+    (
+      way["building"](around:{radius_m},{lat},{lon});
+      relation["building"](around:{radius_m},{lat},{lon});
+      way["highway"](around:{radius_m},{lat},{lon});
+      node["amenity"~"clinic|hospital|doctors|pharmacy|dentist"](around:{radius_m},{lat},{lon});
+      node["shop"~"mall|supermarket|car|jewelry|boutique|beauty"](around:{radius_m},{lat},{lon});
+      node["office"](around:{radius_m},{lat},{lon});
+    );
+    out center geom;
     """
-    Скачивает реальные слои из OSMnx, рассчитывает население по площади (из Колаба)
-    и собирает честные физические метрики для каждого гексагона.
-    """
-    # 1. Сбор жилых зданий для населения и этажности
-    building_tags = {"building": ["apartments", "residential", "house", "living_quarter"]}
     try:
-        gdf_buildings = ox.features_from_point((center_lat, center_lng), tags=building_tags, dist=radius_meter)
+        r = requests.post(url, data={"data": query}, timeout=25)
+        r.raise_for_status()
+        return r.json().get("elements", [])
     except Exception:
-        gdf_buildings = gpd.GeoDataFrame()
+        try:
+            r = requests.post("https://overpass-api.de", data={"data": query}, timeout=25)
+            return r.json().get("elements", [])
+        except Exception:
+            return []
 
-    population_records = []
-    floor_records = []
+def _calculate_polygon_area_3857(geometry_nodes):
+    """Перевод координат Overpass в метры (EPSG:3857) и точный расчет площади фундамента"""
+    if not geometry_nodes or len(geometry_nodes) < 3:
+        return 0.0
+    try:
+        coords = [(pt['lon'], pt['lat']) for pt in geometry_nodes]
+        poly = Polygon(coords)
+        
+        # Проекция Меркатора для перевода градусов в метры
+        wgs84 = pyproj.CRS('EPSG:4326')
+        utm = pyproj.CRS('EPSG:3857')
+        project = pyproj.Transformer.from_crs(wgs84, utm, always_xy=True).transform
+        poly_meters = transform(project, poly)
+        
+        return poly_meters.area
+    except Exception:
+        return 0.0
 
-    if not gdf_buildings.empty:
-        # Переводим в метры для точного расчета площади, как в вашем Колабе!
-        gdf_buildings_meters = gdf_buildings.to_crs(epsg=3857)
+def build_hex_grid_v9(lat, lon, radius_m=2000):
+    """Построение сетки H3 с разрешением 9 (шаг ~182м) в радиусе 2км"""
+    try:
+        center_hex = h3.latlng_to_cell(lat, lon, 9)
+    except AttributeError:
+        center_hex = h3.geo_to_h3(lat, lon, 9)
+        
+    k = int(np.ceil(radius_m / 182)) + 1
+    
+    try:
+        candidates = h3.grid_disk(center_hex, k)
+    except AttributeError:
+        candidates = h3.k_ring(center_hex, k)
+        
+    hexes = []
+    for h in candidates:
+        try:
+            hlat, hlon = h3.cell_to_latlng(h)
+        except AttributeError:
+            hlat, hlon = h3.h3_to_geo(h)
+            
+        # Формула Гаверсинуса для удержания строгого радиуса 2км
+        R = 6371.0
+        phi1, phi2 = np.radians(lat), np.radians(hlat)
+        dphi = np.radians(hlat - lat)
+        dlambda = np.radians(hlon - lon)
+        a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
+        dist = 2 * R * np.arcsin(np.sqrt(a)) * 1000
+        
+        if dist <= radius_m:
+            hexes.append(h)
+    return hexes
 
-        for idx, row in gdf_buildings.iterrows():
-            try:
-                footprint_area = gdf_buildings_meters.loc[idx].geometry.area
+# ==============================================================================
+# 2. АНАЛИТИКА МЕТРИК
+# ==============================================================================
+
+def compute_hex_metrics_v9(hexes, elements):
+    data = {h: {"bld_pop": [], "bld_levels": [], "traffic_count": 0, "biz_count": 0, "med_count": 0} for h in hexes}
+    
+    for el in elements:
+        elat = el.get("lat") or el.get("center", {}).get("lat")
+        elon = el.get("lon") or el.get("center", {}).get("lon")
+        if elat is None or elon is None:
+            continue
+
+        try:
+            h = h3.latlng_to_cell(float(elat), float(elon), 9)
+        except AttributeError:
+            h = h3.geo_to_h3(float(elat), float(elon), 9)
+            
+        if h not in data:
+            continue
+
+        tags = el.get("tags", {})
+        
+        # 1. Логика расчета населения и этажности (из Колаба)
+        if "building" in tags:
+            b_type = tags.get("building")
+            # Исключаем заведомо нежилые промзоны/трансформаторы
+            if b_type not in ["industrial", "gargages", "substation", "ruins"]:
+                geom_nodes = el.get("geometry", [])
+                footprint_area = _calculate_polygon_area_3857(geom_nodes)
                 
-                levels = row.get('building:levels', None)
-                if pd.isna(levels) or not str(levels).isdigit():
-                    b_type = row.get('building', 'residential')
+                # Если геометрия неполная, берем средний след дома в зависимости от типа
+                if footprint_area == 0:
+                    footprint_area = 600.0 if b_type == "apartments" else 150.0
+                
+                levels = tags.get('building:levels', None)
+                if levels is None or not str(levels).isdigit():
                     levels = 9 if b_type == 'apartments' else 5
                 else:
                     levels = int(levels)
-
-                # Ваша оригинальная формула из Колаба
+                
+                # Ваша формула расчета людей из Колаба
                 total_living_area = footprint_area * levels
                 estimated_people = int(total_living_area / 27)
-
                 if estimated_people < 1:
                     estimated_people = 2
+                    
+                data[h]["bld_pop"].append(estimated_people)
+                data[h]["bld_levels"].append(levels)
 
-                # Находим центр здания для привязки к H3
-                centroid = row.geometry.centroid
-                hex_id = h3.latlng_to_cell(centroid.y, centroid.x, h3_resolution)
+        # 2. Подсчет путей трафика
+        if "highway" in tags:
+            data[h]["traffic_count"] += 1
 
-                population_records.append({"hex_id": hex_id, "people": estimated_people})
-                floor_records.append({"hex_id": hex_id, "levels": levels})
-            except Exception:
-                continue
+        # 3. Подсчет медицинских конкурентов
+        if tags.get("amenity") in ["clinic", "hospital", "doctors", "pharmacy", "dentist"]:
+            data[h]["med_count"] += 1
 
-    # 2. Сбор инфраструктурных слоев (дороги, бизнес, медицина)
-    infra_tags = {
-        "highway": ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "living_street", "pedestrian", "footway"],
-        "amenity": ["clinic", "hospital", "doctors", "pharmacy", "dentist"],
-        "shop": ["mall", "supermarket", "car", "jewelry", "boutique", "beauty"],
-        "office": True
-    }
-    try:
-        gdf_infra = ox.features_from_point((center_lat, center_lng), tags=infra_tags, dist=radius_meter)
-    except Exception:
-        gdf_infra = gpd.GeoDataFrame()
+        # 4. Подсчет коммерческих объектов
+        if "shop" in tags or "office" in tags or tags.get("building") in ["commercial", "retail", "office"]:
+            data[h]["biz_count"] += 1
 
-    traffic_records = []
-    business_records = []
-    med_records = []
-
-    if not gdf_infra.empty:
-        for idx, row in gdf_infra.iterrows():
-            try:
-                centroid = row.geometry.centroid
-                hex_id = h3.latlng_to_cell(centroid.y, centroid.x, h3_resolution)
-                
-                # Фильтруем по типу инфраструктуры
-                if hasattr(row, 'highway') and pd.notna(row.get('highway')):
-                    traffic_records.append({"hex_id": hex_id, "count": 1})
-                if hasattr(row, 'amenity') and row.get('amenity') in ["clinic", "hospital", "doctors", "pharmacy", "dentist"]:
-                    med_records.append({"hex_id": hex_id, "count": 1})
-                if (hasattr(row, 'shop') and pd.notna(row.get('shop'))) or (hasattr(row, 'office') and pd.notna(row.get('office'))):
-                    business_records.append({"hex_id": hex_id, "count": 1})
-            except Exception:
-                continue
-
-    # 3. Генерируем базовую сетку гексагонов вокруг центра
-    center_hex = h3.latlng_to_cell(center_lat, center_lng, h3_resolution)
-    max_rings = int(radius_meter / 180) + 1
-    all_hexes = h3.grid_disk(center_hex, max_rings)
-
-    # Агрегируем все списки в единые словари по hex_id
-    df_p = pd.DataFrame(population_records)
-    pop_map = df_p.groupby("hex_id")["people"].sum().to_dict() if not df_p.empty else {}
-
-    df_f = pd.DataFrame(floor_records)
-    floor_map = df_f.groupby("hex_id")["levels"].mean().to_dict() if not df_f.empty else {}
-
-    df_t = pd.DataFrame(traffic_records)
-    traffic_map = df_t.groupby("hex_id")["count"].sum().to_dict() if not df_t.empty else {}
-
-    df_b = pd.DataFrame(business_records)
-    biz_map = df_b.groupby("hex_id")["count"].sum().to_dict() if not df_b.empty else {}
-
-    df_m = pd.DataFrame(med_records)
-    med_map = df_m.groupby("hex_id")["count"].sum().to_dict() if not df_m.empty else {}
-
-    # Собираем итоговую структуру метрик
-    hex_metrics = {}
-    for h in all_hexes:
-        # Проверяем расстояние от центра, чтобы сетка была круглой (радиус 2км)
-        h_lat, h_lon = h3.cell_to_latlng(h)
-        
-        # Считаем расстояние (упрощенно)
-        R = 6371.0
-        phi1, phi2 = np.radians(center_lat), np.radians(h_lat)
-        dphi = np.radians(h_lat - center_lat)
-        dlambda = np.radians(h_lon - center_lng)
-        a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
-        dist = 2 * R * np.arcsin(np.sqrt(a)) * 1000
-
-        if dist <= radius_meter:
-            hex_metrics[h] = {
-                "population": int(pop_map.get(h, 0)),
-                "floors": round(float(floor_map.get(h, 0.0)), 1),
-                "traffic": int(traffic_map.get(h, 0)),
-                "income": int(biz_map.get(h, 0)),
-                "competition": int(med_map.get(h, 0)),
-            }
-            
-    return hex_metrics
+    # Собираем физические значения воедино
+    metrics = {}
+    for h in hexes:
+        d = data[h]
+        metrics[h] = {
+            "population": int(sum(d["bld_pop"])),
+            "floors": round(float(np.mean(d["bld_levels"])), 1) if d["bld_levels"] else 0.0,
+            "traffic": int(d["traffic_count"]),
+            "income": int(d["biz_count"]),
+            "competition": int(d["med_count"]),
+        }
+    return metrics
 
 def _hex_color(value, vmin, vmax, palette):
     if vmax == vmin:
@@ -871,13 +911,12 @@ def _hex_color(value, vmin, vmax, palette):
     idx = max(0, min(idx, len(palette) - 1))
     return palette[idx]
 
-
 # ==============================================================================
-# 3. ИНТЕРФЕЙС И ОТОБРАЖЕНИЕ КАРТЫ СЛОЕВ
+# 3. ИНТЕРФЕЙС И КАРТА СТРИМЛИТ (БЕЗ ТАБЛИЦЫ ЛИДЕРОВ)
 # ==============================================================================
 
 st.divider()
-st.subheader("🗺️ Гео-аналитика радиуса 2 км (гексагональная сетка OSMnx)")
+st.subheader("🗺️ Гео-аналитика радиуса 2 км (гексагональная сетка OSM)")
 
 if "last_result" in st.session_state:
     result = st.session_state.last_result
@@ -895,111 +934,92 @@ if "last_result" in st.session_state:
         }.get(x, x)
     )
 
-    with st.spinner("Загружаем геометрию OSMnx и рассчитываем метрики…"):
+    with st.spinner("Загружаем данные OSM и перестраиваем сетку…"):
         try:
-            # Вызываем нашу новую точную функцию
-            hex_metrics = get_clean_hex_analytics(lat, lon, radius_meter=2000, h3_resolution=9)
+            # Скачиваем через стабильный Overpass
+            elements = fetch_osm_data_fast(lat, lon, radius_m=2000)
+            grid = build_hex_grid_v9(lat, lon, radius_m=2000)
+            hex_metrics = compute_hex_metrics_v9(grid, elements)
 
             if not hex_metrics:
-                st.warning("Не удалось собрать данные по указанной локации.")
+                st.warning("Не удалось сгенерировать гексагональную сетку.")
             else:
                 m = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB positron")
                 
-                # Радиус анализа
+                # Круг радиуса анализа
                 folium.Circle(
                     location=[lat, lon], radius=2000, color="crimson",
                     weight=2, fill=False, dash_array="5, 5"
                 ).add_to(m)
 
-                # Маркер клиники
+                # Маркер центра клиники
                 folium.Marker(
                     [lat, lon], tooltip="Центр анализа",
-                    icon=folium.Icon(color="red", icon="home")
+                    icon=folium.Icon(color="red", icon="plus", prefix="fa")
                 ).add_to(m)
 
-                # Вычисляем vmin/vmax строго для активных (не нулевых) ячеек текущего слоя
+                # Фильтруем значения > 0 для текущего выбранного слоя
                 active_vals = [met[filter_key] for met in hex_metrics.values() if met[filter_key] > 0]
                 
                 if not active_vals:
-                    st.info("В выбранном радиусе нет объектов для отображения этого слоя.")
-                    vmin, vmax = 0, 1
+                    st.info("В выбранном радиусе нет объектов для отображения этого слоя. Попробуйте сменить слой.")
                 else:
                     vmin, vmax = min(active_vals), max(active_vals)
                     if vmax == vmin:
                         vmax = vmin + 1
 
-                # Наборы палитр
-                palettes = {
-                    "population": ["#fcfbfd", "#efedf5", "#dadaeb", "#bcbddc", "#9e9ac8", "#807dba", "#6a51a3", "#4a1486"],
-                    "floors":     ["#f7f4f9", "#e7e1ef", "#d4b9da", "#c994c7", "#df65b0", "#e7298a", "#ce1256", "#91003f"],
-                    "traffic":    ["#f7fbff", "#deebf7", "#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#084594"],
-                    "income":     ["#f7fcf5", "#e5f5e0", "#c7e9b4", "#74c476", "#41ab5d", "#238443", "#005a32"],
-                    "competition":["#fff5f0", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a", "#ef3b2c", "#cb181d", "#990000"],
-                }
-                
+                    palettes = {
+                        "population": ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#e31a1c", "#bd0026"],
+                        "floors":     ["#f7f4f9", "#e7e1ef", "#d4b9da", "#c994c7", "#df65b0", "#e7298a", "#ce1256", "#91003f"],
+                        "traffic":    ["#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090", "#fc8d59", "#d73027", "#a50026"],
+                        "income":     ["#ffffe5", "#f7fcb9", "#d9f0a3", "#addd8e", "#78c679", "#41ab5d", "#238443", "#004529"],
+                        "competition":["#1a9850", "#66bd63", "#a6d96a", "#d9ef8b", "#fee08b", "#fdae61", "#f46d43", "#d73027"],
+                    }
+                    
+                # Словарь текстовых шаблонов для всплывающих подсказок
                 tooltips_map = {
                     "population": "Примерное население ячейки: {} чел.",
                     "floors": "Средняя этажность зоны: {} эт.",
-                    "traffic": "Дорожная сеть в ячейке: {} ед.",
-                    "income": "Бизнес-объекты (офисы/магазины): {} ед.",
-                    "competition": "Медицинские учреждения: {} шт.",
+                    "traffic": "Дорожных путей в ячейке: {} ед.",
+                    "income": "Бизнес-объектов в ячейке: {} ед.",
+                    "competition": "Медицинских конкурентов: {} шт."
                 }
 
-                # Наносим гексагоны на карту
-                for h, met in hex_metrics.items():
-                    val = met[filter_key]
+                # Наносим гексагоны на карту динамически
+                for h in grid:
+                    val = hex_metrics[h][filter_key]
                     
-                    # ЖЕСТКАЯ ФИЛЬТРАЦИЯ: Если в этом слое у гексагона 0 — мы его просто не рисуем!
+                    # Если в выбранном слое значение 0 — ячейка полностью скрывается (как в Колабе)
                     if val == 0:
                         continue
                         
                     color = _hex_color(val, vmin, vmax, palettes[filter_key])
                     
-                    # Получаем границы гексагона
-                    boundary = h3.cell_to_boundary(h)
+                    try:
+                        boundary = h3.cell_to_boundary(h)
+                    except AttributeError:
+                        boundary = h3.h3_to_geo_boundary(h, geo_json=False)
+                        
                     coords = [(lat_pt, lon_pt) for lat_pt, lon_pt in boundary]
                     
                     if coords:
                         folium.Polygon(
-                            locations=coords, 
-                            color="gray", 
+                            locations=coords,
+                            color="gray",
                             weight=0.3,
-                            fill_color=color, 
-                            fill_opacity=0.6, 
+                            fill_color=color,
+                            fill_opacity=0.6,
                             tooltip=tooltips_map[filter_key].format(val)
                         ).add_to(m)
 
-                # Рендерим карту в Streamlit
-                st_folium(m, width="100%", height=600, returned_objects=[], key="osm_clean_map_v9")
-
-                # Обновление нижней таблицы лидеров
-                st.caption("📊 Лидеры локации: топ-5 зон по выбранному показателю")
-                table_rows = []
-                for h, vals in hex_metrics.items():
-                    if vals[filter_key] == 0:
-                        continue
-                    h_lat, h_lon = h3.cell_to_latlon(h)
-                    table_rows.append({
-                        "Координаты центра": f"{h_lat:.5f}, {h_lon:.5f}",
-                        "population": vals["population"],
-                        "floors": vals["floors"],
-                        "traffic": vals["traffic"],
-                        "income": vals["income"],
-                        "competition": vals["competition"]
-                    })
-                
-                df_hex = pd.DataFrame(table_rows)
-                if not df_hex.empty:
-                    df_hex = df_hex.sort_values(by=filter_key, ascending=False).head(5)
-                    df_hex.insert(0, "Ранг зоны", [f"🏆 Локация #{i+1}" for i in range(len(df_hex))])
-                    df_hex = df_hex.rename(columns={
-                        "population": "Население (чел.)",
-                        "floors": "Ср. этажность",
-                        "traffic": "Дороги/пути (ед.)",
-                        "income": "Бизнес (объекты)",
-                        "competition": "Конкуренты (объекты)"
-                    })
-                    st.dataframe(df_hex, use_container_width=True, hide_index=True)
+                # Выводим только карту, таблица лидеров удалена
+                st_folium(
+                    m, 
+                    width="100%", 
+                    height=600, 
+                    returned_objects=[], 
+                    key="map_overpass_v9_fixed"
+                )
 
         except Exception as e:
             st.error(f"Ошибка выполнения гео-анализа: {e}")
