@@ -83,26 +83,25 @@ FACTOR_WEIGHTS = {
     # DEMAND
     "population_500m": 0.08,
     "population_1km": 0.10,
-    "population_3km": 0.08,
+    "population_3km": 0.06,
     "target_population_share": 0.12,
     "target_population_count_1km": 0.10,
     "income_fit": 0.12,
     "age_fit": 0.10,
-    "gender_fit": 0.04,
-    "residential_density": 0.08,
+    "gender_fit": 0.08,
+    "residential_density": 0.06,
     "population_growth": 0.05,
     "family_profile": 0.06,
     "daytime_population_balance": 0.07,
 
     # ACCESSIBILITY — зоны охвата сокращены до 2 факторов
-    "walk_5min": 0.13,
-    "car_10min": 0.19,
-    "public_transport_access": 0.16,
-    "transit_connectivity": 0.10,
-    "road_connectivity": 0.10,
-    "pedestrian_connectivity": 0.10,
-    "physical_barriers": 0.12,
-    "vehicle_access": 0.10,
+    "walk_5min": 0.15,
+    "car_10min": 0.21,
+    "public_transport_access": 0.18,
+    "transit_connectivity": 0.11,
+    "road_connectivity": 0.11,
+    "pedestrian_connectivity": 0.11,
+    "physical_barriers": 0.13,
 
     # TRAFFIC
     "pedestrian_traffic_quality": 0.16,
@@ -165,8 +164,7 @@ for f in [
 
 for f in [
     "walk_5min", "car_10min", "public_transport_access", "transit_connectivity",
-    "road_connectivity", "pedestrian_connectivity", "physical_barriers",
-    "vehicle_access"
+    "road_connectivity", "pedestrian_connectivity", "physical_barriers"
 ]:
     FACTOR_BLOCKS[f] = "accessibility"
 
@@ -227,7 +225,7 @@ FACTOR_NAMES = {
     "road_connectivity": "Автомобильная связность",
     "pedestrian_connectivity": "Пешеходная связность",
     "physical_barriers": "Физические барьеры",
-    "vehicle_access": "Удобство автомобильного подъезда",
+
 
     "pedestrian_traffic_quality": "Качество пешеходного трафика",
     "car_traffic_quality": "Качество автомобильного трафика",
@@ -296,7 +294,7 @@ FACTOR_DESCRIPTIONS = {
     "road_connectivity": "Качество дорожной сети (ширина, состояние, количество полос). 100 = широкие проспекты без заторов.",
     "pedestrian_connectivity": "Удобство пешеходных связей (тротуары, переходы, отсутствие заборов). 100 = комфортная пешеходная среда.",
     "physical_barriers": "Препятствия для пациентов (заборы, реки без мостов, склоны, шоссе). 100 = нет барьеров.",
-    "vehicle_access": "Удобство подъезда на машине (ширина подъезда, разворот, разгрузка). 100 = удобный подъезд с любой стороны.",
+
 
     # TRAFFIC
     "pedestrian_traffic_quality": "Качество пешеходного потока (количество + соответствие ЦА). 100 = много 'правильных' людей.",
@@ -439,7 +437,6 @@ class GeoAIProfile(BaseModel):
     road_connectivity: int = Field(ge=0, le=100)
     pedestrian_connectivity: int = Field(ge=0, le=100)
     physical_barriers: int = Field(ge=0, le=100)
-    vehicle_access: int = Field(ge=0, le=100)
 
     pedestrian_traffic_quality: int = Field(ge=0, le=100)
     car_traffic_quality: int = Field(ge=0, le=100)
@@ -979,11 +976,6 @@ def calculate_hard_barriers(profile: dict) -> List[str]:
             "Высокий уровень физических барьеров между потенциальной ЦА и объектом."
         )
 
-    if profile.get("vehicle_access", 0) <= 20:
-        barriers.append(
-            "Критически неудобный автомобильный подъезд."
-        )
-
     if profile.get("parking_reliability", 0) <= 20:
         barriers.append(
             "Очень низкая надёжность парковки для пациентов."
@@ -1023,11 +1015,6 @@ def apply_hard_penalties(
         penalty += 12
     elif profile.get("physical_barriers", 0) >= 80:
         penalty += 7
-
-    if profile.get("vehicle_access", 0) <= 15:
-        penalty += 10
-    elif profile.get("vehicle_access", 0) <= 25:
-        penalty += 5
 
     # Усиленные штрафы за отсутствие/нехватку парковки
     if profile.get("parking_reliability", 0) <= 10:
@@ -1424,6 +1411,41 @@ if "last_result" in st.session_state:
     )
 
     # --------------------------------------------------------------------------
+    # ДЕМОГРАФИЧЕСКИЙ ПРОФИЛЬ — ключевые параметры ЦА
+    # --------------------------------------------------------------------------
+
+    st.subheader("👥 Демографический профиль")
+
+    demo_factors = {
+        "age_fit": "Возрастное соответствие ЦА",
+        "gender_fit": "Половое соответствие ЦА",
+        "income_fit": "Соответствие дохода среднему чеку",
+        "family_profile": "Семейный профиль",
+        "target_population_share": "Доля ЦА в радиусе 1 км",
+    }
+
+    demo_cols = st.columns(len(demo_factors))
+    for col, (key, label) in zip(demo_cols, demo_factors.items()):
+        val = factor_value(profile, key)
+        if key in LOW_IS_BAD:
+            val = 100.0 - val
+        color = "🟢" if val >= 75 else "🟡" if val >= 50 else "🟠" if val >= 30 else "🔴"
+        col.metric(
+            label,
+            f"{val:.0f}/100",
+            help=FACTOR_DESCRIPTIONS.get(key, ""),
+        )
+        col.markdown(f"<div style='text-align:center'>{color}</div>", unsafe_allow_html=True)
+
+    # Предупреждение по половому составу
+    gender_val = 100.0 - factor_value(profile, "gender_fit") if "gender_fit" in LOW_IS_BAD else factor_value(profile, "gender_fit")
+    if gender_val < 50:
+        st.warning(
+            f"⚠️ Половой состав района не соответствует ЦА ({gender_val:.0f}/100). "
+            f"Возможно, в районе преобладает мужское население (офисы, БЦ), а ЦА — женщины."
+        )
+
+    # --------------------------------------------------------------------------
     # BENCHMARK — скрыт по запросу пользователя
     # --------------------------------------------------------------------------
     # Блок сравнения с эталонными объектами скрыт, т.к. эталонная база
@@ -1557,7 +1579,7 @@ if "last_result" in st.session_state:
 
     st.subheader("💪 Основные сильные стороны")
 
-    strong = df_factors[df_factors["Score"] >= 75].head(10)
+    strong = df_factors[df_factors["Score"] >= 75].head(15)
 
     if strong.empty:
         st.write("Нет факторов с оценкой ≥75.")
