@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-GeoMarketing AI — Clinic Location Benchmark v3.2
+GeoMarketing AI — Clinic Location Benchmark v3.3
 
-Исправления:
-1. gender_fit возвращён в спрос (критично для ЦА).
-2. Параметры локации: base 100 + явные штрафы, показываются в UI.
-3. Понятные названия факторов в таблице.
-4. Расшифровка формулы similarity в интерфейсе.
+Критические исправления:
+1. OSM-fallback: при отказе Overpass benchmark отключается (нельзя сравнивать
+   target без OSM с benchmark с OSM — получается 55% similarity с самим собой).
+2. Упрощённый Overpass-запрос + retry с задержкой.
+3. Параллельность OSM снижена до 2 потоков (меньше банов от Overpass).
+4. Дефолты при отсутствии OSM — нейтральные 50, а не минимальные 0-30.
+5. Debug: разбор вклада каждого фактора в distance.
 """
 
 import json
@@ -26,12 +28,12 @@ from pydantic import BaseModel, Field
 # STREAMLIT CONFIG
 # ==============================================================================
 st.set_page_config(
-    page_title="Геомаркетинг клиники — Benchmark v3.2",
+    page_title="Геомаркетинг клиники — Benchmark v3.3",
     page_icon="📍",
     layout="wide",
 )
 
-st.title("📍 Геомаркетинговый анализ локации клиники — v3.2")
+st.title("📍 Геомаркетинговый анализ локации клиники — v3.3")
 st.caption("Явные параметры + детерминированный скоринг. Платные geo-API не нужны.")
 
 # ==============================================================================
@@ -47,7 +49,7 @@ OVERPASS_URLS = [
 ]
 
 REQUEST_HEADERS = {
-    "User-Agent": "ClinicGeoAnalytics/3.2 (streamlit-cloud; business use)"
+    "User-Agent": "ClinicGeoAnalytics/3.3 (streamlit-cloud; business use)"
 }
 
 BLOCK_WEIGHTS = {
@@ -59,7 +61,6 @@ BLOCK_WEIGHTS = {
     "visibility_env":  0.15,
 }
 
-# --- ФАКТОРЫ: (ключ, блок, вес_в_блоке, тип_оценки, человекочитаемое_название) ---
 FACTORS = [
     ("location_param_score",    "location_params", 1.00, "rule",  "Базовые параметры локации"),
     ("parking_proximity",       "parking_access",  0.30, "osm",   "Близость парковки"),
@@ -92,7 +93,9 @@ FACTOR_SOURCE = {f[0]: f[3] for f in FACTORS}
 FACTOR_LABEL = {f[0]: f[4] for f in FACTORS}
 LOW_IS_BAD = {"competitor_density"}
 
-# --- ПРАВИЛА ПАРАМЕТРОВ ЛОКАЦИИ ---
+# Полный вес каждого фактора в глобальном score
+FACTOR_GLOBAL_WEIGHT = {f[0]: f[2] * BLOCK_WEIGHTS[f[1]] for f in FACTORS}
+
 LOC_PARAM_RULES = [
     ("floor_upper", "Объект на 2+ этаже", 25, "Нет видимости, сложная навигация, барьер для пациентов"),
     ("no_separate_entrance", "Нет отдельного входа", 20, "Вход через подъезд, лестницу, охрану БЦ — барьер"),
@@ -102,7 +105,6 @@ LOC_PARAM_RULES = [
     ("not_first_line", "Не первая линия", 10, "Меньше проходного трафика, ниже узнаваемость"),
 ]
 
-# --- ЭТАЛОНЫ ---
 DATA_CLINICS = [
     {"address": "Красноярск, ул. 9 Мая, 19а",       "status": "успешный", "lat": 56.067749, "lon": 92.933822, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
     {"address": "Красноярск, ул. Ладо Кецховели, 34", "status": "успешный", "lat": 56.017160, "lon": 92.813882, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
@@ -183,32 +185,34 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
 
 
 # ==============================================================================
-# OVERPASS / OSM
+# OVERPASS / OSM  (с retry и fallback)
 # ==============================================================================
-def _overpass_request(query: str) -> List[dict]:
+def _overpass_request(query: str, retries: int = 2) -> List[dict]:
     last_error = None
-    for url in OVERPASS_URLS:
-        try:
-            time.sleep(0.15)
-            response = requests.post(url, data={"data": query}, headers=REQUEST_HEADERS, timeout=30)
-            response.raise_for_status()
-            return response.json().get("elements", [])
-        except Exception as exc:
-            last_error = exc
-            continue
+    for attempt in range(retries + 1):
+        for url in OVERPASS_URLS:
+            try:
+                if attempt > 0:
+                    time.sleep(1.5 * attempt)
+                response = requests.post(url, data={"data": query}, headers=REQUEST_HEADERS, timeout=35)
+                response.raise_for_status()
+                return response.json().get("elements", [])
+            except Exception as exc:
+                last_error = exc
+                continue
     if last_error:
         raise last_error
     return []
 
 
-@st.cache_data(show_spinner=False, ttl=86400)
+@st.cache_data(show_spinner=False, ttl=3600)
 def collect_osm_context(lat: float, lon: float) -> dict:
+    """Упрощённый Overpass-запрос для надёжности."""
     query = f"""
-    [out:json][timeout:30];
+    [out:json][timeout:35];
     (
       nwr(around:300,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors"];
-      nwr(around:800,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors|school|kindergarten|university|college"];
-      nwr(around:800,{lat},{lon})["shop"~"supermarket|mall|chemist"];
+      nwr(around:800,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors|school|kindergarten"];
       nwr(around:500,{lat},{lon})["amenity"="parking"];
       nwr(around:1000,{lat},{lon})["amenity"="parking"];
       nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
@@ -217,8 +221,7 @@ def collect_osm_context(lat: float, lon: float) -> dict:
       nwr(around:1000,{lat},{lon})["building"~"apartments|residential|house|detached"];
       nwr(around:500,{lat},{lon})["building"~"office|commercial|retail"];
       nwr(around:1000,{lat},{lon})["building"~"office|commercial|retail"];
-      nwr(around:800,{lat},{lon})["highway"~"primary|secondary|tertiary|residential|service|living_street|unclassified"];
-      nwr(around:500,{lat},{lon})["landuse"~"residential|commercial|retail"];
+      nwr(around:800,{lat},{lon})["highway"~"primary|secondary|tertiary|residential|service"];
       nwr(around:300,{lat},{lon})["healthcare"~"centre|clinic|doctor|laboratory|diagnostic"];
       nwr(around:800,{lat},{lon})["healthcare"~"centre|clinic|doctor|laboratory|diagnostic"];
     );
@@ -234,8 +237,7 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         "clinic_300m": 0, "clinic_800m": 0,
         "hospital_300m": 0, "hospital_800m": 0,
         "diag_lab_300m": 0, "diag_lab_800m": 0,
-        "school_800m": 0, "kindergarten_800m": 0,
-        "supermarket_800m": 0, "mall_800m": 0,
+        "school_800m": 0,
         "parking_500m": 0, "parking_1000m": 0,
         "bus_stop_300m": 0, "public_transport_800m": 0,
         "residential_buildings_500m": 0, "residential_buildings_1000m": 0,
@@ -250,7 +252,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     for el in elements:
         tags = el.get("tags", {})
         amenity = tags.get("amenity")
-        shop = tags.get("shop")
         highway = tags.get("highway")
         building = tags.get("building")
         land = tags.get("landuse")
@@ -268,12 +269,8 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         if healthcare in ("laboratory", "diagnostic"):
             counts["diag_lab_300m"] += 1
             counts["diag_lab_800m"] += 1
-        if amenity in ("school", "kindergarten", "university", "college"):
+        if amenity in ("school", "kindergarten"):
             counts["school_800m"] += 1
-        if shop in ("supermarket", "chemist"):
-            counts["supermarket_800m"] += 1
-        if shop == "mall":
-            counts["mall_800m"] += 1
         if amenity == "parking":
             counts["parking_500m"] += 1
             counts["parking_1000m"] += 1
@@ -314,25 +311,42 @@ def collect_osm_context(lat: float, lon: float) -> dict:
 
 
 def collect_osm_parallel(locations: List[Tuple[str, float, float]]) -> Dict[str, dict]:
+    """Последовательный сбор с небольшой задержкой — надёжнее для Overpass."""
     result: Dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(locations)))) as executor:
-        futures = {executor.submit(collect_osm_context, lat, lon): key for key, lat, lon in locations}
-        for future in as_completed(futures):
-            key = futures[future]
-            try:
-                result[key] = future.result()
-            except Exception as exc:
-                result[key] = {"available": False, "error": str(exc), "counts": {}, "roads": {}, "landuse": {}, "buildings": {}}
+    for key, lat, lon in locations:
+        try:
+            result[key] = collect_osm_context(lat, lon)
+        except Exception as exc:
+            result[key] = {"available": False, "error": str(exc), "counts": {}, "roads": {}, "landuse": {}, "buildings": {}}
+        time.sleep(0.3)
     return result
 
 # ==============================================================================
-# ДЕТЕРМИНИРОВАННЫЙ SCORING ИЗ OSM
+# OSM → SCORE (с нейтральным fallback при отсутствии данных)
 # ==============================================================================
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
 def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
+    """Если OSM недоступен — возвращаем нейтральные 50, а не минимальные 0-30."""
+    if not osm.get("available"):
+        return {
+            "parking_proximity": 50,
+            "parking_supply": 50,
+            "vehicle_access": 50,
+            "public_transport": 50,
+            "population_density": 50,
+            "competitor_density": 50,
+            "pharmacy_synergy": 50,
+            "diagnostics_synergy": 50,
+            "hospital_synergy": 50,
+            "medical_cluster": 50,
+            "visibility": 50,
+            "road_type_fit": 50,
+            "pedestrian_comfort": 50,
+        }
+
     c = osm.get("counts", {})
     scores = {}
 
@@ -502,7 +516,7 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
 
 
 # ==============================================================================
-# ПАРАМЕТРЫ ЛОКАЦИИ → SCORE + ШТРАФЫ
+# ПАРАМЕТРЫ ЛОКАЦИИ
 # ==============================================================================
 def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, int, str]]]:
     base = 100.0
@@ -570,14 +584,15 @@ def build_batch_user_prompt(locations: List[dict], osm_by_key: Dict[str, dict], 
         param_desc.append("Отдельный вход" if p.get("separate_entrance") else "Нет отдельного входа")
         param_desc.append("Видимость с улицы" if p.get("street_visibility") else "Нет видимости")
         param_desc.append("Первая линия" if p.get("first_line") else "Не первая линия")
+        osm_status = "✅ Доступен" if osm.get("available") else "❌ Недоступен"
         chunks.append(f"""
 --- ЛОКАЦИЯ {key} ---
 Адрес: {loc["address"]}
 Параметры: {', '.join(param_desc)}
 Координаты: {loc["lat"]:.6f}, {loc["lon"]:.6f}
 ЦА: возраст {loc["target_age"]:.0f}; женщины {loc["share_female"]*100:.0f}%; чек {loc["avg_ticket"]:,} руб.
+OSM статус: {osm_status}
 OSM counts: {json.dumps(osm.get("counts", {}), ensure_ascii=False)}
-OSM landuse: {json.dumps(osm.get("landuse", {}), ensure_ascii=False)}
 """)
     return f"""Построй GeoAIProfile для КАЖДОЙ локации из списка ниже.
 Target-локация: {target_key}
@@ -586,7 +601,7 @@ Target-локация: {target_key}
 - Верни РОВНО по одному профилю на каждый key.
 - Оценивай независимо, НЕ сравнивай локации между собой.
 - Не используй статус successful/weak (не передан).
-- Если OSM пустой — снижай confidence и evidence_quality.
+- Если OSM недоступен — снижай confidence и evidence_quality.
 
 {''.join(chunks)}
 """
@@ -611,7 +626,7 @@ def generate_profiles_batch_cached(api_key: str, model: str, locations_json: str
     return result
 
 # ==============================================================================
-# SCORING ENGINE
+# SCORING ENGINE  (с debug-разбором similarity)
 # ==============================================================================
 def compute_block_scores(full_profile: dict) -> Dict[str, float]:
     blocks = {b: [] for b in BLOCK_WEIGHTS}
@@ -636,22 +651,40 @@ def compute_absolute_score(block_scores: Dict[str, float]) -> float:
     return round(sum(block_scores[b] * BLOCK_WEIGHTS[b] for b in BLOCK_WEIGHTS), 1)
 
 
+def _norm_value(profile: dict, factor: str) -> float:
+    v = profile.get(factor, 0)
+    if factor in LOW_IS_BAD:
+        v = 100.0 - v
+    return v
+
+
 def profile_vector(full_profile: dict) -> np.ndarray:
-    values = []
-    for factor in FACTOR_KEYS:
-        v = full_profile.get(factor, 0)
-        if factor in LOW_IS_BAD:
-            v = 100.0 - v
-        values.append(v)
-    return np.array(values, dtype=float)
+    return np.array([_norm_value(full_profile, f) for f in FACTOR_KEYS], dtype=float)
 
 
 def similarity_to_reference(target: dict, reference: dict) -> float:
     a = profile_vector(target)
     b = profile_vector(reference)
-    weights = np.array([FACTOR_WEIGHT_IN_BLOCK[f] * BLOCK_WEIGHTS[FACTOR_BLOCK[f]] for f in FACTOR_KEYS], dtype=float)
+    weights = np.array([FACTOR_GLOBAL_WEIGHT[f] for f in FACTOR_KEYS], dtype=float)
     distance = np.sum(np.abs(a - b) * weights) / np.sum(weights)
     return round(clamp(100.0 - distance), 1)
+
+
+def similarity_debug(target: dict, reference: dict, ref_name: str) -> Tuple[float, List[Tuple[str, float, float, float]]]:
+    """Возвращает (similarity, список (фактор, target_val, ref_val, вклад_в_distance))."""
+    a = profile_vector(target)
+    b = profile_vector(reference)
+    weights = np.array([FACTOR_GLOBAL_WEIGHT[f] for f in FACTOR_KEYS], dtype=float)
+    total_w = np.sum(weights)
+    items = []
+    for i, factor in enumerate(FACTOR_KEYS):
+        diff = abs(a[i] - b[i])
+        contrib = round(diff * weights[i] / total_w, 2)
+        items.append((FACTOR_LABEL.get(factor, factor), round(a[i], 1), round(b[i], 1), contrib))
+    items.sort(key=lambda x: x[3], reverse=True)
+    distance = np.sum(np.abs(a - b) * weights) / total_w
+    sim = round(clamp(100.0 - distance), 1)
+    return sim, items
 
 
 def group_centroid(profiles: List[dict]) -> dict:
@@ -659,12 +692,7 @@ def group_centroid(profiles: List[dict]) -> dict:
         return {}
     centroid = {}
     for factor in FACTOR_KEYS:
-        vals = []
-        for p in profiles:
-            v = p.get(factor, 0)
-            if factor in LOW_IS_BAD:
-                v = 100.0 - v
-            vals.append(v)
+        vals = [_norm_value(p, factor) for p in profiles]
         centroid[factor] = float(np.mean(vals))
     return centroid
 
@@ -672,17 +700,31 @@ def group_centroid(profiles: List[dict]) -> dict:
 def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict:
     successful = [r for r in benchmark_rows if r["status"] == "успешный"]
     weak = [r for r in benchmark_rows if r["status"] == "слабый"]
-    success_similarity = [(r["address"], similarity_to_reference(target_profile, r["profile"])) for r in successful]
-    weak_similarity = [(r["address"], similarity_to_reference(target_profile, r["profile"])) for r in weak]
+
+    success_similarity = []
+    for r in successful:
+        sim, debug = similarity_debug(target_profile, r["profile"], r["address"])
+        success_similarity.append((r["address"], sim, debug))
+
+    weak_similarity = []
+    for r in weak:
+        sim, debug = similarity_debug(target_profile, r["profile"], r["address"])
+        weak_similarity.append((r["address"], sim, debug))
+
     success_similarity.sort(key=lambda x: x[1], reverse=True)
     weak_similarity.sort(key=lambda x: x[1], reverse=True)
+
     successful_centroid = group_centroid([r["profile"] for r in successful])
     weak_centroid = group_centroid([r["profile"] for r in weak])
+
     to_success = similarity_to_reference(target_profile, successful_centroid) if successful_centroid else 0.0
     to_weak = similarity_to_reference(target_profile, weak_centroid) if weak_centroid else 0.0
+
     return {
-        "success_similarity": success_similarity,
-        "weak_similarity": weak_similarity,
+        "success_similarity": [(a, b) for a, b, _ in success_similarity],
+        "weak_similarity": [(a, b) for a, b, _ in weak_similarity],
+        "success_debug": success_similarity,
+        "weak_debug": weak_similarity,
         "successful_centroid_similarity": to_success,
         "weak_centroid_similarity": to_weak,
         "benchmark_gap": round(to_success - to_weak, 1),
@@ -830,6 +872,9 @@ def run_full_analysis(
         status_callback("1/3", "Собираю OSM-данные для 8 локаций…")
     osm_by_key = collect_osm_parallel([(x["key"], x["lat"], x["lon"]) for x in locations])
 
+    target_osm = osm_by_key["target"]
+    osm_target_available = target_osm.get("available", False)
+
     osm_scores_by_key = {}
     for loc in locations:
         osm_scores_by_key[loc["key"]] = osm_to_factor_scores(osm_by_key[loc["key"]])
@@ -864,9 +909,10 @@ def run_full_analysis(
     block_scores = compute_block_scores(target_profile)
     absolute_base = compute_absolute_score(block_scores)
 
-    hard_barriers = calculate_hard_barriers(target_profile, osm_by_key["target"], params)
+    hard_barriers = calculate_hard_barriers(target_profile, target_osm, params)
     absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params)
 
+    # BENCHMARK
     benchmark_rows = []
     for idx, row in enumerate(DATA_CLINICS, start=1):
         benchmark_rows.append({
@@ -874,16 +920,23 @@ def run_full_analysis(
             "status": row["status"],
             "profile": full_profiles[f"benchmark_{idx}"],
         })
+
+    # Если OSM target недоступен — benchmark может быть некорректен
     benchmark = benchmark_analysis(target_profile, benchmark_rows)
+    benchmark_valid = osm_target_available
 
     if status_callback:
         status_callback("3/3", "Расчёт benchmark…")
 
-    benchmark_component = (
-        benchmark["successful_centroid_similarity"] * 0.60 +
-        clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
-    )
-    final_score = round(absolute_final * 0.60 + benchmark_component * 0.40, 1)
+    if benchmark_valid:
+        benchmark_component = (
+            benchmark["successful_centroid_similarity"] * 0.60 +
+            clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
+        )
+        final_score = round(absolute_final * 0.60 + benchmark_component * 0.40, 1)
+    else:
+        benchmark_component = 50.0
+        final_score = round(absolute_final * 0.60 + 50.0 * 0.40, 1)
 
     if final_score >= 75:
         verdict = "СИЛЬНАЯ ЛОКАЦИЯ"
@@ -896,9 +949,11 @@ def run_full_analysis(
     else:
         verdict = "КРИТИЧЕСКИ СЛАБАЯ ЛОКАЦИЯ — НЕ РЕКОМЕНДУЕТСЯ"
 
-    confidence = calculate_confidence(target_ai, osm_by_key["target"])
+    confidence = calculate_confidence(target_ai, target_osm)
     if confidence < 55:
         verdict += " — НИЗКАЯ УВЕРЕННОСТЬ"
+    if not osm_target_available:
+        verdict += " — ⚠️ OSM НЕДОСТУПЕН, BENCHMARK НЕКОРРЕКТЕН"
 
     _, applied_penalties = compute_location_param_score(params)
 
@@ -910,13 +965,15 @@ def run_full_analysis(
         "longitude": target_lon,
         "profile": target_profile,
         "block_scores": block_scores,
-        "osm_context": osm_by_key["target"],
+        "osm_context": target_osm,
+        "osm_target_available": osm_target_available,
         "absolute_base": absolute_base,
         "absolute_score": absolute_final,
         "hard_penalty": hard_penalty,
         "hard_barriers": hard_barriers,
         "confidence": confidence,
         "benchmark": benchmark,
+        "benchmark_valid": benchmark_valid,
         "benchmark_rows": benchmark_rows,
         "final_score": final_score,
         "verdict": verdict,
@@ -1102,13 +1159,20 @@ if "last_result" in st.session_state:
     else: param_tags.append("❌ Не 1-я линия")
     st.caption(" · ".join(param_tags))
 
+    # OSM статус
+    if not result["osm_target_available"]:
+        st.error("🚨 Overpass/OSM недоступен. Все OSM-факторы установлены в нейтральные 50. Benchmark-сравнение может быть некорректным.")
+
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.metric("FINAL SCORE", f"{result['final_score']} / 100")
     with m2:
         st.metric("Абсолютное качество", f"{result['absolute_score']} / 100")
     with m3:
-        st.metric("Похожесть на успешные", f"{benchmark['successful_centroid_similarity']} / 100")
+        if result["benchmark_valid"]:
+            st.metric("Похожесть на успешные", f"{benchmark['successful_centroid_similarity']} / 100")
+        else:
+            st.metric("Похожесть на успешные", "N/A")
     with m4:
         st.metric("Уверенность", f"{result['confidence']}%")
 
@@ -1123,7 +1187,6 @@ if "last_result" in st.session_state:
 
     st.caption(f"Базовый score: {result['absolute_base']}; hard-penalty: −{result['hard_penalty']}")
 
-    # Расшифровка параметров локации
     if result["applied_penalties"]:
         with st.expander("📐 Расчёт параметров локации"):
             st.markdown("База: **100** (идеальные параметры)")
@@ -1143,35 +1206,45 @@ similarity = 100 − distance
 ```
 
 - 100% = профили идентичны
-- 0% = максимально разные профили
-- Веса учитывают и вес фактора в блоке, и вес блока в итоге
-- Например, разница в парковке на 80 баллов с весом блока 20% даст вклад ~16 баллов distance
+- 0% = максимально разные
+- Вес каждого фактора = вес_в_блоке × вес_блока
 """)
 
-    bm1, bm2, bm3 = st.columns(3)
-    with bm1:
-        st.metric("Ближайший успешный", f"{benchmark['success_similarity'][0][1]}%" if benchmark["success_similarity"] else "—")
-    with bm2:
-        st.metric("Средний успешных", f"{benchmark['successful_centroid_similarity']}%")
-    with bm3:
-        st.metric("Средний слабых", f"{benchmark['weak_centroid_similarity']}%")
+    if not result["benchmark_valid"]:
+        st.warning("⚠️ Benchmark отключён: OSM-данные для target недоступны. Сравнение target (с нейтральными OSM-оценками) с benchmark (с реальными OSM) было бы некорректным.")
+    else:
+        bm1, bm2, bm3 = st.columns(3)
+        with bm1:
+            st.metric("Ближайший успешный", f"{benchmark['success_similarity'][0][1]}%" if benchmark["success_similarity"] else "—")
+        with bm2:
+            st.metric("Средний успешных", f"{benchmark['successful_centroid_similarity']}%")
+        with bm3:
+            st.metric("Средний слабых", f"{benchmark['weak_centroid_similarity']}%")
 
-    st.metric("Benchmark Gap", f"{benchmark['benchmark_gap']:+.1f}",
-        help="Положительный = ближе к успешным, чем к слабым.")
+        st.metric("Benchmark Gap", f"{benchmark['benchmark_gap']:+.1f}",
+            help="Положительный = ближе к успешным, чем к слабым.")
 
-    bc1, bc2 = st.columns(2)
-    with bc1:
-        st.markdown("#### Успешные эталоны")
-        df_s = pd.DataFrame(benchmark["success_similarity"], columns=["Объект", "Similarity"])
-        if not df_s.empty:
-            df_s["Similarity"] = df_s["Similarity"].map(lambda x: f"{x:.1f}%")
-            st.dataframe(df_s, use_container_width=True, hide_index=True)
-    with bc2:
-        st.markdown("#### Слабые эталоны")
-        df_w = pd.DataFrame(benchmark["weak_similarity"], columns=["Объект", "Similarity"])
-        if not df_w.empty:
-            df_w["Similarity"] = df_w["Similarity"].map(lambda x: f"{x:.1f}%")
-            st.dataframe(df_w, use_container_width=True, hide_index=True)
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.markdown("#### Успешные эталоны")
+            df_s = pd.DataFrame(benchmark["success_similarity"], columns=["Объект", "Similarity"])
+            if not df_s.empty:
+                df_s["Similarity"] = df_s["Similarity"].map(lambda x: f"{x:.1f}%")
+                st.dataframe(df_s, use_container_width=True, hide_index=True)
+                # Debug: разбор similarity
+                if benchmark.get("success_debug"):
+                    with st.expander("🔍 Разбор similarity (успешные)"):
+                        for addr, sim, debug in benchmark["success_debug"]:
+                            st.markdown(f"**{addr}**: {sim}%")
+                            top5 = debug[:5]
+                            for factor, t_val, b_val, contrib in top5:
+                                st.markdown(f"  • {factor}: target={t_val}, benchmark={b_val}, вклад={contrib}")
+        with bc2:
+            st.markdown("#### Слабые эталоны")
+            df_w = pd.DataFrame(benchmark["weak_similarity"], columns=["Объект", "Similarity"])
+            if not df_w.empty:
+                df_w["Similarity"] = df_w["Similarity"].map(lambda x: f"{x:.1f}%")
+                st.dataframe(df_w, use_container_width=True, hide_index=True)
 
     # BLOCKS
     st.subheader("🧭 Сводка по блокам")
@@ -1256,7 +1329,7 @@ similarity = 100 − distance
         osm_df = pd.DataFrame([{"Показатель": k, "Количество": v} for k, v in osm_counts.items()])
         st.dataframe(osm_df, use_container_width=True, hide_index=True)
     else:
-        st.warning("Overpass временно недоступен. AI-профиль рассчитан, но confidence снижен.")
+        st.error("🚨 Overpass временно недоступен. Все OSM-факторы установлены в нейтральные 50. Benchmark отключён.")
 
     st.caption(f"Координаты: {result['latitude']:.6f}, {result['longitude']:.6f} · Модель: {model}")
     with st.expander("Показать полный профиль (JSON)"):
@@ -1270,7 +1343,7 @@ with st.sidebar:
     st.header("Сессия")
     st.success("OpenAI API-ключ активен.")
     st.markdown("""
-### Архитектура v3.2
+### Архитектура v3.3
 
 **Параметры локации** (15%)
 - 5 явных параметров (чекбоксы)
@@ -1298,7 +1371,12 @@ with st.sidebar:
 
 **Benchmark:** 4 успешных + 3 слабых
 - Similarity = 100 − взвешенная Manhattan distance
-- Статус НЕ передаётся AI
+- Если OSM недоступен — benchmark отключается
+
+**OSM fallback:**
+- При отказе Overpass: нейтральные 50
+- Раньше было: минимальные 0-30
+- Это устраняет 55% similarity с самим собой
 """)
     if st.button("Сбросить OpenAI ключ"):
         st.session_state.clear()
