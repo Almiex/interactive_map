@@ -910,7 +910,7 @@ def _hex_color(value, vmin, vmax, palette):
 
 
 # ==============================================================================
-# 3. ИНТЕРФЕЙС И КАРТА
+# 3. ИНТЕРФЕЙС И КАРТА (ИСПРАВЛЕННЫЙ ВАРИАНТ)
 # ==============================================================================
 
 st.divider()
@@ -993,21 +993,55 @@ if "last_result" in st.session_state:
                     key="map_fixed_v5_final"
                 )
 
-                st.caption("Справочно: топ-5 гексов по выбранному показателю")
+                st.caption("📊 Лидеры локации: топ-5 зон по выбранному показателю")
                 
-                df_hex = pd.DataFrame([
-                    {"h3_index": h, **vals} for h, vals in hex_metrics.items()
-                ])
+                # Формируем данные БЕЗ сырого h3_index. Заменяем его на координаты центра гекса.
+                table_rows = []
+                for h, vals in hex_metrics.items():
+                    h_lat, h_lon = _h3_cell_to_latlon(h)
+                    table_rows.append({
+                        "Координаты центра": f"{h_lat:.5f}, {h_lon:.5f}",
+                        "population": vals["population"],
+                        "floors": vals["floors"],
+                        "traffic": vals["traffic"],
+                        "income": vals["income"],
+                        "competition": vals["competition"]
+                    })
+                
+                df_hex = pd.DataFrame(table_rows)
                 
                 if not df_hex.empty:
+                    # Сортируем по выбранному пользователем показателю
                     df_hex = df_hex.sort_values(by=filter_key, ascending=False).head(5)
-                    st.dataframe(df_hex, use_container_width=True, hide_index=True)
+                    
+                    # Добавляем понятный ранг вместо страшного хэша
+                    df_hex.insert(0, "Ранг зоны", [f"🏆 Локация #{i+1}" for i in range(len(df_hex))])
+                    
+                    # Переименовываем колонки в человеческий вид
+                    df_hex = df_hex.rename(columns={
+                        "population": "Население (чел.)",
+                        "floors": "Ср. этажность",
+                        "traffic": "Индекс трафика",
+                        "income": "Потенциал дохода",
+                        "competition": "Конкуренты (объекты)"
+                    })
+                    
+                    # Дисплей красивой таблицы без технических индексов DataFrame
+                    st.dataframe(
+                        df_hex, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "Координаты центра": st.column_config.TextColumn("📍 Координаты центра")
+                        }
+                    )
 
         except Exception as e:
             st.error(f"Ошибка построения карты: {e}")
             
 else:
     st.info("Запустите анализ локации, чтобы построить карту с гексами.")
+
 
 # ==============================================================================
 # СБРОС КЛЮЧА
