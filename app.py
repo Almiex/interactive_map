@@ -61,7 +61,7 @@ st.caption(
 # ==============================================================================
 
 DEFAULT_MODEL = "gpt-5.1"
-MODEL_REASONING = "high"
+MODEL_REASONING = "low"
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URLS = [
@@ -444,6 +444,15 @@ class GeoAIProfile(BaseModel):
     evidence_quality: int = Field(ge=0, le=100)
 
 
+class GeoProfileItem(BaseModel):
+    key: str
+    profile: GeoAIProfile
+
+
+class GeoProfileBatch(BaseModel):
+    profiles: List[GeoProfileItem]
+
+
 # ==============================================================================
 # OPENAI
 # ==============================================================================
@@ -454,14 +463,7 @@ def call_structured_ai(
     system_prompt: str,
     user_prompt: str,
 ) -> GeoAIProfile:
-    """
-    Используем Chat Completions, потому что текущая версия SDK в окружении
-    исходного приложения уже использует beta.chat.completions.parse.
-
-    Для GPT-5.1 включаем высокий reasoning effort.
-    temperature для reasoning-моделей не задаём, чтобы не передавать
-    несовместимый параметр.
-    """
+    """Один структурированный AI-вызов для одной локации."""
     kwargs = dict(
         model=model,
         messages=[
@@ -469,19 +471,43 @@ def call_structured_ai(
             {"role": "user", "content": user_prompt},
         ],
         response_format=GeoAIProfile,
-        timeout=90,
+        timeout=60,
     )
-
-    # GPT-5.1 поддерживает reasoning_effort по актуальной документации.
     if model.startswith("gpt-5"):
         kwargs["reasoning_effort"] = MODEL_REASONING
-
     response = client.beta.chat.completions.parse(**kwargs)
     parsed = response.choices[0].message.parsed
-
     if parsed is None:
         raise ValueError("OpenAI не вернул структурированный GeoAIProfile.")
+    return parsed
 
+
+def call_batch_ai(
+    client: OpenAI,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> GeoProfileBatch:
+    """Один AI-вызов сразу для новой локации и всех эталонов.
+
+    Это критически ускоряет запуск: вместо 8 последовательных reasoning
+    запросов выполняется один. Статусы successful/weak в prompt не передаются.
+    """
+    kwargs = dict(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format=GeoProfileBatch,
+        timeout=120,
+    )
+    if model.startswith("gpt-5"):
+        kwargs["reasoning_effort"] = MODEL_REASONING
+    response = client.beta.chat.completions.parse(**kwargs)
+    parsed = response.choices[0].message.parsed
+    if parsed is None:
+        raise ValueError("OpenAI не вернул batch GeoProfileBatch.")
     return parsed
 
 
@@ -527,12 +553,12 @@ def _overpass_request(query: str) -> List[dict]:
 
     for url in OVERPASS_URLS:
         try:
-            time.sleep(0.35)
+            time.sleep(0.10)
             response = requests.post(
                 url,
                 data={"data": query},
                 headers=REQUEST_HEADERS,
-                timeout=45,
+                timeout=25,
             )
             response.raise_for_status()
             return response.json().get("elements", [])
@@ -565,7 +591,7 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     """
 
     query = f"""
-    [out:json][timeout:40];
+    [out:json][timeout:25];
     (
       nwr(around:500,{lat},{lon})
         ["amenity"~"pharmacy|hospital|clinic|doctors|school|kindergarten|university|fitness_centre|marketplace"];
@@ -731,6 +757,38 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     }
 
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def collect_osm_parallel(locations: List[Tuple[str, float, float]]) -> Dict[str, dict]:
+    """Собирает OSM для всех локаций параллельно.
+
+    Ошибка одного адреса не ломает весь анализ: она превращается в
+    available=False и будет отражена в confidence.
+    """
+    result: Dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(locations)))) as executor:
+        futures = {
+            executor.submit(collect_osm_context, lat, lon): key
+            for key, lat, lon in locations
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                result[key] = future.result()
+            except Exception as exc:
+                result[key] = {
+                    "available": False,
+                    "error": str(exc),
+                    "counts": {},
+                    "road_types": {},
+                    "landuse": {},
+                    "named_places": [],
+                    "raw_element_count": 0,
+                }
+    return result
+
+
 # ==============================================================================
 # AI PROMPT
 # ==============================================================================
@@ -858,6 +916,66 @@ NAMED PLACES:
 
 Для environment_* оцени именно внешнюю среду.
 """
+
+
+def build_batch_user_prompt(locations: List[dict], osm_by_key: Dict[str, dict], target_key: str) -> str:
+    import json
+    chunks = []
+    for loc in locations:
+        key = loc["key"]
+        osm = osm_by_key.get(key, {})
+        chunks.append(
+            f"""
+--- ЛОКАЦИЯ {key} ---
+Адрес: {loc["address"]}
+Координаты: {loc["lat"]:.6f}, {loc["lon"]:.6f}
+Статус benchmark: НЕ УКАЗАН (не используй его и не пытайся вывести)
+Целевая аудитория: возраст {loc["target_age"]:.0f}; женщины {loc["share_female"]*100:.1f}%; чек {loc["avg_ticket"]:,} руб.; часы {loc["clinic_hours"]}
+OSM: {json.dumps(osm, ensure_ascii=False, sort_keys=True)}
+"""
+        )
+
+    return f"""
+Нужно независимо построить GeoAIProfile для каждой из {len(locations)} локаций.
+Ключ target-локации: {target_key}.
+
+КРИТИЧНО:
+- Верни РОВНО один профиль для каждого key.
+- Оценивай каждую локацию независимо.
+- Не используй статус successful/weak: он намеренно не передан.
+- Не сравнивай локации между собой во время профилирования.
+- Все поля должны соответствовать схеме GeoAIProfile.
+- Если OSM отсутствует, снижай confidence/evidence_quality.
+
+{''.join(chunks)}
+"""
+
+
+@st.cache_data(show_spinner=False, ttl=604800)
+def generate_profiles_batch_cached(
+    api_key: str,
+    model: str,
+    locations_json: str,
+    osm_json: str,
+) -> dict:
+    import json
+    client = OpenAI(api_key=api_key)
+    locations = json.loads(locations_json)
+    osm_by_key = json.loads(osm_json)
+
+    batch = call_batch_ai(
+        client=client,
+        model=model,
+        system_prompt=build_ai_system_prompt(),
+        user_prompt=build_batch_user_prompt(locations, osm_by_key, locations[0]["key"]),
+    )
+
+    result = {item.key: item.profile.model_dump() for item in batch.profiles}
+    expected = {loc["key"] for loc in locations}
+    missing = expected - set(result)
+    if missing:
+        raise ValueError(f"OpenAI не вернул профили для: {', '.join(sorted(missing))}")
+    return result
 
 
 # ==============================================================================
@@ -1177,128 +1295,129 @@ def calculate_confidence(profile: dict, osm_context: dict) -> int:
 # FULL ANALYSIS
 # ==============================================================================
 
-def analyze_location(
-    client: OpenAI,
+def resolve_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
+    address_lower = address.lower()
+    if "энгельса" in address_lower and "екатеринбург" in address_lower:
+        return 56.8339, 60.6211
+    if "молодогвардейцев" in address_lower and "челябинск" in address_lower:
+        return 55.1764, 61.3708
+    return get_exact_coordinates(address)
+
+
+def run_full_analysis(
+    api_key: str,
     model: str,
     address: str,
     target_age: float,
     share_female: float,
     avg_ticket: int,
     clinic_hours: str,
+    status_callback=None,
 ) -> dict:
+    """Полный запуск: OSM всех локаций параллельно + один AI batch.
 
-    address_lower = address.lower()
+    Это устраняет главную причину зависания старой версии.
+    """
+    target_lat, target_lon = resolve_coordinates(address)
+    if target_lat is None or target_lon is None:
+        raise ValueError("Не удалось определить координаты адреса. Проверьте адрес.")
 
-    # Сохраняем совместимость со специальными координатами из исходной версии.
-    if "энгельса" in address_lower and "екатеринбург" in address_lower:
-        lat, lon = 56.8339, 60.6211
-    elif "молодогвардейцев" in address_lower and "челябинск" in address_lower:
-        lat, lon = 55.1764, 61.3708
-    else:
-        lat, lon = get_exact_coordinates(address)
+    locations = [{
+        "key": "target",
+        "address": address,
+        "lat": target_lat,
+        "lon": target_lon,
+        "target_age": target_age,
+        "share_female": share_female,
+        "avg_ticket": avg_ticket,
+        "clinic_hours": clinic_hours,
+    }]
 
-    if lat is None or lon is None:
-        raise ValueError(
-            "Не удалось определить координаты адреса. Проверьте написание адреса."
-        )
+    for idx, row in enumerate(DATA_CLINICS, start=1):
+        locations.append({
+            "key": f"benchmark_{idx}",
+            "address": row["address"],
+            "lat": row["latitude"],
+            "lon": row["longitude"],
+            "target_age": target_age,
+            "share_female": share_female,
+            "avg_ticket": avg_ticket,
+            "clinic_hours": clinic_hours,
+        })
 
-    osm_context = collect_osm_context(lat, lon)
+    if status_callback:
+        status_callback("1/3", "Собираю бесплатные OSM-данные для 8 локаций параллельно…")
+
+    osm_locations = [(x["key"], x["lat"], x["lon"]) for x in locations]
+    osm_by_key = collect_osm_parallel(osm_locations)
+
+    if status_callback:
+        status_callback("2/3", "OSM готов. Выполняю один batch-анализ GPT-5.1 для новой локации и эталонов…")
 
     import json
-
-    profile = generate_ai_profile_cached(
-        api_key=client.api_key,
+    profiles = generate_profiles_batch_cached(
+        api_key=api_key,
         model=model,
-        address=address,
-        lat=lat,
-        lon=lon,
-        target_age=target_age,
-        share_female=share_female,
-        avg_ticket=avg_ticket,
-        clinic_hours=clinic_hours,
-        osm_context_json=json.dumps(
-            osm_context,
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
+        locations_json=json.dumps(locations, ensure_ascii=False, sort_keys=True),
+        osm_json=json.dumps(osm_by_key, ensure_ascii=False, sort_keys=True),
     )
 
-    absolute_base = compute_absolute_score(profile)
-    hard_barriers = calculate_hard_barriers(profile, osm_context)
-    absolute_final, hard_penalty = apply_hard_penalties(
-        absolute_base,
-        profile,
-        hard_barriers,
+    target_profile = profiles["target"]
+    absolute_base = compute_absolute_score(target_profile)
+    hard_barriers = calculate_hard_barriers(target_profile, osm_by_key["target"])
+    absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers)
+
+    benchmark_rows = []
+    for idx, row in enumerate(DATA_CLINICS, start=1):
+        benchmark_rows.append({
+            "address": row["address"],
+            "status": row["status"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "profile": profiles[f"benchmark_{idx}"],
+        })
+
+    benchmark = benchmark_analysis(target_profile, benchmark_rows)
+
+    if status_callback:
+        status_callback("3/3", "Benchmark рассчитан. Формирую итоговый score…")
+
+    benchmark_component = (
+        benchmark["successful_centroid_similarity"] * 0.60
+        + clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
     )
+    final_score = round(absolute_final * 0.70 + benchmark_component * 0.30, 1)
+
+    if final_score >= 75:
+        verdict = "СИЛЬНАЯ ЛОКАЦИЯ"
+    elif final_score >= 60:
+        verdict = "ХОРОШАЯ ЛОКАЦИЯ С ОГОВОРКАМИ"
+    elif final_score >= 45:
+        verdict = "СРЕДНЯЯ ЛОКАЦИЯ"
+    else:
+        verdict = "СЛАБАЯ ЛОКАЦИЯ"
+
+    confidence = calculate_confidence(target_profile, osm_by_key["target"])
+    if confidence < 55:
+        verdict += " — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
 
     return {
         "address": address,
-        "latitude": lat,
-        "longitude": lon,
-        "profile": profile,
-        "osm_context": osm_context,
+        "latitude": target_lat,
+        "longitude": target_lon,
+        "profile": target_profile,
+        "osm_context": osm_by_key["target"],
         "absolute_base": absolute_base,
         "absolute_score": absolute_final,
         "hard_penalty": hard_penalty,
         "hard_barriers": hard_barriers,
-        "confidence": calculate_confidence(profile, osm_context),
+        "confidence": confidence,
+        "benchmark": benchmark,
+        "benchmark_rows": benchmark_rows,
+        "final_score": final_score,
+        "verdict": verdict,
+        "model": model,
     }
-
-
-# ==============================================================================
-# КАЛИБРОВКА ЭТАЛОНОВ
-# ==============================================================================
-
-@st.cache_data(show_spinner=False, ttl=604800)
-def build_benchmark_database(
-    api_key: str,
-    model: str,
-    target_age: float,
-    share_female: float,
-    avg_ticket: int,
-    clinic_hours: str,
-) -> List[dict]:
-
-    client = OpenAI(api_key=api_key)
-    results = []
-
-    import json
-
-    for row in DATA_CLINICS:
-        address = row["address"]
-        lat = row["latitude"]
-        lon = row["longitude"]
-
-        osm_context = collect_osm_context(lat, lon)
-
-        # ВАЖНО:
-        # status НЕ передаётся в prompt.
-        profile = generate_ai_profile_cached(
-            api_key=api_key,
-            model=model,
-            address=address,
-            lat=lat,
-            lon=lon,
-            target_age=target_age,
-            share_female=share_female,
-            avg_ticket=avg_ticket,
-            clinic_hours=clinic_hours,
-            osm_context_json=json.dumps(
-                osm_context,
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-        )
-
-        results.append({
-            "address": address,
-            "status": row["status"],
-            "latitude": lat,
-            "longitude": lon,
-            "profile": profile,
-        })
-
-    return results
 
 
 # ==============================================================================
@@ -1431,73 +1550,30 @@ if run_analysis:
 
     share_female = share_female_percent / 100.0
 
-    with st.spinner(
-        "AI строит геопрофиль, проверяет OSM и сравнивает локацию "
-        "с успешными и слабыми объектами..."
-    ):
-        try:
-            result = analyze_location(
-                client=client,
-                model=model.strip(),
-                address=address.strip(),
-                target_age=float(target_age),
-                share_female=float(share_female),
-                avg_ticket=int(avg_ticket),
-                clinic_hours=clinic_hours.strip(),
-            )
+    progress_box = st.empty()
+    detail_box = st.empty()
 
-            benchmark_rows = build_benchmark_database(
-                api_key=st.session_state.openai_key,
-                model=model.strip(),
-                target_age=float(target_age),
-                share_female=float(share_female),
-                avg_ticket=int(avg_ticket),
-                clinic_hours=clinic_hours.strip(),
-            )
+    def update_status(step: str, text: str):
+        progress_box.info(f"**{step}**  {text}")
 
-            benchmark = benchmark_analysis(
-                target_profile=result["profile"],
-                benchmark_rows=benchmark_rows,
-            )
-
-            result["benchmark"] = benchmark
-            result["benchmark_rows"] = benchmark_rows
-
-            # Итоговая оценка:
-            # 60% absolute quality
-            # 30% similarity to successful centroid
-            # 10% benchmark gap
-            benchmark_component = (
-                benchmark["successful_centroid_similarity"] * 0.60
-                + clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
-            )
-
-            final_score = round(
-                result["absolute_score"] * 0.70
-                + benchmark_component * 0.30,
-                1,
-            )
-
-            result["final_score"] = final_score
-
-            if final_score >= 75:
-                result["verdict"] = "СИЛЬНАЯ ЛОКАЦИЯ"
-            elif final_score >= 60:
-                result["verdict"] = "ХОРОШАЯ ЛОКАЦИЯ С ОГОВОРКАМИ"
-            elif final_score >= 45:
-                result["verdict"] = "СРЕДНЯЯ ЛОКАЦИЯ"
-            else:
-                result["verdict"] = "СЛАБАЯ ЛОКАЦИЯ"
-
-            if result["confidence"] < 55:
-                result["verdict"] += " — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
-
-            st.session_state.last_result = result
-
-        except Exception as exc:
-            st.error(f"Ошибка анализа: {exc}")
-            st.exception(exc)
-            st.stop()
+    try:
+        update_status("START", "Проверяю адрес и запускаю быстрый гео-аудит…")
+        result = run_full_analysis(
+            api_key=st.session_state.openai_key,
+            model=model.strip(),
+            address=address.strip(),
+            target_age=float(target_age),
+            share_female=float(share_female),
+            avg_ticket=int(avg_ticket),
+            clinic_hours=clinic_hours.strip(),
+            status_callback=update_status,
+        )
+        st.session_state.last_result = result
+        progress_box.success("✅ Анализ завершён.")
+    except Exception as exc:
+        progress_box.error("❌ Анализ завершился ошибкой.")
+        st.error(f"Не удалось выполнить анализ: {type(exc).__name__}: {exc}")
+        st.exception(exc)
 
 
 # ==============================================================================
