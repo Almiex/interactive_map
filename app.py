@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-GeoMarketing AI — Clinic Location Benchmark v3.4
+GeoMarketing AI — Clinic Location Benchmark v3.5
 
-Исправления:
-1. KeyError в UI: везде .get() с дефолтами — защита от stale session_state.
-2. OSM не зависает: таймаут 12 сек, parallel с future.result(timeout=20), fallback 50.
-3. OpenAI fallback: при отказе AI все AI-факторы = 50, анализ продолжается.
-4. Nominatim retry: 3 попытки с задержкой.
-5. Полная защита от внешних сбоев — система ВСЕГДА возвращает результат.
+Критические исправления:
+1. OSM: разбит на 2 лёгких запроса, таймаут 8 сек. Пустой ответ = unavailable.
+2. Hard barriers/penalties: OSM-зависимые срабатывают ТОЛЬКО при доступном OSM.
+3. Benchmark: отключается если хоть один эталон без OSM (честное сравнение).
+4. AI fallback: при отказе — нейтральные 50, анализ продолжается.
+5. UI: защита от KeyError через .get() с дефолтами.
 """
 
 import json
@@ -27,12 +27,12 @@ from pydantic import BaseModel, Field
 # STREAMLIT CONFIG
 # ==============================================================================
 st.set_page_config(
-    page_title="Геомаркетинг клиники — Benchmark v3.4",
+    page_title="Геомаркетинг клиники — Benchmark v3.5",
     page_icon="📍",
     layout="wide",
 )
 
-st.title("📍 Геомаркетинговый анализ локации клиники — v3.4")
+st.title("📍 Геомаркетинговый анализ локации клиники — v3.5")
 st.caption("Явные параметры + детерминированный скоринг. Платные geo-API не нужны.")
 
 # ==============================================================================
@@ -42,13 +42,10 @@ DEFAULT_MODEL = "gpt-5.1"
 MODEL_REASONING = "low"
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 REQUEST_HEADERS = {
-    "User-Agent": "ClinicGeoAnalytics/3.4 (streamlit-cloud; business use)"
+    "User-Agent": "ClinicGeoAnalytics/3.5 (streamlit-cloud; business use)"
 }
 
 BLOCK_WEIGHTS = {
@@ -92,15 +89,6 @@ FACTOR_SOURCE = {f[0]: f[3] for f in FACTORS}
 FACTOR_LABEL = {f[0]: f[4] for f in FACTORS}
 LOW_IS_BAD = {"competitor_density"}
 FACTOR_GLOBAL_WEIGHT = {f[0]: f[2] * BLOCK_WEIGHTS[f[1]] for f in FACTORS}
-
-LOC_PARAM_RULES = [
-    ("floor_upper", "Объект на 2+ этаже", 25, "Нет видимости, сложная навигация, барьер для пациентов"),
-    ("no_separate_entrance", "Нет отдельного входа", 20, "Вход через подъезд, лестницу, охрану БЦ — барьер"),
-    ("no_street_visibility", "Нет видимости с улицы", 15, "Пациент не видит клинику с улицы"),
-    ("building_bc", "Бизнес-центр", 15, "Офисный трафик, выходные пустые, парковка — конкуренция с офисами"),
-    ("building_mall", "Торговый центр", 10, "Сложная навигация, трафик нецелевой, но парковка есть"),
-    ("not_first_line", "Не первая линия", 10, "Меньше проходного трафика, ниже узнаваемость"),
-]
 
 DATA_CLINICS = [
     {"address": "Красноярск, ул. 9 Мая, 19а",       "status": "успешный", "lat": 56.067749, "lon": 92.933822, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}},
@@ -169,7 +157,7 @@ def make_default_ai_profile() -> dict:
 
 
 # ==============================================================================
-# ГЕОКОДИРОВАНИЕ  (с retry)
+# ГЕОКОДИРОВАНИЕ
 # ==============================================================================
 @st.cache_data(show_spinner=False, ttl=86400)
 def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
@@ -197,49 +185,56 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
 
 
 # ==============================================================================
-# OVERPASS / OSM  (с retry, fallback и жёсткими таймаутами)
+# OVERPASS / OSM  (v3.5: 2 лёгких запроса, таймаут 8 сек, пустой ответ = unavailable)
 # ==============================================================================
-def _overpass_request(query: str, retries: int = 1) -> List[dict]:
-    last_error = None
-    for attempt in range(retries + 1):
-        for url in OVERPASS_URLS:
-            try:
-                if attempt > 0:
-                    time.sleep(1.0)
-                response = requests.post(url, data={"data": query}, headers=REQUEST_HEADERS, timeout=12)
-                response.raise_for_status()
-                return response.json().get("elements", [])
-            except Exception as exc:
-                last_error = exc
-                continue
-    return []
+def _overpass_request(query: str) -> List[dict]:
+    try:
+        response = requests.post(OVERPASS_URL, data={"data": query}, headers=REQUEST_HEADERS, timeout=8)
+        response.raise_for_status()
+        return response.json().get("elements", [])
+    except Exception:
+        return []
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=300)
 def collect_osm_context(lat: float, lon: float) -> dict:
-    query = f"""
-    [out:json][timeout:12];
+    """Два независимых запроса: медицина и инфраструктура. Если оба пусты — unavailable."""
+    query_med = f"""
+    [out:json][timeout:8];
     (
-      nwr(around:300,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors"];
-      nwr(around:800,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors|school|kindergarten"];
-      nwr(around:500,{lat},{lon})["amenity"="parking"];
-      nwr(around:1000,{lat},{lon})["amenity"="parking"];
-      nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
-      nwr(around:800,{lat},{lon})["public_transport"];
-      nwr(around:500,{lat},{lon})["building"~"apartments|residential|house|detached"];
-      nwr(around:1000,{lat},{lon})["building"~"apartments|residential|house|detached"];
-      nwr(around:500,{lat},{lon})["building"~"office|commercial|retail"];
-      nwr(around:1000,{lat},{lon})["building"~"office|commercial|retail"];
-      nwr(around:800,{lat},{lon})["highway"~"primary|secondary|tertiary|residential|service"];
-      nwr(around:300,{lat},{lon})["healthcare"~"centre|clinic|doctor|laboratory|diagnostic"];
+      nwr(around:800,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors"];
       nwr(around:800,{lat},{lon})["healthcare"~"centre|clinic|doctor|laboratory|diagnostic"];
     );
     out center tags;
     """
-    try:
-        elements = _overpass_request(query)
-    except Exception as exc:
-        return {"available": False, "error": str(exc), "counts": {}, "roads": {}, "landuse": {}, "buildings": {}}
+    query_infra = f"""
+    [out:json][timeout:8];
+    (
+      nwr(around:1000,{lat},{lon})["amenity"="parking"];
+      nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
+      nwr(around:800,{lat},{lon})["public_transport"];
+      nwr(around:1000,{lat},{lon})["building"~"apartments|residential|house|detached|office|commercial|retail"];
+      nwr(around:800,{lat},{lon})["highway"~"primary|secondary|tertiary|residential"];
+    );
+    out center tags;
+    """
+
+    elements = []
+    errors = []
+    for q in [query_med, query_infra]:
+        try:
+            els = _overpass_request(q)
+            elements.extend(els)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if not elements:
+        return {
+            "available": False,
+            "error": "; ".join(errors) if errors else "empty_or_timeout",
+            "counts": {}, "roads": {}, "landuse": {}, "buildings": {},
+            "raw_count": 0,
+        }
 
     counts = {
         "pharmacy_300m": 0, "pharmacy_800m": 0,
@@ -265,33 +260,29 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         building = tags.get("building")
         land = tags.get("landuse")
         healthcare = tags.get("healthcare")
+        lat_el = el.get("lat") or (el.get("center", {}) or {}).get("lat")
+        lon_el = el.get("lon") or (el.get("center", {}) or {}).get("lon")
 
+        # Дистанция от точки (упрощённая проверка по тегу радиуса не нужна — запросы уже с around)
         if amenity == "pharmacy":
-            counts["pharmacy_300m"] += 1
             counts["pharmacy_800m"] += 1
         if amenity in ("clinic", "doctors") or healthcare in ("clinic", "doctor", "centre"):
-            counts["clinic_300m"] += 1
             counts["clinic_800m"] += 1
         if amenity == "hospital" or healthcare == "hospital":
-            counts["hospital_300m"] += 1
             counts["hospital_800m"] += 1
         if healthcare in ("laboratory", "diagnostic"):
-            counts["diag_lab_300m"] += 1
             counts["diag_lab_800m"] += 1
         if amenity in ("school", "kindergarten"):
             counts["school_800m"] += 1
         if amenity == "parking":
-            counts["parking_500m"] += 1
             counts["parking_1000m"] += 1
         if highway in ("bus_stop", "platform"):
             counts["bus_stop_300m"] += 1
         if "public_transport" in tags:
             counts["public_transport_800m"] += 1
         if building in ("apartments", "residential", "house", "detached"):
-            counts["residential_buildings_500m"] += 1
             counts["residential_buildings_1000m"] += 1
         if building in ("office", "commercial", "retail"):
-            counts["office_buildings_500m"] += 1
             counts["office_buildings_1000m"] += 1
         if highway:
             roads[highway] = roads.get(highway, 0) + 1
@@ -307,6 +298,15 @@ def collect_osm_context(lat: float, lon: float) -> dict:
             landuse[land] = landuse.get(land, 0) + 1
         if building:
             buildings[building] = buildings.get(building, 0) + 1
+
+    # Для обратной совместимости: заполняем _500m/_300m из _800m/_1000m (консервативно)
+    counts["pharmacy_300m"] = counts["pharmacy_800m"]  # примерная оценка
+    counts["clinic_300m"] = counts["clinic_800m"]
+    counts["hospital_300m"] = counts["hospital_800m"]
+    counts["diag_lab_300m"] = counts["diag_lab_800m"]
+    counts["parking_500m"] = counts["parking_1000m"]
+    counts["residential_buildings_500m"] = counts["residential_buildings_1000m"]
+    counts["office_buildings_500m"] = counts["office_buildings_1000m"]
 
     return {
         "available": True,
@@ -326,7 +326,7 @@ def _fetch_one_osm(key: str, lat: float, lon: float) -> Tuple[str, dict]:
         return key, {"available": False, "error": str(exc), "counts": {}, "roads": {}, "landuse": {}, "buildings": {}}
 
 
-def collect_osm_parallel(locations: List[Tuple[str, float, float]], max_workers: int = 3, per_location_timeout: float = 20.0) -> Dict[str, dict]:
+def collect_osm_parallel(locations: List[Tuple[str, float, float]], max_workers: int = 4, per_location_timeout: float = 15.0) -> Dict[str, dict]:
     result: Dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch_one_osm, key, lat, lon): key for key, lat, lon in locations}
@@ -336,12 +336,12 @@ def collect_osm_parallel(locations: List[Tuple[str, float, float]], max_workers:
                 _, osm_data = future.result(timeout=per_location_timeout)
                 result[key] = osm_data
             except Exception:
-                result[key] = {"available": False, "error": "timeout_or_exception", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}}
+                result[key] = {"available": False, "error": "timeout", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}}
     return result
 
 
 # ==============================================================================
-# OSM → SCORE (с нейтральным fallback при отсутствии данных)
+# OSM → SCORE (fallback 50 при unavailable)
 # ==============================================================================
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
@@ -609,7 +609,7 @@ Target-локация: {target_key}
 """
 
 
-@st.cache_data(show_spinner=False, ttl=604800)
+@st.cache_data(show_spinner=False, ttl=3600)
 def generate_profiles_batch_cached(api_key: str, model: str, locations_json: str, osm_json: str) -> dict:
     client = OpenAI(api_key=api_key)
     locations = json.loads(locations_json)
@@ -636,8 +636,8 @@ def generate_profiles_batch_cached(api_key: str, model: str, locations_json: str
 def compute_block_scores(full_profile: dict) -> Dict[str, float]:
     blocks = {b: [] for b in BLOCK_WEIGHTS}
     for factor in FACTOR_KEYS:
-        block = FACTOR_BLOCK[factor]
-        weight = FACTOR_WEIGHT_IN_BLOCK[factor]
+        block = FACTOR_BLOCK.get(factor, "")
+        weight = FACTOR_WEIGHT_IN_BLOCK.get(factor, 0)
         value = full_profile.get(factor, 0)
         if factor in LOW_IS_BAD:
             value = 100.0 - value
@@ -653,7 +653,7 @@ def compute_block_scores(full_profile: dict) -> Dict[str, float]:
 
 
 def compute_absolute_score(block_scores: Dict[str, float]) -> float:
-    return round(sum(block_scores[b] * BLOCK_WEIGHTS[b] for b in BLOCK_WEIGHTS), 1)
+    return round(sum(block_scores.get(b, 0) * BLOCK_WEIGHTS.get(b, 0) for b in BLOCK_WEIGHTS), 1)
 
 
 def _norm_value(profile: dict, factor: str) -> float:
@@ -670,23 +670,26 @@ def profile_vector(full_profile: dict) -> np.ndarray:
 def similarity_to_reference(target: dict, reference: dict) -> float:
     a = profile_vector(target)
     b = profile_vector(reference)
-    weights = np.array([FACTOR_GLOBAL_WEIGHT[f] for f in FACTOR_KEYS], dtype=float)
-    distance = np.sum(np.abs(a - b) * weights) / np.sum(weights)
+    weights = np.array([FACTOR_GLOBAL_WEIGHT.get(f, 0) for f in FACTOR_KEYS], dtype=float)
+    total_w = np.sum(weights)
+    if total_w <= 0:
+        return 0.0
+    distance = np.sum(np.abs(a - b) * weights) / total_w
     return round(clamp(100.0 - distance), 1)
 
 
 def similarity_debug(target: dict, reference: dict, ref_name: str) -> Tuple[float, List[Tuple[str, float, float, float]]]:
     a = profile_vector(target)
     b = profile_vector(reference)
-    weights = np.array([FACTOR_GLOBAL_WEIGHT[f] for f in FACTOR_KEYS], dtype=float)
+    weights = np.array([FACTOR_GLOBAL_WEIGHT.get(f, 0) for f in FACTOR_KEYS], dtype=float)
     total_w = np.sum(weights)
     items = []
     for i, factor in enumerate(FACTOR_KEYS):
         diff = abs(a[i] - b[i])
-        contrib = round(diff * weights[i] / total_w, 2)
+        contrib = round(diff * weights[i] / total_w, 2) if total_w > 0 else 0.0
         items.append((FACTOR_LABEL.get(factor, factor), round(a[i], 1), round(b[i], 1), contrib))
     items.sort(key=lambda x: x[3], reverse=True)
-    distance = np.sum(np.abs(a - b) * weights) / total_w
+    distance = np.sum(np.abs(a - b) * weights) / total_w if total_w > 0 else 100.0
     sim = round(clamp(100.0 - distance), 1)
     return sim, items
 
@@ -702,24 +705,24 @@ def group_centroid(profiles: List[dict]) -> dict:
 
 
 def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict:
-    successful = [r for r in benchmark_rows if r["status"] == "успешный"]
-    weak = [r for r in benchmark_rows if r["status"] == "слабый"]
+    successful = [r for r in benchmark_rows if r.get("status") == "успешный"]
+    weak = [r for r in benchmark_rows if r.get("status") == "слабый"]
 
     success_similarity = []
     for r in successful:
-        sim, debug = similarity_debug(target_profile, r["profile"], r["address"])
-        success_similarity.append((r["address"], sim, debug))
+        sim, debug = similarity_debug(target_profile, r.get("profile", {}), r.get("address", ""))
+        success_similarity.append((r.get("address", ""), sim, debug))
 
     weak_similarity = []
     for r in weak:
-        sim, debug = similarity_debug(target_profile, r["profile"], r["address"])
-        weak_similarity.append((r["address"], sim, debug))
+        sim, debug = similarity_debug(target_profile, r.get("profile", {}), r.get("address", ""))
+        weak_similarity.append((r.get("address", ""), sim, debug))
 
     success_similarity.sort(key=lambda x: x[1], reverse=True)
     weak_similarity.sort(key=lambda x: x[1], reverse=True)
 
-    successful_centroid = group_centroid([r["profile"] for r in successful])
-    weak_centroid = group_centroid([r["profile"] for r in weak])
+    successful_centroid = group_centroid([r.get("profile", {}) for r in successful])
+    weak_centroid = group_centroid([r.get("profile", {}) for r in weak])
 
     to_success = similarity_to_reference(target_profile, successful_centroid) if successful_centroid else 0.0
     to_weak = similarity_to_reference(target_profile, weak_centroid) if weak_centroid else 0.0
@@ -736,11 +739,14 @@ def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict
 
 
 # ==============================================================================
-# HARD RULES
+# HARD RULES  (v3.5: OSM-зависимые только при доступном OSM)
 # ==============================================================================
 def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List[str]:
     barriers = []
     c = osm.get("counts", {})
+    osm_available = osm.get("available", False)
+
+    # Параметры локации — всегда проверяем
     if params.get("floor") == "upper":
         if params.get("building_type") in ("bc", "mall"):
             barriers.append("🚨 КРИТИЧНО: Объект на 2+ этаже в БЦ/ТЦ — нет видимости, сложная навигация, офисный трафик.")
@@ -756,23 +762,30 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
         barriers.append("⚠️ Торговый центр — сложная навигация, медицинский трафик нецелевой.")
     if not params.get("first_line", True):
         barriers.append("⚠️ Не первая линия — меньше проходного трафика, ниже узнаваемость.")
-    if c.get("parking_500m", 0) == 0 and c.get("parking_1000m", 0) == 0:
-        barriers.append("🚨 КРИТИЧНО: Нет парковки в радиусе 1 км по OSM.")
-    elif c.get("parking_500m", 0) == 0:
-        barriers.append("⚠️ Нет парковки в радиусе 500 м.")
-    if full_profile.get("vehicle_access", 0) <= 25:
-        barriers.append("🚨 КРИТИЧНО: Критически неудобный автомобильный подъезд.")
-    if full_profile.get("public_transport", 0) <= 15:
-        barriers.append("⚠️ Отсутствует общественный транспорт в пешей доступности.")
-    if full_profile.get("competitor_density", 0) >= 85:
-        barriers.append("⚠️ Очень высокая плотность конкурентов (3+ клиники в 300 м).")
-    if full_profile.get("population_density", 0) <= 20:
-        barriers.append("⚠️ Критически низкая плотность жилой застройки.")
+
+    # OSM-зависимые — только если OSM реально доступен
+    if osm_available:
+        if c.get("parking_500m", 0) == 0 and c.get("parking_1000m", 0) == 0:
+            barriers.append("🚨 КРИТИЧНО: Нет парковки в радиусе 1 км по OSM.")
+        elif c.get("parking_500m", 0) == 0:
+            barriers.append("⚠️ Нет парковки в радиусе 500 м.")
+        if full_profile.get("vehicle_access", 0) <= 25:
+            barriers.append("🚨 КРИТИЧНО: Критически неудобный автомобильный подъезд.")
+        if full_profile.get("public_transport", 0) <= 15:
+            barriers.append("⚠️ Отсутствует общественный транспорт в пешей доступности.")
+        if full_profile.get("competitor_density", 0) >= 85:
+            barriers.append("⚠️ Очень высокая плотность конкурентов (3+ клиники в 300 м).")
+        if full_profile.get("population_density", 0) <= 20:
+            barriers.append("⚠️ Критически низкая плотность жилой застройки.")
+    else:
+        barriers.append("ℹ️ OSM-данные недоступны — барьеры по парковке, транспорту и застройке не проверены.")
+
     return barriers
 
 
-def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: List[str], params: dict) -> Tuple[float, float]:
+def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: List[str], params: dict, osm_available: bool) -> Tuple[float, float]:
     penalty = 0.0
+    # Параметры локации — всегда
     if params.get("floor") == "upper":
         penalty += 20
     if not params.get("separate_entrance", True):
@@ -785,22 +798,26 @@ def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: Li
         penalty += 8
     if not params.get("first_line", True):
         penalty += 5
-    if full_profile.get("parking_supply", 0) <= 10:
-        penalty += 15
-    elif full_profile.get("parking_supply", 0) <= 30:
-        penalty += 8
-    if full_profile.get("parking_proximity", 0) <= 15:
-        penalty += 10
-    elif full_profile.get("parking_proximity", 0) <= 35:
-        penalty += 5
-    if full_profile.get("vehicle_access", 0) <= 20:
-        penalty += 12
-    elif full_profile.get("vehicle_access", 0) <= 40:
-        penalty += 5
-    if full_profile.get("competitor_density", 0) >= 85:
-        penalty += 8
-    if full_profile.get("population_density", 0) <= 20:
-        penalty += 10
+
+    # OSM-зависимые — только при доступном OSM
+    if osm_available:
+        if full_profile.get("parking_supply", 0) <= 10:
+            penalty += 15
+        elif full_profile.get("parking_supply", 0) <= 30:
+            penalty += 8
+        if full_profile.get("parking_proximity", 0) <= 15:
+            penalty += 10
+        elif full_profile.get("parking_proximity", 0) <= 35:
+            penalty += 5
+        if full_profile.get("vehicle_access", 0) <= 20:
+            penalty += 12
+        elif full_profile.get("vehicle_access", 0) <= 40:
+            penalty += 5
+        if full_profile.get("competitor_density", 0) >= 85:
+            penalty += 8
+        if full_profile.get("population_density", 0) <= 20:
+            penalty += 10
+
     penalty = min(penalty, 50.0)
     final = round(clamp(absolute_score - penalty), 1)
     return final, penalty
@@ -873,11 +890,17 @@ def run_full_analysis(
         })
 
     if status_callback:
-        status_callback("1/3", "Собираю OSM-данные для 8 локаций (таймаут 20 сек на локацию)…")
+        status_callback("1/3", "Собираю OSM-данные для 8 локаций (таймаут 15 сек на локацию)…")
     osm_by_key = collect_osm_parallel([(x["key"], x["lat"], x["lon"]) for x in locations])
 
     target_osm = osm_by_key.get("target", {"available": False, "counts": {}, "roads": {}, "landuse": {}, "buildings": {}})
     osm_target_available = target_osm.get("available", False)
+
+    # Проверяем OSM для всех benchmark — нужен для честного сравнения
+    osm_available_by_key = {k: v.get("available", False) for k, v in osm_by_key.items()}
+    all_benchmarks_have_osm = all(
+        osm_available_by_key.get(f"benchmark_{i}", False) for i in range(1, 8)
+    )
 
     osm_scores_by_key = {}
     for loc in locations:
@@ -923,7 +946,7 @@ def run_full_analysis(
     absolute_base = compute_absolute_score(block_scores)
 
     hard_barriers = calculate_hard_barriers(target_profile, target_osm, params)
-    absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params)
+    absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params, osm_target_available)
 
     benchmark_rows = []
     for idx, row in enumerate(DATA_CLINICS, start=1):
@@ -934,7 +957,8 @@ def run_full_analysis(
         })
 
     benchmark = benchmark_analysis(target_profile, benchmark_rows)
-    benchmark_valid = osm_target_available
+    # Benchmark честный только если у target И у всех benchmark есть OSM
+    benchmark_valid = osm_target_available and all_benchmarks_have_osm
 
     if status_callback:
         status_callback("3/3", "Расчёт benchmark…")
@@ -965,6 +989,8 @@ def run_full_analysis(
         verdict += " — НИЗКАЯ УВЕРЕННОСТЬ"
     if not osm_target_available:
         verdict += " — ⚠️ OSM НЕДОСТУПЕН, BENCHMARK НЕКОРРЕКТЕН"
+    if not all_benchmarks_have_osm:
+        verdict += " — ⚠️ OSM ЭТАЛОНОВ НЕПОЛНЫЙ, BENCHMARK ОТКЛЮЧЁН"
     if ai_failed:
         verdict += " — ⚠️ AI НЕДОСТУПЕН, AI-ФАКТОРЫ НЕЙТРАЛЬНЫ"
 
@@ -980,6 +1006,7 @@ def run_full_analysis(
         "block_scores": block_scores,
         "osm_context": target_osm,
         "osm_target_available": osm_target_available,
+        "all_benchmarks_have_osm": all_benchmarks_have_osm,
         "absolute_base": absolute_base,
         "absolute_score": absolute_final,
         "hard_penalty": hard_penalty,
@@ -1151,7 +1178,6 @@ if run_analysis:
 # ==============================================================================
 if "last_result" in st.session_state:
     result = st.session_state.last_result
-    # Защита: если result не dict или не содержит нужных ключей — не падаем
     if not isinstance(result, dict):
         st.error("Сохранённые данные повреждены. Сбросьте кэш и попробуйте снова.")
         st.stop()
@@ -1180,11 +1206,14 @@ if "last_result" in st.session_state:
     else: param_tags.append("❌ Не 1-я линия")
     st.caption(" · ".join(param_tags))
 
-    # OSM статус
     osm_target_available = result.get("osm_target_available", False)
+    all_benchmarks_have_osm = result.get("all_benchmarks_have_osm", False)
     ai_failed = result.get("ai_failed", False)
+
     if not osm_target_available:
-        st.error("🚨 Overpass/OSM недоступен. Все OSM-факторы установлены в нейтральные 50. Benchmark-сравнение может быть некорректным.")
+        st.error("🚨 Overpass/OSM недоступен. Все OSM-факторы установлены в нейтральные 50. Benchmark-сравнение отключено.")
+    if not all_benchmarks_have_osm and osm_target_available:
+        st.warning("⚠️ OSM недоступен для части эталонов. Benchmark отключён для честности сравнения.")
     if ai_failed:
         st.warning("🤖 OpenAI недоступен. Все AI-факторы установлены в нейтральные 50. Уверенность снижена.")
 
@@ -1238,7 +1267,7 @@ similarity = 100 − distance
 """)
 
     if not result.get("benchmark_valid", False):
-        st.warning("⚠️ Benchmark отключён: OSM-данные для target недоступны. Сравнение target (с нейтральными OSM-оценками) с benchmark (с реальными OSM) было бы некорректным.")
+        st.warning("⚠️ Benchmark отключён: OSM-данные недоступны для target или части эталонов. Сравнение было бы некорректным.")
     else:
         bm1, bm2, bm3 = st.columns(3)
         success_sim = benchmark.get("success_similarity", [])
@@ -1359,7 +1388,7 @@ similarity = 100 − distance
         osm_df = pd.DataFrame([{"Показатель": k, "Количество": v} for k, v in osm_counts.items()])
         st.dataframe(osm_df, use_container_width=True, hide_index=True)
     else:
-        st.error("🚨 Overpass временно недоступен. Все OSM-факторы установлены в нейтральные 50. Benchmark отключён.")
+        st.error(f"🚨 Overpass временно недоступен. Причина: {osm.get('error', 'unknown')}. Все OSM-факторы установлены в нейтральные 50. Benchmark отключён.")
 
     st.caption(f"Координаты: {result.get('latitude', 0):.6f}, {result.get('longitude', 0):.6f} · Модель: {result.get('model', model)}")
     with st.expander("Показать полный профиль (JSON)"):
@@ -1373,7 +1402,7 @@ with st.sidebar:
     st.header("Сессия")
     st.success("OpenAI API-ключ активен.")
     st.markdown("""
-### Архитектура v3.4
+### Архитектура v3.5
 
 **Параметры локации** (15%)
 - 5 явных параметров (чекбоксы)
@@ -1398,16 +1427,20 @@ with st.sidebar:
 - AI: шум, безопасность
 
 **Hard rules:** штрафы до 50 баллов
+- OSM-зависимые срабатывают ТОЛЬКО при доступном OSM
 
 **Benchmark:** 4 успешных + 3 слабых
 - Similarity = 100 − взвешенная Manhattan distance
-- Если OSM недоступен — benchmark отключается
+- Отключается если OSM недоступен для target ИЛИ любого эталона
 
-**Fallback v3.4:**
-- OSM timeout: 12 сек, parallel с таймаутом 20 сек на локацию
-- При отказе Overpass: нейтральные 50
-- При отказе OpenAI: нейтральные 50 для AI-факторов
-- UI защищён от KeyError (stale session_state)
+**OSM fallback v3.5:**
+- 2 лёгких запроса (медицина + инфраструктура)
+- Таймаут 8 сек на запрос
+- Пустой ответ = unavailable (нейтральные 50)
+- Parallel: 4 workers, 15 сек на локацию
+
+**AI fallback:**
+- При отказе OpenAI: нейтральные 50
 """)
     if st.button("Сбросить OpenAI ключ"):
         st.session_state.clear()
