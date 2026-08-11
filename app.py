@@ -7,6 +7,7 @@ import numpy as np
 import streamlit as st
 import h3
 import folium
+from streamlit_folium import st_folium
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -987,7 +988,7 @@ def render_hex_map(lat, lon, hex_metrics, active_filter):
     '''
     m.get_root().html.add_child(folium.Element(legend_html))
 
-    return m._repr_html_()
+    return m
 
 
 # ==============================================================================
@@ -1023,8 +1024,14 @@ if "last_result" in st.session_state:
             if not hex_metrics:
                 st.warning("Не удалось собрать метрики для гексов.")
             else:
-                map_html = render_hex_map(lat, lon, hex_metrics, filter_key)
-                st.components.v1.html(map_html, height=650)
+                m = render_hex_map(lat, lon, hex_metrics, filter_key)
+
+                st_folium(
+                    m,
+                    width=None,
+                    height=700,
+                    returned_objects=[]
+                )
 
                 # Справочная таблица топ-5 гексов
                 st.caption("Справочно: топ-5 гексов по выбранному показателю")
