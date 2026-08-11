@@ -5,7 +5,8 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
-
+import h3
+import folium
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -727,6 +728,316 @@ if "last_result" in st.session_state:
         f"{result['longitude']:.6f}"
     )
 
+# ==============================================================================
+# ГЕКСАГОНАЛЬНАЯ КАРТА OSM (радиус 2 км)
+# ==============================================================================
+
+def _h3_latlon_to_cell(lat, lon, res):
+    try:
+        return h3.latlng_to_cell(lat, lon, res)
+    except AttributeError:
+        return h3.geo_to_h3(lat, lon, res)
+
+
+def _h3_cell_to_latlon(h):
+    try:
+        return h3.cell_to_latlng(h)
+    except AttributeError:
+        return h3.h3_to_geo(h)
+
+
+def _h3_grid_disk(h, k):
+    try:
+        return h3.grid_disk(h, k)
+    except AttributeError:
+        return h3.k_ring(h, k)
+
+
+def _h3_boundary(h):
+    try:
+        boundary = h3.cell_to_boundary(h)
+        pts = list(boundary)
+        if pts and hasattr(pts[0], "lat"):
+            return [(p.lat, p.lng) for p in pts]
+        return pts
+    except AttributeError:
+        return h3.h3_to_geo_boundary(h, geo_json=False)
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
+    return 2 * R * np.arcsin(np.sqrt(a))
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
+    url = "https://overpass-api.de/api/interpreter"
+    query = f"""
+    [out:json][timeout:30];
+    (
+      nwr["building"](around:{radius_m},{lat},{lon});
+      nwr["highway"](around:{radius_m},{lat},{lon});
+      nwr["amenity"~"clinic|hospital|doctors|pharmacy|dentist"](around:{radius_m},{lat},{lon});
+      nwr["shop"~"mall|supermarket|car|jewelry|boutique|beauty"](around:{radius_m},{lat},{lon});
+      nwr["office"](around:{radius_m},{lat},{lon});
+    );
+    out center;
+    """
+    try:
+        r = requests.post(url, data={"data": query}, timeout=35)
+        r.raise_for_status()
+        return r.json().get("elements", [])
+    except Exception:
+        return []
+
+
+def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
+    center_hex = _h3_latlon_to_cell(lat, lon, resolution)
+    # сторона гекса res 8 ~ 460 м
+    k = int(np.ceil(radius_m / 460)) + 1
+    candidates = _h3_grid_disk(center_hex, k)
+    hexes = []
+    for h in candidates:
+        hlat, hlon = _h3_cell_to_latlon(h)
+        if _haversine_km(lat, lon, hlat, hlon) <= radius_m / 1000:
+            hexes.append(h)
+    return hexes
+
+
+def compute_hex_metrics(hexes, elements):
+    data = {h: {"bld": [], "road": [], "med": [], "prem": []} for h in hexes}
+
+    hw_weights = {
+        "motorway": 5, "trunk": 5, "primary": 4, "secondary": 3,
+        "tertiary": 2, "unclassified": 2, "residential": 1,
+        "living_street": 1, "pedestrian": 2, "footway": 1, "path": 1,
+    }
+
+    for el in elements:
+        elat = el.get("lat")
+        elon = el.get("lon")
+        if elat is None:
+            elat = el.get("center", {}).get("lat")
+            elon = el.get("center", {}).get("lon")
+        if elat is None or elon is None:
+            continue
+
+        h = _h3_latlon_to_cell(float(elat), float(elon), 8)
+        if h not in data:
+            continue
+
+        tags = el.get("tags", {})
+        t = el.get("type", "")
+
+        if "building" in tags:
+            levels = 1
+            try:
+                levels = int(tags.get("building:levels", 1))
+            except ValueError:
+                pass
+            btype = tags.get("building", "yes")
+            data[h]["bld"].append({"levels": levels, "type": btype})
+
+        if "highway" in tags and t in ("way", "node"):
+            hw = tags["highway"]
+            data[h]["road"].append({"weight": hw_weights.get(hw, 1)})
+
+        if tags.get("amenity") in ("clinic", "hospital", "doctors", "pharmacy", "dentist"):
+            data[h]["med"].append({"type": tags["amenity"]})
+
+        prem = 0
+        shop = tags.get("shop", "")
+        if shop in ("mall", "supermarket", "car", "jewelry", "boutique", "beauty"):
+            prem += 3 if shop in ("mall", "car", "jewelry") else 2
+        if "office" in tags:
+            prem += 2
+        if tags.get("building") in ("commercial", "retail", "office"):
+            prem += 1
+        if prem > 0:
+            data[h]["prem"].append({"weight": prem})
+
+    metrics = {}
+    for h in hexes:
+        d = data[h]
+        blds = d["bld"]
+        roads = d["road"]
+        meds = d["med"]
+        prems = d["prem"]
+
+        # Плотность населения (прокси: этажи × коэффициент типа здания)
+        pop = sum(
+            b["levels"] * (4 if b["type"] in ("apartments", "residential") else 2 if b["type"] == "house" else 1)
+            for b in blds
+        )
+
+        # Этажность
+        floors = np.mean([b["levels"] for b in blds]) if blds else 0
+
+        # Трафик
+        traffic = sum(r["weight"] for r in roads)
+
+        # Платёжеспособность (прокси: премиальные магазины, офисы, коммерция)
+        income = sum(p["weight"] for p in prems) * 5 + len(blds)
+
+        # Конкуренция
+        competition = len(meds)
+
+        metrics[h] = {
+            "population": int(pop),
+            "floors": round(float(floors), 1),
+            "traffic": int(traffic),
+            "income": int(income),
+            "competition": int(competition),
+        }
+    return metrics
+
+
+def _hex_color(value, vmin, vmax, palette):
+    if vmax == vmin:
+        idx = 0
+    else:
+        ratio = (value - vmin) / (vmax - vmin)
+        idx = int(ratio * (len(palette) - 1))
+        idx = max(0, min(idx, len(palette) - 1))
+    return palette[idx]
+
+
+def render_hex_map(lat, lon, hex_metrics, active_filter):
+    m = folium.Map(
+        location=[lat, lon],
+        zoom_start=13,
+        tiles="CartoDB positron",
+    )
+
+    # Радиус 2 км
+    folium.Circle(
+        location=[lat, lon],
+        radius=2000,
+        color="#0066cc",
+        weight=2,
+        fill=True,
+        fill_color="#0066cc",
+        fill_opacity=0.05,
+        tooltip="Радиус 2 км",
+    ).add_to(m)
+
+    # Маркер клиники
+    folium.Marker(
+        [lat, lon],
+        tooltip="Анализируемая клиника",
+        icon=folium.Icon(color="red", icon="plus", prefix="fa"),
+    ).add_to(m)
+
+    values = [m[active_filter] for m in hex_metrics.values()]
+    vmin, vmax = min(values), max(values)
+    if vmax == vmin:
+        vmax = vmin + 1
+
+    palettes = {
+        "population": ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#e31a1c", "#bd0026"],
+        "floors":     ["#f7f4f9", "#e7e1ef", "#d4b9da", "#c994c7", "#df65b0", "#e7298a", "#ce1256", "#91003f"],
+        "traffic":    ["#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090", "#fc8d59", "#d73027", "#a50026"],
+        "income":     ["#ffffe5", "#f7fcb9", "#d9f0a3", "#addd8e", "#78c679", "#41ab5d", "#238443", "#004529"],
+        "competition":["#1a9850", "#66bd63", "#a6d96a", "#d9ef8b", "#fee08b", "#fdae61", "#f46d43", "#d73027"],
+    }
+    labels = {
+        "population": "Плотность населения (прокси)",
+        "floors": "Средняя этажность",
+        "traffic": "Интенсивность трафика",
+        "income": "Платёжеспособность (прокси)",
+        "competition": "Конкуренция медучреждений",
+    }
+
+    palette = palettes[active_filter]
+
+    for h, met in hex_metrics.items():
+        val = met[active_filter]
+        color = _hex_color(val, vmin, vmax, palette)
+        coords = _h3_boundary(h)
+        folium.Polygon(
+            locations=coords,
+            color="#333333",
+            weight=1,
+            fill_color=color,
+            fill_opacity=0.65,
+            tooltip=f"{labels[active_filter]}: {val}",
+        ).add_to(m)
+
+    # HTML-легенда
+    legend_html = f'''
+    <div style="
+        position: fixed;
+        bottom: 50px;
+        left: 50px;
+        z-index: 9999;
+        background-color: white;
+        padding: 10px;
+        border: 2px solid grey;
+        border-radius: 5px;
+        font-size: 12px;
+    ">
+        <b>{labels[active_filter]}</b><br>
+        <span style="background:{palette[0]};padding:0 8px;">&nbsp;</span> {vmin}<br>
+        <span style="background:{palette[-1]};padding:0 8px;">&nbsp;</span> {vmax}
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    return m._repr_html_()
+
+
+# ==============================================================================
+# ИНТЕРФЕЙС КАРТЫ
+# ==============================================================================
+
+st.divider()
+st.subheader("🗺️ Гео-аналитика радиуса 2 км (гексагональная сетка OSM)")
+
+if "last_result" in st.session_state:
+    result = st.session_state.last_result
+    lat, lon = result["latitude"], result["longitude"]
+
+    filter_mode = st.selectbox(
+        "Слой данных на гексах:",
+        options=[
+            ("population", "Плотность населения"),
+            ("floors", "Этажность застройки"),
+            ("traffic", "Пешеходный + авто трафик"),
+            ("income", "Платёжеспособность аудитории"),
+            ("competition", "Конкуренция медучреждений"),
+        ],
+        format_func=lambda x: x[1],
+    )
+    filter_key = filter_mode[0]
+
+    with st.spinner("Собираем данные OSM и строим гекс-сетку…"):
+        try:
+            elements = fetch_osm_for_hex_grid(lat, lon, radius_m=2000)
+            hexes = build_hex_grid(lat, lon, radius_m=2000, resolution=8)
+            hex_metrics = compute_hex_metrics(hexes, elements)
+
+            if not hex_metrics:
+                st.warning("Не удалось собрать метрики для гексов.")
+            else:
+                map_html = render_hex_map(lat, lon, hex_metrics, filter_key)
+                st.components.v1.html(map_html, height=650)
+
+                # Справочная таблица топ-5 гексов
+                st.caption("Справочно: топ-5 гексов по выбранному показателю")
+                df_hex = pd.DataFrame([
+                    {"h3_index": h, **vals} for h, vals in hex_metrics.items()
+                ])
+                df_hex = df_hex.sort_values(by=filter_key, ascending=False).head(5)
+                st.dataframe(df_hex, use_container_width=True, hide_index=True)
+
+        except Exception as e:
+            st.error(f"Ошибка построения карты: {e}")
+else:
+    st.info("Запустите анализ локации, чтобы построить карту с гексами.")
 
 # ==============================================================================
 # СБРОС КЛЮЧА
