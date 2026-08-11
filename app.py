@@ -729,6 +729,14 @@ if "last_result" in st.session_state:
         f"{result['longitude']:.6f}"
     )
 
+import streamlit as st
+import numpy as np
+import pandas as pd
+import requests
+import folium
+from streamlit_folium import st_folium
+import h3
+
 # ==============================================================================
 # 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ КАРТ (H3 И РАСЧЕТ РАССТОЯНИЙ)
 # ==============================================================================
@@ -760,7 +768,7 @@ def _h3_boundary(h):
         pts = list(boundary)
         if pts and isinstance(pts, (tuple, list)):
             # Переворачиваем из (lon, lat) в (lat, lon) специально для Folium
-            return [(p, p) for p in pts]
+            return [(p[1], p[0]) for p in pts]
         return pts
     except AttributeError:
         return h3.h3_to_geo_boundary(h, geo_json=False)
@@ -777,7 +785,6 @@ def _haversine_km(lat1, lon1, lat2, lon2):
 
 @st.cache_data(show_spinner=False, ttl=600)
 def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
-    # Работаем через стабильное французское зеркало Overpass API
     url = "https://openstreetmap.fr"
     query = f"""
     [out:json][timeout:15];
@@ -796,7 +803,6 @@ def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
         r.raise_for_status()
         return r.json().get("elements", [])
     except Exception:
-        # Резервный сервер в случае сбоя первого
         try:
             r = requests.post("https://overpass-api.de", data={"data": query}, timeout=15)
             return r.json().get("elements", [])
@@ -828,7 +834,6 @@ def compute_hex_metrics(hexes, elements, resolution=8):
         "living_street": 1, "pedestrian": 2, "footway": 1, "path": 1,
     }
 
-    # Если OSM лежит, наполняем безопасной симуляцией данных, чтобы карта не исчезала
     if not elements:
         for i, h in enumerate(hexes):
             data[h]["bld"].append({"levels": (i % 6) + 2, "type": "apartments"})
@@ -853,8 +858,10 @@ def compute_hex_metrics(hexes, elements, resolution=8):
 
             if "building" in tags:
                 levels = 1
-                try: levels = int(tags.get("building:levels", 1))
-                except ValueError: pass
+                try:
+                    levels = int(tags.get("building:levels", 1))
+                except ValueError:
+                    pass
                 data[h]["bld"].append({"levels": levels, "type": tags.get("building", "yes")})
 
             if "highway" in tags or (t == "node" and "highway" in tags):
@@ -868,9 +875,12 @@ def compute_hex_metrics(hexes, elements, resolution=8):
             shop = tags.get("shop", "")
             if shop in ("mall", "supermarket", "car", "jewelry", "boutique", "beauty"):
                 prem += 3 if shop in ("mall", "car", "jewelry") else 2
-            if "office" in tags: prem += 2
-            if tags.get("building") in ("commercial", "retail", "office"): prem += 1
-            if prem > 0: data[h]["prem"].append({"weight": prem})
+            if "office" in tags:
+                prem += 2
+            if tags.get("building") in ("commercial", "retail", "office"):
+                prem += 1
+            if prem > 0:
+                data[h]["prem"].append({"weight": prem})
 
     metrics = {}
     for h in hexes:
@@ -893,7 +903,7 @@ def compute_hex_metrics(hexes, elements, resolution=8):
 
 def _hex_color(value, vmin, vmax, palette):
     if vmax == vmin:
-        return palette
+        return palette[0]
     ratio = (value - vmin) / (vmax - vmin)
     idx = int(ratio * (len(palette) - 1))
     idx = max(0, min(idx, len(palette) - 1))
@@ -911,7 +921,6 @@ if "last_result" in st.session_state:
     result = st.session_state.last_result
     lat, lon = result["latitude"], result["longitude"]
 
-    # Исправленный простой селектор без сложных кортежей
     filter_key = st.selectbox(
         "Слой данных на гексах:",
         options=["population", "floors", "traffic", "income", "competition"],
@@ -926,17 +935,13 @@ if "last_result" in st.session_state:
 
     with st.spinner("Собираем данные OSM и строим гекс-сетку…"):
         try:
-            # А. Получаем объекты
             elements = fetch_osm_for_hex_grid(lat, lon, radius_m=2000)
-            
-            # Б. Сетка и расчет метрик (строго resolution=8)
             grid = build_hex_grid(lat, lon, radius_m=2000, resolution=8)
             hex_metrics = compute_hex_metrics(grid, elements, resolution=8)
 
             if not hex_metrics:
                 st.warning("Не удалось сгенерировать гексагональную сетку.")
             else:
-                # В. Создаем карту Folium "на лету"
                 m = folium.Map(location=[lat, lon], zoom_start=13, tiles="CartoDB positron")
                 
                 folium.Circle(
@@ -949,10 +954,10 @@ if "last_result" in st.session_state:
                     icon=folium.Icon(color="red", icon="plus", prefix="fa")
                 ).add_to(m)
 
-                # Вычисляем лимиты цвета
                 values = [met[filter_key] for met in hex_metrics.values()]
                 vmin, vmax = min(values) if values else 0, max(values) if values else 1
-                if vmax == vmin: vmax = vmin + 1
+                if vmax == vmin:
+                    vmax = vmin + 1
 
                 palettes = {
                     "population": ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#e31a1c", "#bd0026"],
@@ -971,8 +976,15 @@ if "last_result" in st.session_state:
                 
                 palette = palettes[filter_key]
 
-                # Заполняем полигоны гексов
                 for h, met in hex_metrics.items():
+                    val = met[filter_key]
+                    color = _hex_color(val, vmin, vmax, palette)
+                    coords = _h3_boundary(h)
+                    if not coords:
+                        continue
+                    
+                    folium.Polygon(
+                        locations=coords, color="#333333", weight=1,
 
 
 # ==============================================================================
