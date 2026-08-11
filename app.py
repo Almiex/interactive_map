@@ -94,19 +94,15 @@ FACTOR_WEIGHTS = {
     "family_profile": 0.06,
     "daytime_population_balance": 0.07,
 
-    # ACCESSIBILITY
-    "walk_5min": 0.08,
-    "walk_10min": 0.10,
-    "walk_15min": 0.08,
-    "car_10min": 0.12,
-    "car_15min": 0.12,
-    "car_20min": 0.08,
-    "public_transport_access": 0.10,
-    "transit_connectivity": 0.06,
-    "road_connectivity": 0.06,
-    "pedestrian_connectivity": 0.06,
-    "physical_barriers": 0.08,
-    "vehicle_access": 0.06,
+    # ACCESSIBILITY — зоны охвата сокращены до 2 факторов
+    "walk_5min": 0.13,
+    "car_10min": 0.19,
+    "public_transport_access": 0.16,
+    "transit_connectivity": 0.10,
+    "road_connectivity": 0.10,
+    "pedestrian_connectivity": 0.10,
+    "physical_barriers": 0.12,
+    "vehicle_access": 0.10,
 
     # TRAFFIC
     "pedestrian_traffic_quality": 0.16,
@@ -120,15 +116,14 @@ FACTOR_WEIGHTS = {
     "visibility": 0.10,
     "wayfinding": 0.06,
 
-    # PARKING — веса снижены: парковка перестаёт доминировать в score
-    "parking_supply": 0.12,
-    "parking_distance": 0.10,
-    "free_parking": 0.08,
-    "paid_parking": 0.04,
-    "parking_competition": 0.10,
-    "parking_time_fit": 0.10,
-    "dropoff_access": 0.10,
-    "parking_reliability": 0.08,
+    # PARKING — веса снижены, платная парковка убрана
+    "parking_supply": 0.18,
+    "parking_distance": 0.15,
+    "free_parking": 0.12,
+    "parking_competition": 0.15,
+    "parking_time_fit": 0.14,
+    "dropoff_access": 0.14,
+    "parking_reliability": 0.12,
 
     # COMPETITION
     "competitor_density": 0.16,
@@ -139,14 +134,11 @@ FACTOR_WEIGHTS = {
     "market_saturation": 0.16,
     "market_gap": 0.12,
 
-    # MEDICAL ECOSYSTEM
-    "pharmacy_synergy": 0.14,
-    "diagnostics_synergy": 0.18,
-    "laboratory_synergy": 0.14,
-    "hospital_synergy": 0.10,
-    "specialist_synergy": 0.18,
-    "medical_cluster": 0.16,
-    "healthcare_traffic": 0.10,
+    # MEDICAL ECOSYSTEM — убраны аптеки, диагностика, лаборатории
+    "hospital_synergy": 0.19,
+    "specialist_synergy": 0.32,
+    "medical_cluster": 0.30,
+    "healthcare_traffic": 0.19,
 
     # ENVIRONMENT
     "residential_commercial_balance": 0.15,
@@ -172,8 +164,7 @@ for f in [
     FACTOR_BLOCKS[f] = "demand"
 
 for f in [
-    "walk_5min", "walk_10min", "walk_15min", "car_10min", "car_15min",
-    "car_20min", "public_transport_access", "transit_connectivity",
+    "walk_5min", "car_10min", "public_transport_access", "transit_connectivity",
     "road_connectivity", "pedestrian_connectivity", "physical_barriers",
     "vehicle_access"
 ]:
@@ -188,7 +179,7 @@ for f in [
     FACTOR_BLOCKS[f] = "traffic"
 
 for f in [
-    "parking_supply", "parking_distance", "free_parking", "paid_parking",
+    "parking_supply", "parking_distance", "free_parking",
     "parking_competition", "parking_time_fit", "dropoff_access",
     "parking_reliability"
 ]:
@@ -202,7 +193,6 @@ for f in [
     FACTOR_BLOCKS[f] = "competition"
 
 for f in [
-    "pharmacy_synergy", "diagnostics_synergy", "laboratory_synergy",
     "hospital_synergy", "specialist_synergy", "medical_cluster",
     "healthcare_traffic"
 ]:
@@ -231,11 +221,7 @@ FACTOR_NAMES = {
     "daytime_population_balance": "Баланс дневного и жилого населения",
 
     "walk_5min": "Зона охвата пешком 5 минут",
-    "walk_10min": "Зона охвата пешком 10 минут",
-    "walk_15min": "Зона охвата пешком 15 минут",
     "car_10min": "Зона охвата на авто 10 минут",
-    "car_15min": "Зона охвата на авто 15 минут",
-    "car_20min": "Зона охвата на авто 20 минут",
     "public_transport_access": "Доступность общественным транспортом",
     "transit_connectivity": "Связность общественного транспорта",
     "road_connectivity": "Автомобильная связность",
@@ -257,7 +243,6 @@ FACTOR_NAMES = {
     "parking_supply": "Парковочная ёмкость",
     "parking_distance": "Расстояние от парковки",
     "free_parking": "Бесплатная парковка",
-    "paid_parking": "Платная парковка",
     "parking_competition": "Конкуренция за парковку",
     "parking_time_fit": "Парковка в часы работы клиники",
     "dropoff_access": "Высадка/подъезд пациента",
@@ -271,9 +256,6 @@ FACTOR_NAMES = {
     "market_saturation": "Насыщенность рынка",
     "market_gap": "Рыночный зазор",
 
-    "pharmacy_synergy": "Синергия с аптеками",
-    "diagnostics_synergy": "Синергия с диагностикой",
-    "laboratory_synergy": "Синергия с лабораториями",
     "hospital_synergy": "Синергия с больницами",
     "specialist_synergy": "Синергия со специалистами",
     "medical_cluster": "Медицинский кластер",
@@ -308,16 +290,12 @@ FACTOR_DESCRIPTIONS = {
 
     # ACCESSIBILITY
     "walk_5min": "Качество зоны охвата пешком за 5 минут. 100 = плотная застройка, удобные тротуары, отсутствие барьеров.",
-    "walk_10min": "Качество зоны охвата пешком за 10 минут. 100 = широкий охват с хорошей инфраструктурой.",
-    "walk_15min": "Качество зоны охвата пешком за 15 минут. 100 = максимальный охват пешей доступности.",
     "car_10min": "Качество зоны охвата на авто за 10 минут. 100 = хорошие дороги, отсутствие пробок, удобный подъезд.",
-    "car_15min": "Качество зоны охвата на авто за 15 минут. 100 = широкий охват без транспортных барьеров.",
-    "car_20min": "Качество зоны охвата на авто за 20 минут. 100 = максимальный охват автодоступности.",
     "public_transport_access": "Наличие и удобство остановок общественного транспорта рядом с клиникой. 100 = 2+ маршрута в шаговой доступности.",
     "transit_connectivity": "Связность транспортной сети (пересадки, частота). 100 = хорошая связь с другими районами.",
     "road_connectivity": "Качество дорожной сети (ширина, состояние, количество полос). 100 = широкие проспекты без заторов.",
     "pedestrian_connectivity": "Удобство пешеходных связей (тротуары, переходы, отсутствие заборов). 100 = комфортная пешеходная среда.",
-    "physical_barriers": "Препятствия для пациентов (заборы, реки без мостов, склоны, шоссе). 100 = нет барьеров (после инверсии: чем меньше барьеров, тем выше итоговый score).",
+    "physical_barriers": "Препятствия для пациентов (заборы, реки без мостов, склоны, шоссе). 100 = нет барьеров.",
     "vehicle_access": "Удобство подъезда на машине (ширина подъезда, разворот, разгрузка). 100 = удобный подъезд с любой стороны.",
 
     # TRAFFIC
@@ -336,25 +314,23 @@ FACTOR_DESCRIPTIONS = {
     "parking_supply": "Общее количество парковочных мест в доступности от клиники. 100 = много свободных мест всегда.",
     "parking_distance": "Расстояние от ближайшей парковки до входа. 100 = парковка прямо у входа, 0 = >300 м.",
     "free_parking": "Наличие и доступность бесплатной парковки. 100 = бесплатная парковка прямо у входа.",
-    "paid_parking": "Наличие и доступность платной парковки. 100 = много платных мест по разумной цене.",
-    "parking_competition": "Конкуренция за парковочные места (торговые центры, офисы забирают места). 100 = нет конкуренции (после инверсии).",
+
+    "parking_competition": "Конкуренция за парковочные места (торговые центры, офисы забирают места). 100 = нет конкуренции.",
     "parking_time_fit": "Доступность парковки в часы работы клиники. 100 = места есть именно когда работает клиника.",
     "dropoff_access": "Возможность подъехать и высадить пациента у входа. 100 = удобная высадка без риска эвакуации.",
     "parking_reliability": "Надёжность парковки (не эвакуируют, не штрафуют, не занято постоянно). 100 = можно припарковаться всегда.",
 
     # COMPETITION
-    "competitor_density": "Количество конкурентов в радиусе 1 км. 100 = нет конкурентов (после инверсии).",
-    "competitor_strength": "Сила ближайших конкурентов (бренд, репутация, оборудование). 100 = слабые/отсутствуют (после инверсии).",
+    "competitor_density": "Количество конкурентов в радиусе 1 км. 100 = нет конкурентов.",
+    "competitor_strength": "Сила ближайших конкурентов (бренд, репутация, оборудование). 100 = слабые/отсутствуют.",
     "competitor_distance": "Расстояние до ближайшего сильного конкурента. 100 = >1 км до серьёзного конкурента.",
     "competitive_capacity": "Ёмкость рынка vs количество клиник. 100 = спрос превышает предложение, есть ниша.",
     "price_level_fit": "Соответствие ценового уровня района ценам клиники. 100 = район готов платить ваши цены.",
-    "market_saturation": "Насыщенность рынка медуслугами. 100 = рынок не насыщен (после инверсии).",
+    "market_saturation": "Насыщенность рынка медуслугами. 100 = рынок не насыщен.",
     "market_gap": "Наличие незакрытого спроса (каких услуг не хватает). 100 = явный дефицит нужных услуг.",
 
     # MEDICAL ECOSYSTEM
-    "pharmacy_synergy": "Близость аптек (пациент идёт за лекарствами после приёма). 100 = аптека в соседнем помещении.",
-    "diagnostics_synergy": "Близость диагностических центров (КТ, МРТ, УЗИ). 100 = диагностика рядом, направляете друг друга.",
-    "laboratory_synergy": "Близость лабораторий (сдача анализов). 100 = лаборатория в шаговой доступности.",
+
     "hospital_synergy": "Близость больниц (направления, госпитализация). 100 = крупная больница рядом.",
     "specialist_synergy": "Близость узких специалистов (к которым направляете/от которых получаете). 100 = развитая сеть специалистов.",
     "medical_cluster": "Наличие медицинского кластера (несколько медучреждений рядом). 100 = медицинский квартал.",
@@ -363,14 +339,14 @@ FACTOR_DESCRIPTIONS = {
     # ENVIRONMENT
     "residential_commercial_balance": "Баланс жилой и коммерческой застройки. 100 = оптимальное сочетание (жильё + магазины + офисы).",
     "home_clinic_environment": "Насколько среда соответствует формату 'клиника у дома'. 100 = уютный двор, нет шумных магистралей.",
-    "information_noise": "Количество рекламы и вывесок вокруг (конкуренция за внимание). 100 = нет информационного шума (после инверсии).",
-    "noise_environment": "Уровень шума (дороги, стройки, развлекательные заведения). 100 = тихо (после инверсии).",
+    "information_noise": "Количество рекламы и вывесок вокруг (конкуренция за внимание). 100 = нет информационного шума.",
+    "noise_environment": "Уровень шума (дороги, стройки, развлекательные заведения). 100 = тихо.",
     "safety_environment": "Безопасность района (освещение, криминогенная обстановка). 100 = безопасный район, хорошее освещение.",
     "pedestrian_comfort": "Комфорт пешехода (тротуары, озеленение, скамейки). 100 = приятная прогулочная среда.",
     "daily_services": "Повседневная инфраструктура (магазины, кафе, банки) — создают трафик. 100 = развитая инфраструктура.",
     "family_services": "Семейная инфраструктура (школы, детские сады, детские клубы). 100 = много семей с детьми.",
     "fitness_services": "Фитнес-инфраструктура (спортзалы, бассейны). 100 = много спортивных людей (профилактика → клиника).",
-    "office_dependence_risk": "Риск зависимости от офисного трафика (пусто вечерами и выходные). 100 = нет риска (после инверсии).",
+    "office_dependence_risk": "Риск зависимости от офисного трафика (пусто вечерами и выходные). 100 = нет риска.",
 }
 
 # Для факторов, где «больше» хуже, score инвертируется.
@@ -457,11 +433,7 @@ class GeoAIProfile(BaseModel):
     daytime_population_balance: int = Field(ge=0, le=100)
 
     walk_5min: int = Field(ge=0, le=100)
-    walk_10min: int = Field(ge=0, le=100)
-    walk_15min: int = Field(ge=0, le=100)
     car_10min: int = Field(ge=0, le=100)
-    car_15min: int = Field(ge=0, le=100)
-    car_20min: int = Field(ge=0, le=100)
     public_transport_access: int = Field(ge=0, le=100)
     transit_connectivity: int = Field(ge=0, le=100)
     road_connectivity: int = Field(ge=0, le=100)
@@ -483,7 +455,6 @@ class GeoAIProfile(BaseModel):
     parking_supply: int = Field(ge=0, le=100)
     parking_distance: int = Field(ge=0, le=100)
     free_parking: int = Field(ge=0, le=100)
-    paid_parking: int = Field(ge=0, le=100)
     parking_competition: int = Field(ge=0, le=100)
     parking_time_fit: int = Field(ge=0, le=100)
     dropoff_access: int = Field(ge=0, le=100)
@@ -497,9 +468,6 @@ class GeoAIProfile(BaseModel):
     market_saturation: int = Field(ge=0, le=100)
     market_gap: int = Field(ge=0, le=100)
 
-    pharmacy_synergy: int = Field(ge=0, le=100)
-    diagnostics_synergy: int = Field(ge=0, le=100)
-    laboratory_synergy: int = Field(ge=0, le=100)
     hospital_synergy: int = Field(ge=0, le=100)
     specialist_synergy: int = Field(ge=0, le=100)
     medical_cluster: int = Field(ge=0, le=100)
