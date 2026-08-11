@@ -1198,6 +1198,8 @@ def run_full_analysis(
     # содержать неточности (например, отсутствие парковки у «успешного» объекта).
     final_score = round(absolute_final * 0.80 + benchmark_component * 0.20, 1)
 
+    confidence = calculate_confidence(target_profile)
+
     # Вердикт зависит от score, но низкая confidence блокирует позитивные оценки
     if confidence < 40:
         # При критически низкой уверенности — невозможно оценить
