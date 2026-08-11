@@ -10,6 +10,7 @@ import folium
 from streamlit_folium import st_folium
 from openai import OpenAI
 from pydantic import BaseModel, Field
+from shapely.geometry import Polygon
 
 
 # ==============================================================================
@@ -738,7 +739,7 @@ from streamlit_folium import st_folium
 import h3
 
 # ==============================================================================
-# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ H3 КАРТ
+# 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ H3 КАРТ (ПОД КОРРЕКТНЫЙ РАДИУС)
 # ==============================================================================
 
 def _h3_latlon_to_cell(lat, lon, res):
@@ -747,20 +748,17 @@ def _h3_latlon_to_cell(lat, lon, res):
     except AttributeError:
         return h3.geo_to_h3(lat, lon, res)
 
-
 def _h3_cell_to_latlon(h):
     try:
         return h3.cell_to_latlng(h)
     except AttributeError:
         return h3.h3_to_geo(h)
 
-
 def _h3_grid_disk(h, k):
     try:
         return h3.grid_disk(h, k)
     except AttributeError:
         return h3.k_ring(h, k)
-
 
 def _h3_boundary(h):
     try:
@@ -772,7 +770,6 @@ def _h3_boundary(h):
     except AttributeError:
         return h3.h3_to_geo_boundary(h, geo_json=False)
 
-
 def _haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
@@ -780,7 +777,6 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     dlambda = np.radians(lon2 - lon1)
     a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
     return 2 * R * np.arcsin(np.sqrt(a))
-
 
 @st.cache_data(show_spinner=False, ttl=600)
 def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
@@ -795,8 +791,9 @@ def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
       node["shop"~"mall|supermarket|car|jewelry|boutique|beauty"](around:{radius_m},{lat},{lon});
       node["office"](around:{radius_m},{lat},{lon});
     );
-    out center;
+    out center geom;
     """
+    # Добавлено слово 'geom', чтобы Overpass возвращал полные координаты полигонов зданий для расчета площади!
     try:
         r = requests.post(url, data={"data": query}, timeout=15)
         r.raise_for_status()
@@ -808,10 +805,10 @@ def fetch_osm_for_hex_grid(lat, lon, radius_m=2000):
         except Exception:
             return []
 
-
-def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
+def build_hex_grid(lat, lon, radius_m=2000, resolution=9):
     center_hex = _h3_latlon_to_cell(lat, lon, resolution)
-    k = int(np.ceil(radius_m / 460)) + 1
+    # Для разрешения 9 шаг составляет ~182м, адаптируем коэффициент k
+    k = int(np.ceil(radius_m / 182)) + 1
     candidates = _h3_grid_disk(center_hex, k)
     hexes = []
     for h in candidates:
@@ -821,40 +818,60 @@ def build_hex_grid(lat, lon, radius_m=2000, resolution=8):
     return hexes
 
 
+
 # ==============================================================================
-# 2. АНАЛИТИКА МЕТРИК
+# 2. АНАЛИТИКА МЕТРИК (МАТЕМАТИКА ИЗ КОЛАБА)
 # ==============================================================================
 
-def compute_hex_metrics(hexes, elements, resolution=8):
-    # Инициализируем структуру данных для каждого гексагона
-    data = {h: {"bld": [], "road": [], "med": [], "prem": []} for h in hexes}
+def _calculate_polygon_area_3857(geometry_nodes):
+    """Вспомогательная функция для расчета площади полигона OSM в кв. метрах"""
+    if not geometry_nodes or len(geometry_nodes) < 3:
+        return 500  # Дефолтная площадь фундамента, если структура сломана (~20х25м)
     
-    # Веса дорог для внутреннего использования (определяют значимость магистралей)
+    # Собираем координаты
+    coords = [(pt['lon'], pt['lat']) for pt in geometry_nodes]
+    poly = Polygon(coords)
+    
+    # Проекция в EPSG:3857 для получения метров (упрощенный подход без перевода всего GDF)
+    # Перевод координат WGS84 в Меркатор вручную для Shapely
+    from shapely.ops import transform
+    import pyproj
+    
+    wgs84 = pyproj.CRS('EPSG:4326')
+    utm = pyproj.CRS('EPSG:3857')
+    project = pyproj.Transformer.from_crs(wgs84, utm, always_xy=True).transform
+    poly_meters = transform(project, poly)
+    
+    return poly_meters.area
+
+def compute_hex_metrics(hexes, elements, resolution=9):
+    data = {h: {"bld_pop": [], "bld_levels": [], "road": [], "med": [], "prem": []} for h in hexes}
     hw_weights = {
         "motorway": 5, "trunk": 5, "primary": 4, "secondary": 3,
         "tertiary": 2, "unclassified": 2, "residential": 1,
         "living_street": 1, "pedestrian": 2, "footway": 1, "path": 1,
     }
 
-    # Если Overpass API вернул пустой ответ (нет данных в OSM)
     if not elements:
-        # Вместо абстрактных циклов (i % 6) моделируем реалистичную жилую зону среднего города
+        # Симуляция физических параметров, если OSM пуст
         for i, h in enumerate(hexes):
-            # Пусть в каждом втором гексагоне будут условные жилые дома для теста
-            if i % 2 == 0:
-                # Генерируем 3 жилых дома по 9 этажей
-                for _ in range(3):
-                    data[h]["bld"].append({"levels": 9, "type": "apartments"})
-                # Пару дорог общего пользования
-                data[h]["road"].append({"weight": 1})
-                data[h]["road"].append({"weight": 2})
-            # В каждом третьем гексагоне — коммерция и медицина
             if i % 3 == 0:
+                # Моделируем 2 жилых дома: фундамент 600 кв.м, 9 этажей
+                # (600 * 9) / 27 = 200 человек на дом * 2 = 400 человек
+                data[h]["bld_pop"].append(400)
+                data[h]["bld_levels"].append(9)
+                data[h]["road"].append({"weight": 2})
+                data[h]["prem"].append({"weight": 1})
+            elif i % 5 == 0:
+                # Моделируем частный сектор
+                data[h]["bld_pop"].append(2)
+                data[h]["bld_levels"].append(1)
+                data[h]["road"].append({"weight": 1})
+            if i % 4 == 0:
                 data[h]["med"].append({"type": "pharmacy"})
-                data[h]["prem"].append({"weight": 3})  # Магазин/супермаркет
     else:
-        # Распределяем реальные элементы OSM по гексагонам сетки
         for el in elements:
+            # Пытаемся взять центр или точку
             elat = el.get("lat") or el.get("center", {}).get("lat")
             elon = el.get("lon") or el.get("center", {}).get("lon")
             if elat is None or elon is None:
@@ -867,25 +884,39 @@ def compute_hex_metrics(hexes, elements, resolution=8):
             tags = el.get("tags", {})
             t = el.get("type", "")
 
-            # Фиксация зданий и их этажности
-            if "building" in tags:
-                levels = 1
-                try:
-                    levels = int(tags.get("building:levels", 1))
-                except ValueError:
-                    pass
-                data[h]["bld"].append({"levels": levels, "type": tags.get("building", "yes")})
+            # --- Точный расчет населения по вашей формуле ---
+            if "building" in tags and tags.get("building") in ["apartments", "residential", "house", "living_quarter", "yes"]:
+                # 1. Считаем площадь фундамента из геометрии OSM
+                geom_nodes = el.get("geometry", [])
+                footprint_area = _calculate_polygon_area_3857(geom_nodes)
+                
+                # 2. Определяем этажность
+                levels = tags.get('building:levels', None)
+                if levels is None or not str(levels).isdigit():
+                    b_type = tags.get('building', 'residential')
+                    levels = 9 if b_type == 'apartments' else 5
+                else:
+                    levels = int(levels)
+                
+                # 3. Считаем людей по площади и нормативу 27 кв.м
+                total_living_area = footprint_area * levels
+                estimated_people = int(total_living_area / 27)
+                
+                if estimated_people < 1:
+                    estimated_people = 2  # Условный частный дом
+                    
+                data[h]["bld_pop"].append(estimated_people)
+                data[h]["bld_levels"].append(levels)
 
-            # Фиксация дорожной сети
+            # --- Остальные параметры переводим в штуки/реальные величины ---
             if "highway" in tags or (t == "node" and "highway" in tags):
                 hw = tags.get("highway", "residential")
-                data[h]["road"].append({"weight": hw_weights.get(hw, 1)})
+                if hw in hw_weights:
+                    data[h]["road"].append({"weight": hw_weights[hw]})
 
-            # Фиксация медицинских конкурентов
             if tags.get("amenity") in ("clinic", "hospital", "doctors", "pharmacy", "dentist"):
                 data[h]["med"].append({"type": tags["amenity"]})
 
-            # Фиксация бизнес-точек (офисы, магазины, ТЦ)
             prem = 0
             shop = tags.get("shop", "")
             if shop in ("mall", "supermarket", "car", "jewelry", "boutique", "beauty"):
@@ -897,42 +928,25 @@ def compute_hex_metrics(hexes, elements, resolution=8):
             if prem > 0:
                 data[h]["prem"].append({"weight": prem})
 
-    # Считаем финальные РЕАЛЬНЫЕ значения физических параметров
     metrics = {}
     for h in hexes:
         d = data[h]
         
-        # 1. Население: считаем жилые этажи. В среднем берем 12 человек на 1 жилой этаж многоэтажки, 4 для частного дома.
-        pop = 0
-        for b in d["bld"]:
-            if b["type"] in ("apartments", "residential"):
-                pop += b["levels"] * 12  # Реалистичное число жителей на этаж секции
-            elif b["type"] == "house":
-                pop += 4  # Частный дом — одна семья
-            else:
-                pop += 0  # Коммерческие и промздания не имеют постоянного населения
-                
-        # 2. Этажность: среднее арифметическое этажей реальных зданий
-        floors = np.mean([b["levels"] for b in d["bld"]]) if d["bld"] else 0.0
-        
-        # 3. Трафик: вместо абстрактного индекса выводим физическое число дорог/пешеходных путей разного класса
-        traffic_count = len(d["road"])
-        
-        # 4. Бизнес-активность (вместо индекса доходов): общее число коммерческих объектов в гексе
-        business_objects = len(d["prem"])
-        
-        # 5. Конкуренция: физическое количество медицинских объектов (аптеки, клиники)
-        competition_count = len(d["med"])
+        # Агрегируем физические показатели
+        pop = sum(d["bld_pop"])
+        floors = np.mean(d["bld_levels"]) if d["bld_levels"] else 0.0
+        traffic = len(d["road"])
+        income = len(d["prem"])
+        competition = len(d["med"])
 
         metrics[h] = {
             "population": int(pop),
             "floors": round(float(floors), 1),
-            "traffic": int(traffic_count),
-            "income": int(business_objects),
-            "competition": int(competition_count),
+            "traffic": int(traffic),
+            "income": int(income),
+            "competition": int(competition),
         }
     return metrics
-
 
 def _hex_color(value, vmin, vmax, palette):
     if vmax == vmin:
@@ -944,7 +958,7 @@ def _hex_color(value, vmin, vmax, palette):
 
 
 # ==============================================================================
-# 3. ИНТЕРФЕЙС И КАРТА (ИСПРАВЛЕННЫЙ ВАРИАНТ)
+# 3. ИНТЕРФЕЙС И КАРТА
 # ==============================================================================
 
 st.divider()
@@ -958,19 +972,21 @@ if "last_result" in st.session_state:
         "Слой данных на гексах:",
         options=["population", "floors", "traffic", "income", "competition"],
         format_func=lambda x: {
-            "population": "Плотность населения",
-            "floors": "Этажность застройки",
-            "traffic": "Пешеходный + авто трафик",
-            "income": "Платёжеспособность аудитории",
-            "competition": "Конкуренция медучреждений"
+            "population": "Плотность населения (чел.)",
+            "floors": "Этажность застройки (этажи)",
+            "traffic": "Количество дорог/путей (ед.)",
+            "income": "Бизнес-инфраструктура (объекты)",
+            "competition": "Конкуренция медучреждений (объекты)"
         }.get(x, x)
     )
 
-    with st.spinner("Собираем данные OSM и строим гекс-сетку…"):
+    with st.spinner("Собираем данные OSM и строим точную гекс-сетку…"):
         try:
+            # Переключаем разрешение на 9, как в Колабе
+            CURRENT_RES = 9
             elements = fetch_osm_for_hex_grid(lat, lon, radius_m=2000)
-            grid = build_hex_grid(lat, lon, radius_m=2000, resolution=8)
-            hex_metrics = compute_hex_metrics(grid, elements, resolution=8)
+            grid = build_hex_grid(lat, lon, radius_m=2000, resolution=CURRENT_RES)
+            hex_metrics = compute_hex_metrics(grid, elements, resolution=CURRENT_RES)
 
             if not hex_metrics:
                 st.warning("Не удалось сгенерировать гексагональную сетку.")
@@ -999,12 +1015,14 @@ if "last_result" in st.session_state:
                     "income":     ["#ffffe5", "#f7fcb9", "#d9f0a3", "#addd8e", "#78c679", "#41ab5d", "#238443", "#004529"],
                     "competition":["#1a9850", "#66bd63", "#a6d96a", "#d9ef8b", "#fee08b", "#fdae61", "#f46d43", "#d73027"],
                 }
-                labels = {
-                    "population": "Плотность населения (прокси)",
-                    "floors": "Средняя этажность",
-                    "traffic": "Интенсивность трафика",
-                    "income": "Платёжеспособность (прокси)",
-                    "competition": "Конкуренция медучреждений",
+                
+                # Человеческие суффиксы для всплывающих подсказок Folium Polygon
+                tooltips_map = {
+                    "population": "Примерное население ячейки: {} чел.",
+                    "floors": "Средняя этажность зоны: {} эт.",
+                    "traffic": "Транспортных путей в ячейке: {} ед.",
+                    "income": "Коммерческих объектов: {} ед.",
+                    "competition": "Медицинских конкурентов: {} шт.",
                 }
                 
                 palette = palettes[filter_key]
@@ -1013,10 +1031,18 @@ if "last_result" in st.session_state:
                     val = met[filter_key]
                     color = _hex_color(val, vmin, vmax, palette)
                     coords = _h3_boundary(h)
+                    
+                    # Проверяем, если значение нулевое — делаем прозрачным, как в Колабе
+                    is_empty = (val == 0)
+                    
                     if coords:
                         folium.Polygon(
-                            locations=coords, color="#333333", weight=1,
-                            fill_color=color, fill_opacity=0.6, tooltip=f"{labels[filter_key]}: {val}"
+                            locations=coords, 
+                            color="gray" if not is_empty else "transparent", 
+                            weight=0.5,
+                            fill_color=color if not is_empty else "transparent", 
+                            fill_opacity=0.6 if not is_empty else 0.0, 
+                            tooltip=tooltips_map[filter_key].format(val)
                         ).add_to(m)
 
                 st_folium(
@@ -1024,12 +1050,11 @@ if "last_result" in st.session_state:
                     width="100%",
                     height=600,
                     returned_objects=[],
-                    key="map_fixed_v5_final"
+                    key="map_fixed_v9_ultimate"
                 )
 
                 st.caption("📊 Лидеры локации: топ-5 зон по выбранному показателю")
                 
-                # Формируем данные БЕЗ сырого h3_index. Заменяем его на координаты центра гекса.
                 table_rows = []
                 for h, vals in hex_metrics.items():
                     h_lat, h_lon = _h3_cell_to_latlon(h)
@@ -1045,22 +1070,17 @@ if "last_result" in st.session_state:
                 df_hex = pd.DataFrame(table_rows)
                 
                 if not df_hex.empty:
-                    # Сортируем по выбранному пользователем показателю
                     df_hex = df_hex.sort_values(by=filter_key, ascending=False).head(5)
-                    
-                    # Добавляем понятный ранг вместо страшного хэша
                     df_hex.insert(0, "Ранг зоны", [f"🏆 Локация #{i+1}" for i in range(len(df_hex))])
                     
-                    # Переименовываем колонки в человеческий вид
                     df_hex = df_hex.rename(columns={
                         "population": "Население (чел.)",
                         "floors": "Ср. этажность",
-                        "traffic": "Индекс трафика",
-                        "income": "Потенциал дохода",
+                        "traffic": "Дорожная сеть (ед.)",
+                        "income": "Бизнес (объекты)",
                         "competition": "Конкуренты (объекты)"
                     })
                     
-                    # Дисплей красивой таблицы без технических индексов DataFrame
                     st.dataframe(
                         df_hex, 
                         use_container_width=True, 
