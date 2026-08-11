@@ -1171,20 +1171,20 @@ def run_full_analysis(
     elif confidence < 55:
         # При низкой уверенности понижаем категорию на 1 уровень
         if final_score >= 75:
-            verdict = "ХОРОШАЯ ЛОКАЦИЯ С ОГОВОРКАМИ — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
-        elif final_score >= 60:
+            verdict = "ХОРОШАЯ ЛОКАЦИЯ С ОГОВОРКАМИ — ТРЕБУЕТСЯ ПРОВЕРКА ДАННЫХ"
+        elif final_score >= 70:
             verdict = "СРЕДНЯЯ ЛОКАЦИЯ — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
         elif final_score >= 45:
             verdict = "СЛАБАЯ ЛОКАЦИЯ — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
         else:
             verdict = "СЛАБАЯ ЛОКАЦИЯ — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
     else:
-        if final_score >= 75:
+        if final_score >= 80:
             verdict = "СИЛЬНАЯ ЛОКАЦИЯ"
-        elif final_score >= 60:
+        elif final_score >= 70:
             verdict = "ХОРОШАЯ ЛОКАЦИЯ С ОГОВОРКАМИ"
         elif final_score >= 45:
-            verdict = "СРЕДНЯЯ ЛОКАЦИЯ"
+            verdict = "СРЕДНЯЯ ИЛИ НИЖЕ СРЕДНЕГО ЛОКАЦИЯ"
         else:
             verdict = "СЛАБАЯ ЛОКАЦИЯ"
 
