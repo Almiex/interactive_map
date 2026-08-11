@@ -632,17 +632,17 @@ if "last_result" in st.session_state:
             f"{result['final_score']} / 100",
         )
 
-    with metric2:
-        st.metric(
-            "Офисный кластер БЦ",
-            "Да" if result["is_office_heavy"] else "Нет",
-        )
+    # with metric2:
+    #     st.metric(
+    #         "Офисный кластер БЦ",
+    #         "Да" if result["is_office_heavy"] else "Нет",
+    #     )
 
-    with metric3:
-        st.metric(
-            "Скоростная магистраль",
-            "Да" if result["is_speed_highway"] else "Нет",
-        )
+    # with metric3:
+    #     st.metric(
+    #         "Скоростная магистраль",
+    #         "Да" if result["is_speed_highway"] else "Нет",
+    #     )
 
     st.info(result["verdict"])
 
