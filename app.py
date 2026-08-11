@@ -1179,9 +1179,9 @@ def run_full_analysis(
         else:
             verdict = "СЛАБАЯ ЛОКАЦИЯ — НИЗКАЯ УВЕРЕННОСТЬ В ДАННЫХ"
     else:
-        if final_score >= 80:
+        if final_score >= 75:
             verdict = "СИЛЬНАЯ ЛОКАЦИЯ"
-        elif final_score >= 70:
+        elif final_score >= 67:
             verdict = "ХОРОШАЯ ЛОКАЦИЯ С ОГОВОРКАМИ"
         elif final_score >= 45:
             verdict = "СРЕДНЯЯ ИЛИ НИЖЕ СРЕДНЕГО ЛОКАЦИЯ"
