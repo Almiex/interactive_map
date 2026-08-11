@@ -75,10 +75,10 @@ REQUEST_HEADERS = {
 
 # Весы агрегированных блоков. GPT их не меняет.
 BLOCK_WEIGHTS = {
-    "demand": 0.24,
-    "accessibility": 0.20,
-    "traffic": 0.14,
-    "parking": 0.13,
+    "demand": 0.27,
+    "accessibility": 0.22,
+    "traffic": 0.15,
+    "parking": 0.07,
     "competition": 0.11,
     "medical_ecosystem": 0.10,
     "environment": 0.08,
@@ -126,15 +126,15 @@ FACTOR_WEIGHTS = {
     "visibility": 0.10,
     "wayfinding": 0.06,
 
-    # PARKING
-    "parking_supply": 0.18,
-    "parking_distance": 0.13,
+    # PARKING — веса снижены: парковка перестаёт доминировать в score
+    "parking_supply": 0.12,
+    "parking_distance": 0.10,
     "free_parking": 0.08,
     "paid_parking": 0.04,
-    "parking_competition": 0.16,
-    "parking_time_fit": 0.15,
-    "dropoff_access": 0.14,
-    "parking_reliability": 0.12,
+    "parking_competition": 0.10,
+    "parking_time_fit": 0.10,
+    "dropoff_access": 0.10,
+    "parking_reliability": 0.08,
 
     # COMPETITION
     "competitor_density": 0.16,
@@ -1226,10 +1226,21 @@ def calculate_hard_barriers(profile: dict, osm_context: dict) -> List[str]:
             "Среда практически не соответствует формату «клиника у дома»."
         )
 
-    if counts.get("parking_500m", 0) == 0 and profile.get("parking_supply", 0) <= 25:
+    # УСИЛЕННЫЕ барьеры по парковке
+    if counts.get("parking_500m", 0) == 0 and profile.get("parking_supply", 0) <= 35:
         barriers.append(
             "OSM не показывает парковку в радиусе 500 м, а AI оценивает "
-            "парковочную ёмкость как низкую."
+            "парковочную ёмкость как низкую. Отсутствие парковки — критический барьер."
+        )
+
+    if profile.get("parking_supply", 0) <= 15:
+        barriers.append(
+            "Критически низкая парковочная ёмкость. Пациентам физически некуда припарковаться."
+        )
+
+    if profile.get("parking_reliability", 0) <= 10:
+        barriers.append(
+            "Парковка практически отсутствует или занята постоянно — пациенты не смогут приехать на авто."
         )
 
     return barriers
@@ -1252,15 +1263,23 @@ def apply_hard_penalties(
     elif profile.get("vehicle_access", 0) <= 25:
         penalty += 5
 
-    if profile.get("parking_reliability", 0) <= 15:
+    # Усиленные штрафы за отсутствие/нехватку парковки
+    if profile.get("parking_reliability", 0) <= 10:
+        penalty += 14
+    elif profile.get("parking_reliability", 0) <= 20:
         penalty += 8
-    elif profile.get("parking_reliability", 0) <= 25:
+    elif profile.get("parking_reliability", 0) <= 30:
         penalty += 4
+
+    if profile.get("parking_supply", 0) <= 15:
+        penalty += 14
+    elif profile.get("parking_supply", 0) <= 30:
+        penalty += 7
 
     if profile.get("home_clinic_environment", 0) <= 15:
         penalty += 7
 
-    penalty = min(penalty, 25.0)
+    penalty = min(penalty, 35.0)
     final = round(clamp(absolute_score - penalty), 1)
 
     return final, penalty
@@ -1386,7 +1405,9 @@ def run_full_analysis(
         benchmark["successful_centroid_similarity"] * 0.60
         + clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
     )
-    final_score = round(absolute_final * 0.70 + benchmark_component * 0.30, 1)
+    # Benchmark теперь влияет слабее (20% вместо 30%), т.к. эталоны могут
+    # содержать неточности (например, отсутствие парковки у «успешного» объекта).
+    final_score = round(absolute_final * 0.80 + benchmark_component * 0.20, 1)
 
     if final_score >= 75:
         verdict = "СИЛЬНАЯ ЛОКАЦИЯ"
@@ -1592,7 +1613,7 @@ if "last_result" in st.session_state:
 
     st.markdown(f"### {result['address']}")
 
-    metric1, metric2, metric3, metric4 = st.columns(4)
+    metric1, metric2, metric3 = st.columns(3)
 
     with metric1:
         st.metric(
@@ -1608,12 +1629,6 @@ if "last_result" in st.session_state:
 
     with metric3:
         st.metric(
-            "Похожесть на успешные",
-            f"{benchmark['successful_centroid_similarity']} / 100",
-        )
-
-    with metric4:
-        st.metric(
             "Уверенность",
             f"{result['confidence']}%",
         )
@@ -1626,78 +1641,14 @@ if "last_result" in st.session_state:
     )
 
     # --------------------------------------------------------------------------
-    # BENCHMARK
+    # BENCHMARK — скрыт по запросу пользователя
     # --------------------------------------------------------------------------
-
-    st.subheader("🎯 Benchmark: сравнение с эталонными объектами")
-
-    bm1, bm2, bm3 = st.columns(3)
-
-    with bm1:
-        st.metric(
-            "Ближайший успешный профиль",
-            f"{benchmark['success_similarity'][0][1]}%"
-            if benchmark["success_similarity"] else "—",
-        )
-
-    with bm2:
-        st.metric(
-            "Средний профиль успешных",
-            f"{benchmark['successful_centroid_similarity']}%",
-        )
-
-    with bm3:
-        st.metric(
-            "Средний профиль слабых",
-            f"{benchmark['weak_centroid_similarity']}%",
-        )
-
-    st.metric(
-        "Benchmark Gap",
-        f"{benchmark['benchmark_gap']:+.1f}",
-        help=(
-            "Положительное значение означает, что профиль локации "
-            "ближе к успешному кластеру, чем к слабому."
-        ),
-    )
-
-    bench_col1, bench_col2 = st.columns(2)
-
-    with bench_col1:
-        st.markdown("#### Ближайшие успешные")
-
-        success_df = pd.DataFrame(
-            benchmark["success_similarity"],
-            columns=["Объект", "Similarity"],
-        )
-
-        if not success_df.empty:
-            success_df["Similarity"] = success_df["Similarity"].map(
-                lambda x: f"{x:.1f}%"
-            )
-            st.dataframe(
-                success_df,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    with bench_col2:
-        st.markdown("#### Ближайшие слабые")
-
-        weak_df = pd.DataFrame(
-            benchmark["weak_similarity"],
-            columns=["Объект", "Similarity"],
-        )
-
-        if not weak_df.empty:
-            weak_df["Similarity"] = weak_df["Similarity"].map(
-                lambda x: f"{x:.1f}%"
-            )
-            st.dataframe(
-                weak_df,
-                use_container_width=True,
-                hide_index=True,
-            )
+    # Блок сравнения с эталонными объектами скрыт, т.к. эталонная база
+    # содержит неточности (например, отсутствие парковки у «успешного» объекта).
+    # Расчёт benchmark_component всё ещё участвует в итоговом score с весом 20%.
+    #
+    # bm1, bm2, bm3 = st.columns(3)
+    # ... (benchmark UI удалён)
 
     # --------------------------------------------------------------------------
     # BLOCKS
