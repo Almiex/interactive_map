@@ -1,27 +1,14 @@
 # -*- coding: utf-8 -*-
-# Автоустановка openpyxl для Streamlit Cloud
-import subprocess, sys
-try:
-    import openpyxl
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "--quiet"])
-    import openpyxl
-
-
 """
 GeoMarketing AI — Clinic Location Benchmark v4.0
-
-Что нового:
-1. Эталоны загружаются из файла (Лист 2), а не хардкодятся.
-2. Пользователь заполняет чеклист target вручную — только известные данные.
-3. Данные ПроДокторов (рейтинги, отзывы, индексы) полностью исключены.
-4. AI оценивает эталоны батчем на основе аудиторных данных из файла.
-5. AI оценивает target с учётом ручного чеклиста + OSM (если доступен).
+Без st.cache_data. Результаты хранятся в session_state.
 """
 
+import importlib.util
 import json
 import math
-import time
+import subprocess
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -30,6 +17,21 @@ import requests
 import streamlit as st
 from openai import OpenAI
 from pydantic import BaseModel, Field
+
+# Graceful openpyxl handling
+if importlib.util.find_spec("openpyxl") is None:
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "openpyxl", "--quiet", "--user"],
+            check=False, capture_output=True, text=True
+        )
+    except Exception:
+        pass
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 # ==============================================================================
 # STREAMLIT CONFIG
@@ -102,7 +104,6 @@ FACTOR_GLOBAL_WEIGHT = {f[0]: f[2] * BLOCK_WEIGHTS[f[1]] for f in FACTORS}
 # PYDANTIC
 # ==============================================================================
 class GeoAIFullProfile(BaseModel):
-    """Все 21 фактор (оценивает AI)."""
     parking_proximity: int = Field(ge=0, le=100)
     parking_supply: int = Field(ge=0, le=100)
     vehicle_access: int = Field(ge=0, le=100)
@@ -545,7 +546,6 @@ def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, i
 
 
 def parse_benchmark_params(row: pd.Series) -> dict:
-    """Интерпретирует строку эталона в params для location_param_score."""
     bt_raw = str(row.get("building_type", "")).lower()
     if "жилой" in bt_raw:
         bt = "residential"
@@ -580,24 +580,24 @@ def build_ai_full_system_prompt() -> str:
     return """Ты — geo-marketing analyst для частных медицинских клиник формата «клиника у дома».
 
 Оцени ВСЕ факторы по шкале 0–100:
-1. parking_proximity — близость парковки (0 = нет парковки в радиусе 1 км, 100 = много парковки прямо у входа).
-2. parking_supply — ёмкость парковки (0 = нет мест, 100 = огромная многоуровневая парковка).
-3. vehicle_access — удобство подъезда на авто (0 = глухой переулок, 100 = широкая магистраль с удобным съездом).
-4. public_transport — общественный транспорт (0 = нет остановок в пешей доступности, 100 = метро + несколько маршрутов).
-5. population_density — плотность жилой застройки (0 = промзона/пустырь, 100 = плотная многоэтажная застройка).
-6. competitor_density — плотность конкурентов (0 = нет клиник в радиусе 1 км, 100 = 3+ клиники в 300 м). ВНИМАНИЕ: 100 = много конкурентов (это ПЛОХО).
-7. pharmacy_synergy — синергия с аптеками (0 = нет аптек, 100 = 2+ аптеки в 300 м).
-8. diagnostics_synergy — синергия с диагностикой (0 = нет лабораторий, 100 = диагностический центр рядом).
-9. hospital_synergy — синергия с больницами (0 = нет больниц, 100 = крупная больница в 300 м).
-10. medical_cluster — медицинский кластер (0 = нет медучреждений, 100 = медицинский квартал).
-11. visibility — видимость с дороги (0 = двор/подвал, 100 = витрина на главной магистрали).
-12. road_type_fit — тип дорог (0 = промзона/трасса, 100 = жилой район с хорошим трафиком ЦА).
-13. pedestrian_comfort — пешеходный комфорт (0 = нет тротуаров, 100 = широкие тротуары, озеленение).
-14. income_fit — соответствие дохода населения среднему чеку клиники.
-15. age_fit — возрастное соответствие целевой аудитории.
+1. parking_proximity — близость парковки (0 = нет в 1 км, 100 = у входа).
+2. parking_supply — ёмкость парковки.
+3. vehicle_access — удобство подъезда на авто.
+4. public_transport — общественный транспорт.
+5. population_density — плотность жилой застройки.
+6. competitor_density — плотность конкурентов (100 = много конкурентов, это ПЛОХО).
+7. pharmacy_synergy — синергия с аптеками.
+8. diagnostics_synergy — синергия с диагностикой.
+9. hospital_synergy — синергия с больницами.
+10. medical_cluster — медицинский кластер.
+11. visibility — видимость с дороги.
+12. road_type_fit — тип дорог (0 = промзона, 100 = жилой район с ЦА-трафиком).
+13. pedestrian_comfort — пешеходный комфорт.
+14. income_fit — соответствие дохода населения среднему чеку.
+15. age_fit — возрастное соответствие ЦА.
 16. gender_fit — половое соответствие ЦА.
 17. family_profile — семейный профиль района.
-18. daytime_balance — баланс дневного и жилого населения.
+18. daytime_balance — баланс дневного/жилого населения.
 19. competitor_strength — сила конкурентов (100 = слабые/отсутствуют).
 20. market_gap — рыночный зазор (100 = большой незакрытый спрос).
 21. noise_safety — шум и безопасность (100 = тихо и безопасно).
@@ -605,39 +605,45 @@ def build_ai_full_system_prompt() -> str:
 
 ПРАВИЛА:
 - Используй переданные аудиторные данные и адрес.
-- Если данных мало — делай разумные предположения по типу улицы и города.
+- Если данных мало — снижай confidence и evidence_quality.
 - Все оценки целые числа 0–100.
-- Снижай profile_confidence и evidence_quality если мало данных.
+- profile_confidence и evidence_quality тоже 0–100.
 """
+
+
+def safe_str(val) -> str:
+    """Безопасное преобразование значения DataFrame в строку."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return ""
+    return str(val)
 
 
 def build_benchmark_batch_prompt(df: pd.DataFrame) -> str:
     chunks = []
     for idx, row in df.iterrows():
-        chunk = f"""
---- ЭТАЛОН {idx} ---
-name: {row.get('name', '')}
-address: {row.get('address', '')}
-building_type: {row.get('building_type', '')}, storeys: {row.get('number_of_storeys', '')}
-street_visibility: {row.get('street_visibility', '')}
-first_line: {row.get('first_line', '')}
-parking: {row.get('parking', '')}
-traffic_car: {row.get('traffic_car', '')}
-traffic_ped: {row.get('traffic_ped', '')}
-population_density: {row.get('population_density', '')}
-building_type_1km: {row.get('building_type_1km', '')}
-avg_housing_price: {row.get('avg_housing_price', '')}
-transport_stop_distance: {row.get('transport_stop_distance', '')}
-transport_access: {row.get('transport_access', '')}
-format: {row.get('format', '')}
-result: {row.get('result', '')}
-competitors_count: {row.get('competitors_count', '')}
-competitors_list: {row.get('competitors_list', '')}
-has_trauma_center: {row.get('has_trauma_center', '')}
-price_segment: {row.get('price_segment', '')}
-avg_ticket: {row.get('avg_ticket', '')}
-year_opened: {row.get('year_opened', '')}
-type: {row.get('type', '')}
+        chunk = f"""--- ЭТАЛОН {idx} ---
+name: {safe_str(row.get('name', ''))}
+address: {safe_str(row.get('address', ''))}
+building_type: {safe_str(row.get('building_type', ''))}, storeys: {safe_str(row.get('number_of_storeys', ''))}
+street_visibility: {safe_str(row.get('street_visibility', ''))}
+first_line: {safe_str(row.get('first_line', ''))}
+parking: {safe_str(row.get('parking', ''))}
+traffic_car: {safe_str(row.get('traffic_car', ''))}
+traffic_ped: {safe_str(row.get('traffic_ped', ''))}
+population_density: {safe_str(row.get('population_density', ''))}
+building_type_1km: {safe_str(row.get('building_type_1km', ''))}
+avg_housing_price: {safe_str(row.get('avg_housing_price', ''))}
+transport_stop_distance: {safe_str(row.get('transport_stop_distance', ''))}
+transport_access: {safe_str(row.get('transport_access', ''))}
+format: {safe_str(row.get('format', ''))}
+result: {safe_str(row.get('result', ''))}
+competitors_count: {safe_str(row.get('competitors_count', ''))}
+competitors_list: {safe_str(row.get('competitors_list', ''))}
+has_trauma_center: {safe_str(row.get('has_trauma_center', ''))}
+price_segment: {safe_str(row.get('price_segment', ''))}
+avg_ticket: {safe_str(row.get('avg_ticket', ''))}
+year_opened: {safe_str(row.get('year_opened', ''))}
+type: {safe_str(row.get('type', ''))}
 """
         chunks.append(chunk)
 
@@ -688,13 +694,11 @@ OSM counts: {json.dumps(osm.get('counts', {}), ensure_ascii=False)}
 
 
 # ==============================================================================
-# AI GENERATION (cached)
+# AI GENERATION (без cache_data)
 # ==============================================================================
-@st.cache_data(show_spinner=False, ttl=300)
-def generate_benchmark_profiles_cached(api_key: str, model: str, df_json: str) -> dict:
+def generate_benchmark_profiles(api_key: str, model: str, df: pd.DataFrame) -> dict:
     """Генерирует профили для всех эталонов батчем."""
     client = OpenAI(api_key=api_key)
-    df = pd.read_json(df_json, orient="split")
     batch = call_batch_ai_full(
         client=client,
         model=model.strip(),
@@ -713,28 +717,22 @@ def generate_benchmark_profiles_cached(api_key: str, model: str, df_json: str) -
             continue
         row = df.iloc[idx]
         profile = item.profile.model_dump()
-        # Добавляем location_param_score на основе эвристики из файла
         bench_params = parse_benchmark_params(row)
         loc_score, _ = compute_location_param_score(bench_params)
         profile["location_param_score"] = loc_score
         result[idx] = {
-            "name": row.get("name", f"Эталон {idx}"),
-            "address": row.get("address", ""),
-            "status": str(row.get("result", "")).lower().strip(),
+            "name": safe_str(row.get("name", f"Эталон {idx}")),
+            "address": safe_str(row.get("address", "")),
+            "status": safe_str(row.get("result", "")).lower().strip(),
             "profile": profile,
             "params": bench_params,
         }
     return result
 
 
-@st.cache_data(show_spinner=False, ttl=300)
-def generate_target_profile_cached(api_key: str, model: str, target_json: str, known_json: str, osm_json: str) -> dict:
+def generate_target_profile(api_key: str, model: str, target_loc: dict, known_data: dict, osm: dict) -> dict:
     """AI оценивает target (все 21 фактор)."""
     client = OpenAI(api_key=api_key)
-    target_loc = json.loads(target_json)
-    known_data = json.loads(known_json)
-    osm = json.loads(osm_json)
-
     batch = call_batch_ai_full(
         client=client,
         model=model.strip(),
@@ -985,7 +983,6 @@ def run_full_analysis(
         "avg_ticket": avg_ticket,
     }
 
-    # 1. OSM только для target
     target_osm = {"available": False, "error": "no_coords", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
     osm_target_available = False
     if coords_available:
@@ -994,25 +991,23 @@ def run_full_analysis(
         target_osm = collect_osm_context(target_lat, target_lon)
         osm_target_available = target_osm.get("available", False)
 
-    # 2. AI-оценка target
     if status_callback:
         status_callback("2/3", "Запрашиваю AI-оценку target…")
 
     ai_failed = False
     try:
-        full_ai = generate_target_profile_cached(
+        full_ai = generate_target_profile(
             api_key=api_key,
             model=model.strip(),
-            target_json=json.dumps(target_loc, ensure_ascii=False, sort_keys=True),
-            known_json=json.dumps(known_data, ensure_ascii=False, sort_keys=True),
-            osm_json=json.dumps(target_osm, ensure_ascii=False, sort_keys=True),
+            target_loc=target_loc,
+            known_data=known_data,
+            osm=target_osm,
         )
         target_profile = dict(full_ai)
     except Exception as exc:
         ai_failed = True
         target_profile = make_default_full_profile()
 
-    # location_param_score из правил
     loc_score, applied_penalties = compute_location_param_score(params)
     target_profile["location_param_score"] = loc_score
 
@@ -1022,20 +1017,17 @@ def run_full_analysis(
         "profile_confidence", "evidence_quality"
     ]}
 
-    # Если OSM доступен — заменяем OSM-факторы
     if osm_target_available:
         osm_scores = osm_to_factor_scores(target_osm)
         for k in osm_scores:
             target_profile[k] = osm_scores[k]
 
-    # 3. Scoring
     block_scores = compute_block_scores(target_profile)
     absolute_base = compute_absolute_score(block_scores)
 
     hard_barriers = calculate_hard_barriers(target_profile, target_osm, params)
     absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params, osm_target_available)
 
-    # 4. Benchmark
     benchmark_rows = [
         {
             "address": v["address"],
@@ -1136,6 +1128,9 @@ uploaded = st.file_uploader("Файл с эталонами (.xlsx)", type=["xls
 df_benchmarks = None
 if uploaded:
     try:
+        if openpyxl is None:
+            st.error("📦 Пакет `openpyxl` не установлен. Добавьте строку `openpyxl` в файл `requirements.txt` рядом с `app.py` и перезапустите приложение.")
+            st.stop()
         df_benchmarks = pd.read_excel(uploaded, sheet_name=1)
         st.session_state.df_benchmarks = df_benchmarks
         st.success(f"Загружено {len(df_benchmarks)} эталонов с Листа 2.")
@@ -1152,11 +1147,12 @@ if df_benchmarks is not None and "benchmark_profiles" not in st.session_state:
     if st.button("🤖 Сгенерировать профили эталонов", type="primary"):
         with st.spinner("AI оценивает эталоны (батч-запрос)…"):
             try:
-                df_clean = df_benchmarks.where(pd.notnull(df_benchmarks), None)
-                profiles = generate_benchmark_profiles_cached(
+                # Заменяем NaN на пустые строки для безопасности
+                df_clean = df_benchmarks.fillna("")
+                profiles = generate_benchmark_profiles(
                     api_key=st.session_state.openai_key,
                     model=DEFAULT_MODEL,
-                    df_json=df_clean.to_json(orient="split"),
+                    df=df_clean,
                 )
                 st.session_state.benchmark_profiles = profiles
                 st.success(f"Профили сгенерированы для {len(profiles)} эталонов.")
@@ -1286,7 +1282,6 @@ with col_b:
     clear_cache = st.button("♻️ Сбросить кэш", use_container_width=True)
 
 if clear_cache:
-    st.cache_data.clear()
     for k in ["last_result", "benchmark_profiles", "df_benchmarks"]:
         st.session_state.pop(k, None)
     st.rerun()
@@ -1596,6 +1591,5 @@ with st.sidebar:
 """)
     if st.button("Сбросить OpenAI ключ"):
         st.session_state.clear()
-        st.cache_data.clear()
         st.rerun()
     st.caption("Используйте одну модель и не меняйте эталоны без пересчёта.")
