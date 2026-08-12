@@ -97,6 +97,30 @@ FACTOR_SOURCE = {f[0]: f[3] for f in FACTORS}
 FACTOR_LABEL = {f[0]: f[4] for f in FACTORS}
 LOW_IS_BAD = {"competitor_density"}
 FACTOR_GLOBAL_WEIGHT = {f[0]: f[2] * BLOCK_WEIGHTS[f[1]] for f in FACTORS}
+FACTOR_DESCRIPTIONS = {
+    "location_param_score": "Базовые параметры самого помещения. 100 = идеально: 1 этаж, отдельный вход, видимость с улицы, первая линия. Ниже 50 = серьёзные проблемы с доступностью.",
+    "parking_proximity": "Насколько близко можно припарковаться к клинике. 90+ = парковка прямо у входа. Ниже 30 = искать место далеко, пациенты уходят к конкурентам.",
+    "parking_supply": "Достаточно ли парковочных мест в целом. 90+ = много мест, свободно всегда. Ниже 25 = дефицит, особенно в часы пик.",
+    "vehicle_access": "Удобство подъезда на машине. 90+ = широкая магистраль с удобным съездом. Ниже 30 = глухой переулок, пробки, сложный разворот.",
+    "public_transport": "Доступность остановок и маршрутов. 90+ = метро/трамвай + автобусы в 150 м. Ниже 20 = далеко от всего, только на машине.",
+    "population_density": "Плотность жилой застройки вокруг. 90+ = плотные многоэтажные кварталы. Ниже 30 = частный сектор, промзона, пустыри.",
+    "income_fit": "Соответствие доходов жителей среднему чеку клиники. 80+ = жители платят ваш чек без проблем. Ниже 40 = район бедный, чек завышен.",
+    "age_fit": "Возраст жителей соответствует вашей ЦА. 80+ = много семей с детьми и людей 30–60 лет. Ниже 40 = студенты или пенсионеры.",
+    "gender_fit": "Половой состав соответствует профилю клиники. 80+ = женщины (если клиника женская) или равномерно. Ниже 40 = мужской район при женской клинике.",
+    "family_profile": "Семейный состав района. 80+ = много семей с детьми (педиатрия, вакцинация). Ниже 40 = одиночки, пары без детей.",
+    "daytime_balance": "Баланс жителей и офисных работников. 80+ = жилой район, люди дома вечерами и выходными. Ниже 30 = офисный район, пустой вечером.",
+    "competitor_density": "Сколько клинок вокруг (в радиусе 2 км). ВНИМАНИЕ: 100 = очень много конкурентов (ПЛОХО). 0 = нет конкурентов (хорошо, если есть спрос).",
+    "competitor_strength": "Насколько сильны конкуренты. 100 = слабые/нет сетевых, можно выиграть. 0 = сильные федеральные сети (СМ-Клиника, Медси и т.д.).",
+    "market_gap": "Незакрытый спрос на услуги клиники. 80+ = много жителей, мало клиник, люди ездят в другой район. Ниже 30 = рынок перенасыщен.",
+    "hospital_synergy": "Близость государственных больниц и поликлиник (в радиусе 2 км). 90+ = крупная поликлиника/больница рядом. Источник пациентов из ОМС. Ниже 30 = нет гос. медицины поблизости.",
+    "medical_cluster": "Концентрация медучреждений в радиусе 2 км. 80+ = медицинский квартал (люди уже едут сюда лечиться). Ниже 30 = медицина разрознена.",
+    "visibility": "Насколько хорошо клинику видно с дороги. 90+ = витрина на главной магистрали. Ниже 30 = двор, подвал, за углом.",
+    "road_type_fit": "Тип проезжающего/проходящего трафика. 85+ = жилой район, ваши пациенты живут рядом. Ниже 30 = трасса/промзона/офисный трафик, который едет домой в другой район.",
+    "pedestrian_comfort": "Удобство для пешеходов. 80+ = широкие тротуары, освещение, озеленение. Ниже 35 = нет тротуаров, грязь, небезопасно.",
+    "noise_safety": "Шум и безопасность района. 90+ = тихий спальный район, безопасно вечером. Ниже 30 = шумная магистраль, промзона, небезопасно.",
+    "traffic_quality": "Качество трафика (не количество, а ЦА). 80+ = мимо идут/едут ваши потенциальные пациенты. Ниже 30 = трафик нецелевой (грузовики, туристы, студенты).",
+}
+
 
 # ==============================================================================
 # PYDANTIC
@@ -261,8 +285,8 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     query = f"""
     [out:json][timeout:5];
     (
-      nwr(around:800,{lat},{lon})["amenity"~"hospital|clinic|doctors"];
-      nwr(around:800,{lat},{lon})["healthcare"~"centre|clinic|doctor|laboratory|diagnostic"];
+      nwr(around:2000,{lat},{lon})["amenity"~"hospital|clinic|doctors"];
+      nwr(around:2000,{lat},{lon})["healthcare"~"centre|clinic|doctor"];
       nwr(around:1000,{lat},{lon})["amenity"="parking"];
       nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
       nwr(around:800,{lat},{lon})["public_transport"];
@@ -279,7 +303,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     counts = {
         "clinic_300m": 0, "clinic_800m": 0,
         "hospital_300m": 0, "hospital_800m": 0,
-        "diag_lab_300m": 0, "diag_lab_800m": 0,
         "school_800m": 0,
         "parking_500m": 0, "parking_1000m": 0,
         "bus_stop_300m": 0, "public_transport_800m": 0,
@@ -304,8 +327,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
             counts["clinic_800m"] += 1
         if amenity == "hospital" or healthcare == "hospital":
             counts["hospital_800m"] += 1
-        if healthcare in ("laboratory", "diagnostic"):
-            counts["diag_lab_800m"] += 1
         if amenity in ("school", "kindergarten"):
             counts["school_800m"] += 1
         if amenity == "parking":
@@ -335,7 +356,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
 
     counts["clinic_300m"] = counts["clinic_800m"]
     counts["hospital_300m"] = counts["hospital_800m"]
-    counts["diag_lab_300m"] = counts["diag_lab_800m"]
     counts["parking_500m"] = counts["parking_1000m"]
     counts["residential_buildings_500m"] = counts["residential_buildings_1000m"]
     counts["office_buildings_500m"] = counts["office_buildings_1000m"]
@@ -439,29 +459,27 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     else:
         scores["population_density"] = 20
 
-    clinic_300 = c.get("clinic_300m", 0)
-    clinic_800 = c.get("clinic_800m", 0)
-    if clinic_300 >= 3 or clinic_800 >= 8:
+    clinic_2km = c.get("clinic_800m", 0)  # теперь это 2км
+    if clinic_2km >= 10:
         scores["competitor_density"] = 95
-    elif clinic_300 >= 2 or clinic_800 >= 5:
+    elif clinic_2km >= 6:
         scores["competitor_density"] = 75
-    elif clinic_300 >= 1 or clinic_800 >= 3:
+    elif clinic_2km >= 3:
         scores["competitor_density"] = 50
-    elif clinic_800 >= 1:
+    elif clinic_2km >= 1:
         scores["competitor_density"] = 25
     else:
         scores["competitor_density"] = 5
 
-    hosp_300 = c.get("hospital_300m", 0)
-    hosp_800 = c.get("hospital_800m", 0)
-    if hosp_300 >= 1:
-        scores["hospital_synergy"] = 90
-    elif hosp_800 >= 1:
-        scores["hospital_synergy"] = 65
+    hosp_2km = c.get("hospital_800m", 0)  # теперь это 2км
+    if hosp_2km >= 3:
+        scores["hospital_synergy"] = 95
+    elif hosp_2km >= 1:
+        scores["hospital_synergy"] = 75
     else:
         scores["hospital_synergy"] = 30
 
-    med_total = c.get("clinic_800m", 0) + hosp_800
+    med_total = c.get("clinic_800m", 0) + hosp_2km  # оба теперь 2км
     if med_total >= 15:
         scores["medical_cluster"] = 95
     elif med_total >= 8:
@@ -1479,6 +1497,7 @@ similarity = 100 − distance
 
     # FACTORS DETAIL
     st.subheader("🔎 Детализация факторов")
+    st.caption("🟢 Отлично (75+) · 🟡 Нормально (50–74) · 🟠 Плохо (30–49) · 🔴 Критично (<30)")
     rows = []
     for factor in FACTOR_KEYS:
         block = FACTOR_BLOCK.get(factor, "")
@@ -1497,15 +1516,17 @@ similarity = 100 − distance
             status = "🟠"
         else:
             status = "🔴"
+        desc = FACTOR_DESCRIPTIONS.get(factor, "")
         rows.append({
             "": status,
             "Блок": block_labels.get(block, block),
             "Фактор": FACTOR_LABEL.get(factor, factor),
             "Score": round(suitability, 1),
             "Источник": src_icon,
+            "Описание": desc,
         })
     df_f = pd.DataFrame(rows)
-    st.dataframe(df_f, use_container_width=True, hide_index=True, height=560)
+    st.dataframe(df_f, use_container_width=True, hide_index=True, height=700)
 
     # STRENGTHS / RISKS
     st.subheader("💪 Сильные стороны")
@@ -1515,6 +1536,7 @@ similarity = 100 − distance
     else:
         for _, row in strong.iterrows():
             st.markdown(f"🟢 **{row['Фактор']}** — {row['Score']:.0f}/100 ({row['Источник']})")
+            st.caption(row['Описание'])
 
     st.subheader("⚠️ Ограничения")
     weak_factors = df_f[df_f["Score"] < 50].sort_values("Score").head(12)
@@ -1523,6 +1545,7 @@ similarity = 100 − distance
     else:
         for _, row in weak_factors.iterrows():
             st.markdown(f"🔴 **{row['Фактор']}** — {row['Score']:.0f}/100 ({row['Источник']})")
+            st.caption(row['Описание'])
 
     # OSM AUDIT
     st.subheader("🗺️ OSM-аудит")
