@@ -1002,7 +1002,7 @@ def run_full_analysis(
     osm_target_available = False
     if coords_available:
         if status_callback:
-            status_callback("1/3", "Собираю OSM-данные для target (таймаут 5 сек)…")
+            status_callback("1/3", "Собираю OSM-данные для target (таймаут до 25 сек)…")
         target_osm = collect_osm_context(target_lat, target_lon)
         osm_target_available = target_osm.get("available", False)
 
