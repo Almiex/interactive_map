@@ -1,4 +1,13 @@
 # -*- coding: utf-8 -*-
+# Автоустановка openpyxl для Streamlit Cloud
+import subprocess, sys
+try:
+    import openpyxl
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "--quiet"])
+    import openpyxl
+
+
 """
 GeoMarketing AI — Clinic Location Benchmark v4.0
 
