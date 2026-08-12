@@ -538,6 +538,203 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
 # ==============================================================================
 # ПАРАМЕТРЫ ЛОКАЦИИ
 # ==============================================================================
+
+# ==============================================================================
+# USER OVERRIDES (приоритет пользовательских данных над AI/OSM)
+# ==============================================================================
+def apply_user_overrides(profile: dict, known_data: dict) -> dict:
+    """
+    Если пользователь ввёл конкретные данные о районе — они имеют
+    ПРИОРИТЕТ над AI и OSM. Возвращает словарь {factor: (old_val, new_val, reason)}.
+    """
+    overrides = {}
+
+    # --- ПАРКОВКА ---
+    parking = str(known_data.get("parking", "")).lower().strip()
+    if parking == "нет":
+        old = profile.get("parking_proximity", 50)
+        profile["parking_proximity"] = 8
+        overrides["parking_proximity"] = (old, 8, "Пользователь: парковки нет")
+        old = profile.get("parking_supply", 50)
+        profile["parking_supply"] = 5
+        overrides["parking_supply"] = (old, 5, "Пользователь: парковки нет")
+    elif parking == "ограничена":
+        old = profile.get("parking_proximity", 50)
+        profile["parking_proximity"] = 35
+        overrides["parking_proximity"] = (old, 35, "Пользователь: парковка ограничена")
+        old = profile.get("parking_supply", 50)
+        profile["parking_supply"] = 25
+        overrides["parking_supply"] = (old, 25, "Пользователь: парковка ограничена")
+    elif parking == "да":
+        old = profile.get("parking_proximity", 50)
+        profile["parking_proximity"] = 85
+        overrides["parking_proximity"] = (old, 85, "Пользователь: парковка есть")
+        old = profile.get("parking_supply", 50)
+        profile["parking_supply"] = 75
+        overrides["parking_supply"] = (old, 75, "Пользователь: парковка есть")
+
+    # --- АВТОТРАФИК ---
+    traffic_car = str(known_data.get("traffic_car", "")).lower().strip()
+    if traffic_car == "экстремально_high":
+        old = profile.get("vehicle_access", 50)
+        profile["vehicle_access"] = 35
+        overrides["vehicle_access"] = (old, 35, "Пользователь: экстремально высокий автотрафик (пробки)")
+        old = profile.get("road_type_fit", 50)
+        profile["road_type_fit"] = 75
+        overrides["road_type_fit"] = (old, 75, "Пользователь: высокий автотрафик")
+    elif traffic_car == "высокий":
+        old = profile.get("vehicle_access", 50)
+        profile["vehicle_access"] = 65
+        overrides["vehicle_access"] = (old, 65, "Пользователь: высокий автотрафик")
+        old = profile.get("road_type_fit", 50)
+        profile["road_type_fit"] = 80
+        overrides["road_type_fit"] = (old, 80, "Пользователь: высокий автотрафик")
+    elif traffic_car == "средний":
+        old = profile.get("vehicle_access", 50)
+        profile["vehicle_access"] = 55
+        overrides["vehicle_access"] = (old, 55, "Пользователь: средний автотрафик")
+    elif traffic_car == "низкий":
+        old = profile.get("vehicle_access", 50)
+        profile["vehicle_access"] = 25
+        overrides["vehicle_access"] = (old, 25, "Пользователь: низкий автотрафик")
+
+    # --- ПЕШИЙ ТРАФИК ---
+    traffic_ped = str(known_data.get("traffic_ped", "")).lower().strip()
+    if traffic_ped == "высокий":
+        old = profile.get("pedestrian_comfort", 50)
+        profile["pedestrian_comfort"] = 85
+        overrides["pedestrian_comfort"] = (old, 85, "Пользователь: высокий пешеходный трафик")
+        old = profile.get("visibility", 50)
+        profile["visibility"] = 80
+        overrides["visibility"] = (old, 80, "Пользователь: высокий пешеходный трафик")
+    elif traffic_ped == "средний":
+        old = profile.get("pedestrian_comfort", 50)
+        profile["pedestrian_comfort"] = 65
+        overrides["pedestrian_comfort"] = (old, 65, "Пользователь: средний пешеходный трафик")
+    elif traffic_ped == "низкий":
+        old = profile.get("pedestrian_comfort", 50)
+        profile["pedestrian_comfort"] = 35
+        overrides["pedestrian_comfort"] = (old, 35, "Пользователь: низкий пешеходный трафик")
+        old = profile.get("visibility", 50)
+        profile["visibility"] = 45
+        overrides["visibility"] = (old, 45, "Пользователь: низкий пешеходный трафик")
+
+    # --- ПЛОТНОСТЬ НАСЕЛЕНИЯ ---
+    pop_dens = str(known_data.get("population_density", "")).lower().strip()
+    if pop_dens == "очень_high":
+        old = profile.get("population_density", 50)
+        profile["population_density"] = 95
+        overrides["population_density"] = (old, 95, "Пользователь: очень высокая плотность")
+    elif pop_dens == "высокая":
+        old = profile.get("population_density", 50)
+        profile["population_density"] = 80
+        overrides["population_density"] = (old, 80, "Пользователь: высокая плотность")
+    elif pop_dens == "средняя":
+        old = profile.get("population_density", 50)
+        profile["population_density"] = 55
+        overrides["population_density"] = (old, 55, "Пользователь: средняя плотность")
+    elif pop_dens == "ниже_medium":
+        old = profile.get("population_density", 50)
+        profile["population_density"] = 35
+        overrides["population_density"] = (old, 35, "Пользователь: ниже средней плотность")
+    elif pop_dens == "низкая":
+        old = profile.get("population_density", 50)
+        profile["population_density"] = 15
+        overrides["population_density"] = (old, 15, "Пользователь: низкая плотность")
+
+    # --- ТРАНСПОРТНАЯ ДОСТУПНОСТЬ ---
+    trans = str(known_data.get("transport_access", "")).lower().strip()
+    if trans == "отличная":
+        old = profile.get("public_transport", 50)
+        profile["public_transport"] = 95
+        overrides["public_transport"] = (old, 95, "Пользователь: отличная транспортная доступность")
+    elif trans == "очень_good":
+        old = profile.get("public_transport", 50)
+        profile["public_transport"] = 85
+        overrides["public_transport"] = (old, 85, "Пользователь: очень хорошая транспортная доступность")
+    elif trans == "хорошая":
+        old = profile.get("public_transport", 50)
+        profile["public_transport"] = 70
+        overrides["public_transport"] = (old, 70, "Пользователь: хорошая транспортная доступность")
+    elif trans == "средняя":
+        old = profile.get("public_transport", 50)
+        profile["public_transport"] = 50
+        overrides["public_transport"] = (old, 50, "Пользователь: средняя транспортная доступность")
+
+    # --- КОНКУРЕНТЫ (количество) ---
+    comp_count = known_data.get("competitors_count")
+    if comp_count is not None:
+        try:
+            comp_count = int(comp_count)
+            old = profile.get("competitor_density", 50)
+            if comp_count >= 10:
+                profile["competitor_density"] = 95
+                overrides["competitor_density"] = (old, 95, f"Пользователь: {comp_count} конкурентов")
+            elif comp_count >= 6:
+                profile["competitor_density"] = 75
+                overrides["competitor_density"] = (old, 75, f"Пользователь: {comp_count} конкурентов")
+            elif comp_count >= 3:
+                profile["competitor_density"] = 50
+                overrides["competitor_density"] = (old, 50, f"Пользователь: {comp_count} конкурентов")
+            elif comp_count >= 1:
+                profile["competitor_density"] = 25
+                overrides["competitor_density"] = (old, 25, f"Пользователь: {comp_count} конкурентов")
+            else:
+                profile["competitor_density"] = 5
+                overrides["competitor_density"] = (old, 5, "Пользователь: нет конкурентов")
+        except (ValueError, TypeError):
+            pass
+
+    # --- ТРАВМПУНКТ ---
+    trauma = str(known_data.get("has_trauma_center", "")).lower().strip()
+    if trauma == "да":
+        old = profile.get("hospital_synergy", 50)
+        profile["hospital_synergy"] = 85
+        overrides["hospital_synergy"] = (old, 85, "Пользователь: травмпункт рядом")
+    elif trauma == "нет":
+        old = profile.get("hospital_synergy", 50)
+        profile["hospital_synergy"] = 20
+        overrides["hospital_synergy"] = (old, 20, "Пользователь: травмпункта нет")
+
+    # --- ЦЕНОВОЙ СЕГМЕНТ → income_fit ---
+    price_seg = str(known_data.get("price_segment", "")).lower().strip()
+    if price_seg in ("эконом", "средний"):
+        old = profile.get("income_fit", 50)
+        profile["income_fit"] = 55
+        overrides["income_fit"] = (old, 55, f"Пользователь: ценовой сегмент {price_seg}")
+    elif price_seg in ("средний+", "бизнес"):
+        old = profile.get("income_fit", 50)
+        profile["income_fit"] = 75
+        overrides["income_fit"] = (old, 75, f"Пользователь: ценовой сегмент {price_seg}")
+    elif price_seg == "премиум":
+        old = profile.get("income_fit", 50)
+        profile["income_fit"] = 90
+        overrides["income_fit"] = (old, 90, "Пользователь: премиум сегмент")
+
+    # --- ТИП ЗАСТРОЙКИ 1км → road_type_fit, daytime_balance ---
+    btype = str(known_data.get("building_type_1km", "")).lower()
+    if "бц" in btype or "офис" in btype or "делов" in btype:
+        old = profile.get("road_type_fit", 50)
+        profile["road_type_fit"] = 40
+        overrides["road_type_fit"] = (old, 40, "Пользователь: преимущественно офисная застройка")
+        old = profile.get("daytime_balance", 50)
+        profile["daytime_balance"] = 35
+        overrides["daytime_balance"] = (old, 35, "Пользователь: офисный район (пустой вечером)")
+    elif "жил" in btype or "многоэтаж" in btype or "квартал" in btype:
+        old = profile.get("road_type_fit", 50)
+        profile["road_type_fit"] = 85
+        overrides["road_type_fit"] = (old, 85, "Пользователь: жилая застройка")
+        old = profile.get("daytime_balance", 50)
+        profile["daytime_balance"] = 80
+        overrides["daytime_balance"] = (old, 80, "Пользователь: жилой район")
+    elif "частн" in btype or "коттедж" in btype:
+        old = profile.get("population_density", 50)
+        profile["population_density"] = 30
+        overrides["population_density"] = (old, 30, "Пользователь: частный сектор")
+
+    return overrides
+
+
 def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, int, str]]]:
     base = 100.0
     applied = []
@@ -1037,6 +1234,9 @@ def run_full_analysis(
         for k in osm_scores:
             target_profile[k] = osm_scores[k]
 
+    # ПРИОРИТЕТ ПОЛЬЗОВАТЕЛЬСКИХ ДАННЫХ
+    user_overrides = apply_user_overrides(target_profile, known_data)
+
     block_scores = compute_block_scores(target_profile)
     absolute_base = compute_absolute_score(block_scores)
 
@@ -1111,6 +1311,7 @@ def run_full_analysis(
         "verdict": verdict,
         "model": model,
         "ai_failed": ai_failed,
+        "user_overrides": user_overrides,
     }
 
 
@@ -1272,10 +1473,10 @@ with st.expander("Заполнить известные данные"):
     kcol1, kcol2 = st.columns(2)
     with kcol1:
         known_data["parking"] = st.selectbox("Парковка", ["неизвестно", "да", "нет", "ограничена"], index=0)
-        known_data["traffic_car"] = st.selectbox("Автотрафик", ["неизвестно", "экстремально_высокий", "высокий", "средний", "низкий"], index=0)
+        known_data["traffic_car"] = st.selectbox("Автотрафик", ["неизвестно", "экстремально_high", "высокий", "средний", "низкий"], index=0)
         known_data["traffic_ped"] = st.selectbox("Пеший трафик", ["неизвестно", "высокий", "средний", "низкий"], index=0)
-        known_data["population_density"] = st.selectbox("Плотность населения", ["неизвестно", "очень_высокая", "высокая", "средняя", "ниже_среднего", "низкая"], index=0)
-        known_data["transport_access"] = st.selectbox("Транспортная доступность", ["неизвестно", "отличная", "очень_хорошая", "хорошая", "средняя"], index=0)
+        known_data["population_density"] = st.selectbox("Плотность населения", ["неизвестно", "очень_high", "высокая", "средняя", "ниже_medium", "низкая"], index=0)
+        known_data["transport_access"] = st.selectbox("Транспортная доступность", ["неизвестно", "отличная", "очень_good", "хорошая", "средняя"], index=0)
     with kcol2:
         known_data["competitors_count"] = st.number_input("Количество конкурентов (если известно)", min_value=0, value=0, step=1)
         known_data["competitors_list"] = st.text_input("Список конкурентов", value="")
@@ -1496,6 +1697,27 @@ distance = Σ |target_i − сравнение_i| × weight_i  /  Σ weight_i
         for b in BLOCK_WEIGHTS
     ])
     st.dataframe(block_df, use_container_width=True, hide_index=True)
+
+    # USER OVERRIDES
+    user_overrides = result.get("user_overrides", {})
+    if user_overrides:
+        st.subheader("👤 Переопределения пользователем")
+        st.caption("Вы ввели конкретные данные о районе — они имеют приоритет над AI и OSM.")
+        for factor, (old_val, new_val, reason) in user_overrides.items():
+            delta = new_val - old_val
+            if delta < -15:
+                icon = "🔴"
+                color = "error"
+            elif delta < 0:
+                icon = "🟠"
+                color = "warning"
+            elif delta > 15:
+                icon = "🟢"
+                color = "success"
+            else:
+                icon = "🟡"
+                color = "info"
+            st.markdown(f"{icon} **{FACTOR_LABEL.get(factor, factor)}**: {old_val:.0f} → **{new_val:.0f}** ({delta:+.0f}) — *{reason}*")
 
     # HARD BARRIERS
     st.subheader("🚨 Жёсткие барьеры и риски")
