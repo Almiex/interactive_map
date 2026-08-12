@@ -1061,7 +1061,7 @@ def run_full_analysis(
     if benchmark_valid:
         benchmark_component = (
             сравнение["successful_centroid_similarity"] * 0.60 +
-            clamp(50 + сравнение["разрыв_gap"] / 2) * 0.40
+            clamp(50 + сравнение["benchmark_gap"] / 2) * 0.40
         )
     else:
         benchmark_component = 50.0
@@ -1347,7 +1347,7 @@ if "last_result" in st.session_state:
         st.stop()
 
     profile = result.get("profile", {})
-    сравнение = result.get("сравнение", {})
+    сравнение = result.get("benchmark", {})
     block_scores = result.get("block_scores", {})
 
     st.divider()
@@ -1441,7 +1441,7 @@ distance = Σ |target_i − сравнение_i| × weight_i  /  Σ weight_i
         with bm3:
             st.metric("Средняя схожесть со слабыми", f"{benchmark.get('weak_centroid_similarity', 0)}%")
 
-        st.metric("Разрыв с референсами", f"{benchmark.get('разрыв_gap', 0):+.1f}",
+        st.metric("Разрыв с референсами", f"{benchmark.get('benchmark_gap', 0):+.1f}",
             help="Положительный = планируемая точка ближе к успешным референсам, чем к слабым. Отрицательный — наоборот.")
 
         # --- ВСЕ РЕФЕРЕНСЫ (ranked) ---
@@ -1549,7 +1549,7 @@ distance = Σ |target_i − сравнение_i| × weight_i  /  Σ weight_i
         st.write("Нет факторов ≥75.")
     else:
         for _, row in strong.iterrows():
-            st.markdown(f"🟢 **{row['Фактор']}** — {row['Score']:.0f}/100 ({row['Источник']})")
+            st.markdown(f"🟢 **{row['Фактор']}** — {row['Оценка']:.0f}/100 ({row['Источник']})")
             st.caption(row['Описание'])
 
     st.subheader("⚠️ Ограничения")
@@ -1558,7 +1558,7 @@ distance = Σ |target_i − сравнение_i| × weight_i  /  Σ weight_i
         st.success("Нет факторов ниже 50/100.")
     else:
         for _, row in weak_factors.iterrows():
-            st.markdown(f"🔴 **{row['Фактор']}** — {row['Score']:.0f}/100 ({row['Источник']})")
+            st.markdown(f"🔴 **{row['Фактор']}** — {row['Оценка']:.0f}/100 ({row['Источник']})")
             st.caption(row['Описание'])
 
     # OSM AUDIT
