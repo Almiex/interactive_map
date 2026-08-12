@@ -81,13 +81,11 @@ FACTORS = [
     ("daytime_balance",         "demand",          0.10, "ai",    "Баланс дневного/жилого населения"),
     ("competitor_density",      "competition",     0.40, "osm",   "Плотность конкурентов"),
     ("competitor_strength",     "competition",     0.35, "ai",    "Сила конкурентов"),
-    ("market_gap",              "competition",     0.25, "ai",    "Рыночный зазор"),
-    ("pharmacy_synergy",        "medical_eco",     0.25, "osm",   "Синергия с аптеками"),
-    ("diagnostics_synergy",     "medical_eco",     0.25, "osm",   "Синергия с диагностикой"),
-    ("hospital_synergy",        "medical_eco",     0.25, "osm",   "Синергия с больницами"),
-    ("medical_cluster",         "medical_eco",     0.25, "osm",   "Медицинский кластер"),
+    ("market_gap",              "competition",     0.25, "ai",    "Незакрытый спрос / рыночная ниша"),
+    ("hospital_synergy",        "medical_eco",     0.50, "osm",   "Близость к государственным больницам (ОМС)"),
+    ("medical_cluster",         "medical_eco",     0.50, "osm",   "Медицинский кластер"),
     ("visibility",              "visibility_env",  0.35, "osm",   "Видимость с дороги"),
-    ("road_type_fit",           "visibility_env",  0.25, "osm",   "Тип дорог (жилой/офисный)"),
+    ("road_type_fit",           "visibility_env",  0.25, "osm",   "Тип трафика (жилой vs офисный)"),
     ("pedestrian_comfort",      "visibility_env",  0.20, "osm",   "Пешеходный комфорт"),
     ("noise_safety",            "visibility_env",  0.20, "ai",    "Шум и безопасность"),
 ]
@@ -110,8 +108,6 @@ class GeoAIFullProfile(BaseModel):
     public_transport: int = Field(ge=0, le=100)
     population_density: int = Field(ge=0, le=100)
     competitor_density: int = Field(ge=0, le=100)
-    pharmacy_synergy: int = Field(ge=0, le=100)
-    diagnostics_synergy: int = Field(ge=0, le=100)
     hospital_synergy: int = Field(ge=0, le=100)
     medical_cluster: int = Field(ge=0, le=100)
     visibility: int = Field(ge=0, le=100)
@@ -165,8 +161,8 @@ def make_default_full_profile() -> dict:
     return {
         "parking_proximity": 50, "parking_supply": 50, "vehicle_access": 50,
         "public_transport": 50, "population_density": 50, "competitor_density": 50,
-        "pharmacy_synergy": 50, "diagnostics_synergy": 50, "hospital_synergy": 50,
-        "medical_cluster": 50, "visibility": 50, "road_type_fit": 50, "pedestrian_comfort": 50,
+        "hospital_synergy": 50, "medical_cluster": 50,
+        "visibility": 50, "road_type_fit": 50, "pedestrian_comfort": 50,
         "income_fit": 50, "age_fit": 50, "gender_fit": 50, "family_profile": 50,
         "daytime_balance": 50, "competitor_strength": 50, "market_gap": 50,
         "noise_safety": 50, "traffic_quality": 50, "profile_confidence": 30, "evidence_quality": 25,
@@ -244,7 +240,7 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     query = f"""
     [out:json][timeout:5];
     (
-      nwr(around:800,{lat},{lon})["amenity"~"pharmacy|hospital|clinic|doctors"];
+      nwr(around:800,{lat},{lon})["amenity"~"hospital|clinic|doctors"];
       nwr(around:800,{lat},{lon})["healthcare"~"centre|clinic|doctor|laboratory|diagnostic"];
       nwr(around:1000,{lat},{lon})["amenity"="parking"];
       nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
@@ -263,7 +259,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         return {"available": False, "error": "empty_or_timeout", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
 
     counts = {
-        "pharmacy_300m": 0, "pharmacy_800m": 0,
         "clinic_300m": 0, "clinic_800m": 0,
         "hospital_300m": 0, "hospital_800m": 0,
         "diag_lab_300m": 0, "diag_lab_800m": 0,
@@ -287,8 +282,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         land = tags.get("landuse")
         healthcare = tags.get("healthcare")
 
-        if amenity == "pharmacy":
-            counts["pharmacy_800m"] += 1
         if amenity in ("clinic", "doctors") or healthcare in ("clinic", "doctor", "centre"):
             counts["clinic_800m"] += 1
         if amenity == "hospital" or healthcare == "hospital":
@@ -322,7 +315,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         if building:
             buildings[building] = buildings.get(building, 0) + 1
 
-    counts["pharmacy_300m"] = counts["pharmacy_800m"]
     counts["clinic_300m"] = counts["clinic_800m"]
     counts["hospital_300m"] = counts["hospital_800m"]
     counts["diag_lab_300m"] = counts["diag_lab_800m"]
@@ -442,28 +434,6 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     else:
         scores["competitor_density"] = 5
 
-    ph_300 = c.get("pharmacy_300m", 0)
-    ph_800 = c.get("pharmacy_800m", 0)
-    if ph_300 >= 2:
-        scores["pharmacy_synergy"] = 95
-    elif ph_300 >= 1 or ph_800 >= 3:
-        scores["pharmacy_synergy"] = 75
-    elif ph_800 >= 1:
-        scores["pharmacy_synergy"] = 50
-    else:
-        scores["pharmacy_synergy"] = 25
-
-    diag_300 = c.get("diag_lab_300m", 0)
-    diag_800 = c.get("diag_lab_800m", 0)
-    if diag_300 >= 1:
-        scores["diagnostics_synergy"] = 90
-    elif diag_800 >= 2:
-        scores["diagnostics_synergy"] = 70
-    elif diag_800 >= 1:
-        scores["diagnostics_synergy"] = 45
-    else:
-        scores["diagnostics_synergy"] = 20
-
     hosp_300 = c.get("hospital_300m", 0)
     hosp_800 = c.get("hospital_800m", 0)
     if hosp_300 >= 1:
@@ -473,7 +443,7 @@ def osm_to_factor_scores(osm: dict) -> Dict[str, float]:
     else:
         scores["hospital_synergy"] = 30
 
-    med_total = ph_800 + c.get("clinic_800m", 0) + hosp_800 + diag_800
+    med_total = c.get("clinic_800m", 0) + hosp_800
     if med_total >= 15:
         scores["medical_cluster"] = 95
     elif med_total >= 8:
@@ -586,22 +556,20 @@ def build_ai_full_system_prompt() -> str:
 4. public_transport — общественный транспорт.
 5. population_density — плотность жилой застройки.
 6. competitor_density — плотность конкурентов (100 = много конкурентов, это ПЛОХО).
-7. pharmacy_synergy — синергия с аптеками.
-8. diagnostics_synergy — синергия с диагностикой.
-9. hospital_synergy — синергия с больницами.
-10. medical_cluster — медицинский кластер.
-11. visibility — видимость с дороги.
-12. road_type_fit — тип дорог (0 = промзона, 100 = жилой район с ЦА-трафиком).
-13. pedestrian_comfort — пешеходный комфорт.
-14. income_fit — соответствие дохода населения среднему чеку.
-15. age_fit — возрастное соответствие ЦА.
-16. gender_fit — половое соответствие ЦА.
-17. family_profile — семейный профиль района.
-18. daytime_balance — баланс дневного/жилого населения.
-19. competitor_strength — сила конкурентов (100 = слабые/отсутствуют).
-20. market_gap — рыночный зазор (100 = большой незакрытый спрос).
-21. noise_safety — шум и безопасность (100 = тихо и безопасно).
-22. traffic_quality — качество трафика для ЦА.
+7. hospital_synergy — близость к государственным больницам и поликлиникам (0 = нет гос. медучреждений, 100 = крупная больница в 300 м). Важно для перенаправления пациентов из ОМС.
+8. medical_cluster — медицинский кластер (0 = нет медучреждений, 100 = медицинский квартал).
+9. visibility — видимость с дороги (0 = двор/подвал, 100 = витрина на главной магистрали).
+10. road_type_fit — тип трафика (0 = промзона/трасса, 100 = жилой район с трафиком целевой аудитории).
+11. pedestrian_comfort — пешеходный комфорт (0 = нет тротуаров, 100 = широкие тротуары, озеленение).
+12. income_fit — соответствие дохода населения среднему чеку клиники.
+13. age_fit — возрастное соответствие целевой аудитории.
+14. gender_fit — половое соответствие ЦА.
+15. family_profile — семейный профиль района.
+16. daytime_balance — баланс дневного/жилого населения.
+17. competitor_strength — сила конкурентов (100 = слабые/отсутствуют).
+18. market_gap — незакрытый спрос / рыночная ниша (100 = большой незакрытый спрос на услуги клиники).
+19. noise_safety — шум и безопасность (100 = тихо и безопасно).
+20. traffic_quality — качество трафика для ЦА (не количество, а соответствие целевой аудитории).
 
 ПРАВИЛА:
 - Используй переданные аудиторные данные и адрес.
@@ -1470,7 +1438,7 @@ similarity = 100 − distance
         "parking_access": "Парковка и доступность",
         "demand": "Спрос и ЦА",
         "competition": "Конкуренция",
-        "medical_eco": "Медицинская экосистема",
+        "medical_eco": "Гос. медицина и кластер",
         "visibility_env": "Видимость и среда",
     }
     block_df = pd.DataFrame([
