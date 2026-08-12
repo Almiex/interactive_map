@@ -1274,8 +1274,8 @@ with st.expander("Заполнить известные данные"):
         known_data["parking"] = st.selectbox("Парковка", ["неизвестно", "да", "нет", "ограничена"], index=0)
         known_data["traffic_car"] = st.selectbox("Автотрафик", ["неизвестно", "экстремально_высокий", "высокий", "средний", "низкий"], index=0)
         known_data["traffic_ped"] = st.selectbox("Пеший трафик", ["неизвестно", "высокий", "средний", "низкий"], index=0)
-        known_data["population_density"] = st.selectbox("Плотность населения", ["неизвестно", "очень_high", "высокая", "средняя", "ниже_medium", "низкая"], index=0)
-        known_data["transport_access"] = st.selectbox("Транспортная доступность", ["неизвестно", "отличная", "очень_good", "хорошая", "средняя"], index=0)
+        known_data["population_density"] = st.selectbox("Плотность населения", ["неизвестно", "очень_высокая", "высокая", "средняя", "ниже_среднего", "низкая"], index=0)
+        known_data["transport_access"] = st.selectbox("Транспортная доступность", ["неизвестно", "отличная", "очень_хорошая", "хорошая", "средняя"], index=0)
     with kcol2:
         known_data["competitors_count"] = st.number_input("Количество конкурентов (если известно)", min_value=0, value=0, step=1)
         known_data["competitors_list"] = st.text_input("Список конкурентов", value="")
