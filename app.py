@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-GeoMarketing AI — Clinic Location Benchmark v3.6
+GeoMarketing AI — Clinic Location Benchmark v4.0
 
-Критические исправления:
-1. OSM только для target (1 запрос, таймаут 5 сек). Benchmark — статические профили.
-2. Если OSM недоступен — AI оценивает ВСЕ 21 фактор (не нейтральные 50).
-3. Hard barriers/penalties: OSM-зависимые только при реальных данных.
-4. Пустой ответ от Overpass = unavailable (не нули).
-5. UI защита от KeyError.
+Что нового:
+1. Эталоны загружаются из файла (Лист 2), а не хардкодятся.
+2. Пользователь заполняет чеклист target вручную — только известные данные.
+3. Данные ПроДокторов (рейтинги, отзывы, индексы) полностью исключены.
+4. AI оценивает эталоны батчем на основе аудиторных данных из файла.
+5. AI оценивает target с учётом ручного чеклиста + OSM (если доступен).
 """
 
 import json
@@ -26,13 +26,13 @@ from pydantic import BaseModel, Field
 # STREAMLIT CONFIG
 # ==============================================================================
 st.set_page_config(
-    page_title="Геомаркетинг клиники — Benchmark v3.6.1",
+    page_title="Геомаркетинг клиники — Benchmark v4.0",
     page_icon="📍",
     layout="wide",
 )
 
-st.title("📍 Геомаркетинговый анализ локации клиники — v3.6.1")
-st.caption("Явные параметры + детерминированный скоринг. Платные geo-API не нужны.")
+st.title("📍 Геомаркетинговый анализ локации клиники — v4.0")
+st.caption("Загрузка эталонов из файла + ручной чеклист target. Без ПроДокторов.")
 
 # ==============================================================================
 # КОНФИГУРАЦИЯ
@@ -44,7 +44,7 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 REQUEST_HEADERS = {
-    "User-Agent": "ClinicGeoAnalytics/3.6 (streamlit-cloud; business use)"
+    "User-Agent": "ClinicGeoAnalytics/4.0 (streamlit-cloud; business use)"
 }
 
 BLOCK_WEIGHTS = {
@@ -90,127 +90,10 @@ LOW_IS_BAD = {"competitor_density"}
 FACTOR_GLOBAL_WEIGHT = {f[0]: f[2] * BLOCK_WEIGHTS[f[1]] for f in FACTORS}
 
 # ==============================================================================
-# ЭТАЛОНЫ (benchmark) — предвычисленные профили. OSM не нужен.
-# ==============================================================================
-BENCHMARK_PROFILES = {
-    "benchmark_1": {  # Красноярск, ул. 9 Мая, 19а — успешный
-        "location_param_score": 100,
-        "parking_proximity": 70, "parking_supply": 65, "vehicle_access": 75,
-        "public_transport": 70, "population_density": 80,
-        "income_fit": 65, "age_fit": 70, "gender_fit": 65, "family_profile": 75,
-        "daytime_balance": 65,
-        "competitor_density": 35, "competitor_strength": 65, "market_gap": 60,
-        "pharmacy_synergy": 75, "diagnostics_synergy": 60, "hospital_synergy": 50,
-        "medical_cluster": 70,
-        "visibility": 80, "road_type_fit": 75, "pedestrian_comfort": 70,
-        "noise_safety": 65, "traffic_quality": 70,
-    },
-    "benchmark_2": {  # Красноярск, ул. Ладо Кецховели, 34 — успешный
-        "location_param_score": 100,
-        "parking_proximity": 65, "parking_supply": 60, "vehicle_access": 70,
-        "public_transport": 65, "population_density": 75,
-        "income_fit": 60, "age_fit": 65, "gender_fit": 60, "family_profile": 70,
-        "daytime_balance": 60,
-        "competitor_density": 30, "competitor_strength": 70, "market_gap": 65,
-        "pharmacy_synergy": 70, "diagnostics_synergy": 55, "hospital_synergy": 45,
-        "medical_cluster": 65,
-        "visibility": 75, "road_type_fit": 70, "pedestrian_comfort": 65,
-        "noise_safety": 60, "traffic_quality": 65,
-    },
-    "benchmark_3": {  # Екатеринбург, ул. Советская, 42 — успешный
-        "location_param_score": 100,
-        "parking_proximity": 80, "parking_supply": 75, "vehicle_access": 85,
-        "public_transport": 85, "population_density": 70,
-        "income_fit": 75, "age_fit": 70, "gender_fit": 70, "family_profile": 65,
-        "daytime_balance": 80,
-        "competitor_density": 50, "competitor_strength": 55, "market_gap": 55,
-        "pharmacy_synergy": 85, "diagnostics_synergy": 75, "hospital_synergy": 70,
-        "medical_cluster": 80,
-        "visibility": 90, "road_type_fit": 85, "pedestrian_comfort": 75,
-        "noise_safety": 55, "traffic_quality": 80,
-    },
-    "benchmark_4": {  # Казань, ул. Алексея Козина, 2 — успешный
-        "location_param_score": 100,
-        "parking_proximity": 70, "parking_supply": 65, "vehicle_access": 75,
-        "public_transport": 75, "population_density": 80,
-        "income_fit": 70, "age_fit": 75, "gender_fit": 75, "family_profile": 80,
-        "daytime_balance": 70,
-        "competitor_density": 40, "competitor_strength": 60, "market_gap": 60,
-        "pharmacy_synergy": 75, "diagnostics_synergy": 65, "hospital_synergy": 55,
-        "medical_cluster": 70,
-        "visibility": 80, "road_type_fit": 75, "pedestrian_comfort": 75,
-        "noise_safety": 70, "traffic_quality": 75,
-    },
-    "benchmark_5": {  # Новосибирск, ул. Новогодняя, 23/1 — слабый (БЦ, 2 этаж)
-        "location_param_score": 25,
-        "parking_proximity": 40, "parking_supply": 35, "vehicle_access": 50,
-        "public_transport": 45, "population_density": 40,
-        "income_fit": 55, "age_fit": 50, "gender_fit": 50, "family_profile": 40,
-        "daytime_balance": 85,
-        "competitor_density": 70, "competitor_strength": 40, "market_gap": 30,
-        "pharmacy_synergy": 40, "diagnostics_synergy": 35, "hospital_synergy": 30,
-        "medical_cluster": 35,
-        "visibility": 25, "road_type_fit": 40, "pedestrian_comfort": 35,
-        "noise_safety": 50, "traffic_quality": 40,
-    },
-    "benchmark_6": {  # Челябинск, ул. Худякова, 10 — слабый
-        "location_param_score": 75,
-        "parking_proximity": 50, "parking_supply": 45, "vehicle_access": 60,
-        "public_transport": 50, "population_density": 55,
-        "income_fit": 50, "age_fit": 50, "gender_fit": 50, "family_profile": 55,
-        "daytime_balance": 55,
-        "competitor_density": 55, "competitor_strength": 45, "market_gap": 40,
-        "pharmacy_synergy": 50, "diagnostics_synergy": 40, "hospital_synergy": 35,
-        "medical_cluster": 45,
-        "visibility": 30, "road_type_fit": 55, "pedestrian_comfort": 50,
-        "noise_safety": 55, "traffic_quality": 50,
-    },
-    "benchmark_7": {  # Самара, ул. Академика Платонова, 10 корпус 3 — слабый
-        "location_param_score": 75,
-        "parking_proximity": 45, "parking_supply": 40, "vehicle_access": 55,
-        "public_transport": 45, "population_density": 60,
-        "income_fit": 50, "age_fit": 50, "gender_fit": 50, "family_profile": 60,
-        "daytime_balance": 55,
-        "competitor_density": 50, "competitor_strength": 50, "market_gap": 45,
-        "pharmacy_synergy": 45, "diagnostics_synergy": 40, "hospital_synergy": 35,
-        "medical_cluster": 40,
-        "visibility": 30, "road_type_fit": 50, "pedestrian_comfort": 55,
-        "noise_safety": 55, "traffic_quality": 50,
-    },
-}
-
-DATA_CLINICS = [
-    {"address": "Красноярск, ул. 9 Мая, 19а",       "status": "успешный", "lat": 56.067749, "lon": 92.933822, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}, "key": "benchmark_1"},
-    {"address": "Красноярск, ул. Ладо Кецховели, 34", "status": "успешный", "lat": 56.017160, "lon": 92.813882, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}, "key": "benchmark_2"},
-    {"address": "Екатеринбург, ул. Советская, 42",   "status": "успешный", "lat": 56.855058, "lon": 60.639260, "params": {"building_type": "standalone", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}, "key": "benchmark_3"},
-    {"address": "Казань, ул. Алексея Козина, 2",     "status": "успешный", "lat": 55.814523, "lon": 49.141033, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": True, "first_line": True}, "key": "benchmark_4"},
-    {"address": "Новосибирск, ул. Новогодняя, 23/1", "status": "слабый",   "lat": 54.987320, "lon": 82.911925, "params": {"building_type": "bc", "floor": "upper", "separate_entrance": False, "street_visibility": False, "first_line": False}, "key": "benchmark_5"},
-    {"address": "Челябинск, ул. Худякова, 10",       "status": "слабый",   "lat": 55.148154, "lon": 61.365313, "params": {"building_type": "other", "floor": "ground", "separate_entrance": True, "street_visibility": False, "first_line": False}, "key": "benchmark_6"},
-    {"address": "Самара, ул. Академика Платонова, 10 корпус 3", "status": "слабый", "lat": 53.218579, "lon": 50.176465, "params": {"building_type": "residential", "floor": "ground", "separate_entrance": True, "street_visibility": False, "first_line": False}, "key": "benchmark_7"},
-]
-
-
-# ==============================================================================
 # PYDANTIC
 # ==============================================================================
-class GeoAIProfile(BaseModel):
-    """9 AI-факторов (когда OSM доступен)."""
-    income_fit: int = Field(ge=0, le=100)
-    age_fit: int = Field(ge=0, le=100)
-    gender_fit: int = Field(ge=0, le=100)
-    family_profile: int = Field(ge=0, le=100)
-    daytime_balance: int = Field(ge=0, le=100)
-    competitor_strength: int = Field(ge=0, le=100)
-    market_gap: int = Field(ge=0, le=100)
-    noise_safety: int = Field(ge=0, le=100)
-    traffic_quality: int = Field(ge=0, le=100)
-    profile_confidence: int = Field(ge=0, le=100)
-    evidence_quality: int = Field(ge=0, le=100)
-
-
 class GeoAIFullProfile(BaseModel):
-    """Все 21 фактор (когда OSM недоступен — AI оценивает всё)."""
-    # OSM-факторы
+    """Все 21 фактор (оценивает AI)."""
     parking_proximity: int = Field(ge=0, le=100)
     parking_supply: int = Field(ge=0, le=100)
     vehicle_access: int = Field(ge=0, le=100)
@@ -224,7 +107,6 @@ class GeoAIFullProfile(BaseModel):
     visibility: int = Field(ge=0, le=100)
     road_type_fit: int = Field(ge=0, le=100)
     pedestrian_comfort: int = Field(ge=0, le=100)
-    # AI-факторы
     income_fit: int = Field(ge=0, le=100)
     age_fit: int = Field(ge=0, le=100)
     gender_fit: int = Field(ge=0, le=100)
@@ -236,15 +118,6 @@ class GeoAIFullProfile(BaseModel):
     traffic_quality: int = Field(ge=0, le=100)
     profile_confidence: int = Field(ge=0, le=100)
     evidence_quality: int = Field(ge=0, le=100)
-
-
-class GeoProfileItem(BaseModel):
-    key: str
-    profile: GeoAIProfile
-
-
-class GeoProfileBatch(BaseModel):
-    profiles: List[GeoProfileItem]
 
 
 class GeoProfileItemFull(BaseModel):
@@ -259,25 +132,6 @@ class GeoProfileBatchFull(BaseModel):
 # ==============================================================================
 # OPENAI
 # ==============================================================================
-def call_batch_ai(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> Optional[GeoProfileBatch]:
-    kwargs = dict(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        response_format=GeoProfileBatch,
-        timeout=120,
-    )
-    if model.startswith("gpt-5"):
-        kwargs["reasoning_effort"] = MODEL_REASONING
-    response = client.beta.chat.completions.parse(**kwargs)
-    parsed = response.choices[0].message.parsed
-    if parsed is None:
-        raise ValueError("OpenAI не вернул структурированный ответ.")
-    return parsed
-
-
 def call_batch_ai_full(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> Optional[GeoProfileBatchFull]:
     kwargs = dict(
         model=model,
@@ -297,14 +151,6 @@ def call_batch_ai_full(client: OpenAI, model: str, system_prompt: str, user_prom
     return parsed
 
 
-def make_default_ai_profile() -> dict:
-    return {
-        "income_fit": 50, "age_fit": 50, "gender_fit": 50, "family_profile": 50,
-        "daytime_balance": 50, "competitor_strength": 50, "market_gap": 50,
-        "noise_safety": 50, "traffic_quality": 50, "profile_confidence": 30, "evidence_quality": 25,
-    }
-
-
 def make_default_full_profile() -> dict:
     return {
         "parking_proximity": 50, "parking_supply": 50, "vehicle_access": 50,
@@ -321,9 +167,6 @@ def make_default_full_profile() -> dict:
 # ГЕОКОДИРОВАНИЕ
 # ==============================================================================
 def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
-    """Геокодирование: geocode.xyz → photon.komoot.io → Nominatim. Без кэша — всегда свежий запрос."""
-
-    # Попытка 1: geocode.xyz
     try:
         response = requests.get(
             "https://geocode.xyz",
@@ -332,7 +175,6 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
         )
         if response.status_code == 200:
             data = response.json()
-            # geocode.xyz может вернуть ошибку вместо координат
             if "error" not in data and "latt" in data and "longt" in data:
                 lat = float(data["latt"])
                 lon = float(data["longt"])
@@ -341,7 +183,6 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
     except Exception:
         pass
 
-    # Попытка 2: photon.komoot.io (альтернатива Nominatim, не банит облака)
     try:
         response = requests.get(
             "https://photon.komoot.io/api/",
@@ -360,7 +201,6 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
     except Exception:
         pass
 
-    # Попытка 3: Nominatim (классика, но может банить облачные IP)
     try:
         response = requests.get(
             NOMINATIM_URL,
@@ -379,7 +219,7 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
 
 
 # ==============================================================================
-# OVERPASS / OSM  (только target, таймаут 5 сек, пустой ответ = unavailable)
+# OVERPASS / OSM
 # ==============================================================================
 def _overpass_request(query: str) -> List[dict]:
     try:
@@ -391,7 +231,6 @@ def _overpass_request(query: str) -> List[dict]:
 
 
 def collect_osm_context(lat: float, lon: float) -> dict:
-    """Один лёгкий запрос для target. Без @st.cache_data — всегда свежий."""
     query = f"""
     [out:json][timeout:5];
     (
@@ -473,7 +312,6 @@ def collect_osm_context(lat: float, lon: float) -> dict:
         if building:
             buildings[building] = buildings.get(building, 0) + 1
 
-    # Прокси для _300m/_500m из _800m/_1000m
     counts["pharmacy_300m"] = counts["pharmacy_800m"]
     counts["clinic_300m"] = counts["clinic_800m"]
     counts["hospital_300m"] = counts["hospital_800m"]
@@ -697,38 +535,42 @@ def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, i
     return clamp(base, 5.0), applied
 
 
+def parse_benchmark_params(row: pd.Series) -> dict:
+    """Интерпретирует строку эталона в params для location_param_score."""
+    bt_raw = str(row.get("building_type", "")).lower()
+    if "жилой" in bt_raw:
+        bt = "residential"
+    elif "отдельное" in bt_raw or "особняк" in bt_raw:
+        bt = "standalone"
+    elif "бизнес" in bt_raw or "бц" in bt_raw:
+        bt = "bc"
+    elif "торгов" in bt_raw or "молл" in bt_raw or "пассаж" in bt_raw:
+        bt = "mall"
+    else:
+        bt = "other"
+
+    sv_raw = str(row.get("street_visibility", "")).lower()
+    sv = any(x in sv_raw for x in ["отличн", "хорош", "первая линия"])
+
+    fl_raw = str(row.get("first_line", "")).lower()
+    first = "да" in fl_raw or "yes" in fl_raw
+
+    return {
+        "building_type": bt,
+        "floor": "ground",
+        "separate_entrance": True,
+        "street_visibility": sv,
+        "first_line": first,
+    }
+
+
 # ==============================================================================
-# AI PROMPT
+# AI PROMPTS
 # ==============================================================================
-def build_ai_system_prompt() -> str:
-    return """Ты — geo-marketing analyst для частных медицинских клиник формата «клиника у дома».
-
-Твоя задача — оценить ТОЛЬКО следующие факторы по шкале 0–100:
-1. income_fit — соответствие дохода населения среднему чеку клиники.
-2. age_fit — возрастное соответствие целевой аудитории.
-3. gender_fit — половое соответствие ЦА (если клиника женская — важно).
-4. family_profile — семейный профиль района (дети, семьи).
-5. daytime_balance — баланс дневного и жилого населения.
-6. competitor_strength — сила конкурентов (100 = слабые/отсутствуют, 0 = сильные сетевые).
-7. market_gap — рыночный зазор (100 = большой незакрытый спрос).
-8. noise_safety — шумовая обстановка и безопасность (100 = тихо и безопасно).
-9. traffic_quality — качество трафика для ЦА (не количество, а соответствие ЦА).
-
-ПРАВИЛА:
-- Используй только переданный адрес, город и OSM-контекст.
-- Не оценивай парковку, видимость, доступность — это считается отдельно.
-- Не используй статус успешный/слабый (он не передан).
-- Делай экспертные оценки. Если данных мало — снижай confidence.
-- Все оценки целые числа 0–100.
-"""
-
-
 def build_ai_full_system_prompt() -> str:
     return """Ты — geo-marketing analyst для частных медицинских клиник формата «клиника у дома».
 
-OSM-данные для этой локации недоступны. Твоя задача — оценить ВСЕ факторы самостоятельно на основе адреса, города и своих знаний о районе.
-
-Оцени по шкале 0–100:
+Оцени ВСЕ факторы по шкале 0–100:
 1. parking_proximity — близость парковки (0 = нет парковки в радиусе 1 км, 100 = много парковки прямо у входа).
 2. parking_supply — ёмкость парковки (0 = нет мест, 100 = огромная многоуровневая парковка).
 3. vehicle_access — удобство подъезда на авто (0 = глухой переулок, 100 = широкая магистраль с удобным съездом).
@@ -753,104 +595,142 @@ OSM-данные для этой локации недоступны. Твоя �
 22. traffic_quality — качество трафика для ЦА.
 
 ПРАВИЛА:
-- Используй свои знания о городе и районе по адресу.
-- Если района не знаешь — делай разумные предположения по типу улицы и города.
+- Используй переданные аудиторные данные и адрес.
+- Если данных мало — делай разумные предположения по типу улицы и города.
 - Все оценки целые числа 0–100.
-- Снижай confidence и evidence_quality если мало данных.
+- Снижай profile_confidence и evidence_quality если мало данных.
 """
 
 
-def build_batch_user_prompt(locations: List[dict], osm_by_key: Dict[str, dict], target_key: str) -> str:
+def build_benchmark_batch_prompt(df: pd.DataFrame) -> str:
     chunks = []
-    for loc in locations:
-        key = loc["key"]
-        osm = osm_by_key.get(key, {})
-        p = loc.get("params", {})
-        param_desc = []
-        if p.get("building_type") == "bc": param_desc.append("Бизнес-центр")
-        elif p.get("building_type") == "mall": param_desc.append("Торговый центр")
-        elif p.get("building_type") == "residential": param_desc.append("Жилой дом")
-        elif p.get("building_type") == "standalone": param_desc.append("Отдельное здание")
-        else: param_desc.append("Другое")
-        param_desc.append("2+ этаж" if p.get("floor") == "upper" else "1 этаж")
-        param_desc.append("Отдельный вход" if p.get("separate_entrance") else "Нет отдельного входа")
-        param_desc.append("Видимость с улицы" if p.get("street_visibility") else "Нет видимости")
-        param_desc.append("Первая линия" if p.get("first_line") else "Не первая линия")
-        osm_status = "✅ Доступен" if osm.get("available") else "❌ Недоступен"
-        chunks.append(f"""
---- ЛОКАЦИЯ {key} ---
-Адрес: {loc["address"]}
-Параметры: {', '.join(param_desc)}
-Координаты: {loc["lat"]:.6f}, {loc["lon"]:.6f}
-ЦА: возраст {loc["target_age"]:.0f}; женщины {loc["share_female"]*100:.0f}%; чек {loc["avg_ticket"]:,} руб.
-OSM статус: {osm_status}
-OSM counts: {json.dumps(osm.get("counts", {}), ensure_ascii=False)}
-""")
-    return f"""Построй профиль для КАЖДОЙ локации из списка ниже.
-Target-локация: {target_key}
+    for idx, row in df.iterrows():
+        chunk = f"""
+--- ЭТАЛОН {idx} ---
+name: {row.get('name', '')}
+address: {row.get('address', '')}
+building_type: {row.get('building_type', '')}, storeys: {row.get('number_of_storeys', '')}
+street_visibility: {row.get('street_visibility', '')}
+first_line: {row.get('first_line', '')}
+parking: {row.get('parking', '')}
+traffic_car: {row.get('traffic_car', '')}
+traffic_ped: {row.get('traffic_ped', '')}
+population_density: {row.get('population_density', '')}
+building_type_1km: {row.get('building_type_1km', '')}
+avg_housing_price: {row.get('avg_housing_price', '')}
+transport_stop_distance: {row.get('transport_stop_distance', '')}
+transport_access: {row.get('transport_access', '')}
+format: {row.get('format', '')}
+result: {row.get('result', '')}
+competitors_count: {row.get('competitors_count', '')}
+competitors_list: {row.get('competitors_list', '')}
+has_trauma_center: {row.get('has_trauma_center', '')}
+price_segment: {row.get('price_segment', '')}
+avg_ticket: {row.get('avg_ticket', '')}
+year_opened: {row.get('year_opened', '')}
+type: {row.get('type', '')}
+"""
+        chunks.append(chunk)
 
-КРИТИЧНО:
-- Верни РОВНО по одному профилю на каждый key.
-- Оценивай независимо, НЕ сравнивай локации между собой.
-- Не используй статус successful/weak (не передан).
+    return f"""Ты — geo-marketing analyst. Оцени гео-маркетинговый профиль для КАЖДОГО эталона из списка ниже.
+Для каждого эталона оцени ВСЕ 21 фактор по шкале 0–100 на основе переданных аудиторных данных.
+Используй свои знания о городе и районе по адресу.
 
 {''.join(chunks)}
+
+Верни РОВНО по одному профилю на каждый эталон (key = индекс строки: 0,1,2...).
 """
 
 
+def build_target_prompt(target_loc: dict, known_data: dict, osm: dict) -> str:
+    p = target_loc.get("params", {})
+    param_lines = []
+    if p.get("building_type") == "bc": param_lines.append("Бизнес-центр")
+    elif p.get("building_type") == "mall": param_lines.append("Торговый центр")
+    elif p.get("building_type") == "residential": param_lines.append("Жилой дом")
+    elif p.get("building_type") == "standalone": param_lines.append("Отдельное здание")
+    else: param_lines.append("Другое")
+    param_lines.append("2+ этаж" if p.get("floor") == "upper" else "1 этаж")
+    param_lines.append("Отдельный вход" if p.get("separate_entrance") else "Нет отдельного входа")
+    param_lines.append("Видимость с улицы" if p.get("street_visibility") else "Нет видимости")
+    param_lines.append("Первая линия" if p.get("first_line") else "Не первая линия")
+
+    known_lines = []
+    for k, v in known_data.items():
+        if v and str(v).lower() not in ("неизвестно", "", "nan", "none"):
+            known_lines.append(f"{k}: {v}")
+
+    osm_status = "✅ Доступен" if osm.get("available") else "❌ Недоступен"
+
+    return f"""Оцени ВСЕ факторы для планируемой клиники:
+
+Адрес: {target_loc["address"]}
+Параметры объекта: {', '.join(param_lines)}
+ЦА: возраст {target_loc['target_age']:.0f}; женщины {target_loc['share_female']*100:.0f}%; чек {target_loc['avg_ticket']:,} руб.
+
+ИЗВЕСТНЫЕ ДАННЫЕ О РАЙОНЕ (подтверждены пользователем):
+{'\n'.join(known_lines) if known_lines else 'Нет дополнительных данных.'}
+
+OSM статус: {osm_status}
+OSM counts: {json.dumps(osm.get('counts', {}), ensure_ascii=False)}
+
+{'OSM НЕДОСТУПЕН. Оцени все факторы самостоятельно на основе адреса, параметров объекта и известных данных.' if not osm.get('available') else 'OSM доступен. Используй его данные для OSM-факторов, а остальные оцени самостоятельно.'}
+"""
+
+
+# ==============================================================================
+# AI GENERATION (cached)
+# ==============================================================================
 @st.cache_data(show_spinner=False, ttl=300)
-def generate_profiles_batch_cached(api_key: str, model: str, locations_json: str, osm_json: str) -> dict:
+def generate_benchmark_profiles_cached(api_key: str, model: str, df_json: str) -> dict:
+    """Генерирует профили для всех эталонов батчем."""
     client = OpenAI(api_key=api_key)
-    locations = json.loads(locations_json)
-    osm_by_key = json.loads(osm_json)
-    batch = call_batch_ai(
+    df = pd.read_json(df_json, orient="split")
+    batch = call_batch_ai_full(
         client=client,
-        model=model,
-        system_prompt=build_ai_system_prompt(),
-        user_prompt=build_batch_user_prompt(locations, osm_by_key, locations[0]["key"]),
+        model=model.strip(),
+        system_prompt=build_ai_full_system_prompt(),
+        user_prompt=build_benchmark_batch_prompt(df),
     )
     if batch is None:
         raise ValueError("OpenAI вернул None.")
-    result = {item.key: item.profile.model_dump() for item in batch.profiles}
-    expected = {loc["key"] for loc in locations}
-    missing = expected - set(result)
-    if missing:
-        raise ValueError(f"OpenAI не вернул профили для: {', '.join(sorted(missing))}")
+    result = {}
+    for item in batch.profiles:
+        try:
+            idx = int(item.key)
+        except ValueError:
+            continue
+        if idx < 0 or idx >= len(df):
+            continue
+        row = df.iloc[idx]
+        profile = item.profile.model_dump()
+        # Добавляем location_param_score на основе эвристики из файла
+        bench_params = parse_benchmark_params(row)
+        loc_score, _ = compute_location_param_score(bench_params)
+        profile["location_param_score"] = loc_score
+        result[idx] = {
+            "name": row.get("name", f"Эталон {idx}"),
+            "address": row.get("address", ""),
+            "status": str(row.get("result", "")).lower().strip(),
+            "profile": profile,
+            "params": bench_params,
+        }
     return result
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def generate_full_profile_cached(api_key: str, model: str, location_json: str) -> dict:
-    """AI оценивает ВСЕ 21 фактор для одной локации (когда OSM недоступен)."""
+def generate_target_profile_cached(api_key: str, model: str, target_json: str, known_json: str, osm_json: str) -> dict:
+    """AI оценивает target (все 21 фактор)."""
     client = OpenAI(api_key=api_key)
-    loc = json.loads(location_json)
-    p = loc.get("params", {})
-    param_desc = []
-    if p.get("building_type") == "bc": param_desc.append("Бизнес-центр")
-    elif p.get("building_type") == "mall": param_desc.append("Торговый центр")
-    elif p.get("building_type") == "residential": param_desc.append("Жилой дом")
-    elif p.get("building_type") == "standalone": param_desc.append("Отдельное здание")
-    else: param_desc.append("Другое")
-    param_desc.append("2+ этаж" if p.get("floor") == "upper" else "1 этаж")
-    param_desc.append("Отдельный вход" if p.get("separate_entrance") else "Нет отдельного входа")
-    param_desc.append("Видимость с улицы" if p.get("street_visibility") else "Нет видимости")
-    param_desc.append("Первая линия" if p.get("first_line") else "Не первая линия")
-
-    user_prompt = f"""Оцени ВСЕ факторы для локации:
-
-Адрес: {loc["address"]}
-Параметры: {', '.join(param_desc)}
-Координаты: {loc["lat"]:.6f}, {loc["lon"]:.6f}
-ЦА: возраст {loc["target_age"]:.0f}; женщины {loc["share_female"]*100:.0f}%; чек {loc["avg_ticket"]:,} руб.
-
-OSM НЕДОСТУПЕН. Оцени все факторы самостоятельно на основе адреса и своих знаний о городе.
-"""
+    target_loc = json.loads(target_json)
+    known_data = json.loads(known_json)
+    osm = json.loads(osm_json)
 
     batch = call_batch_ai_full(
         client=client,
-        model=model,
+        model=model.strip(),
         system_prompt=build_ai_full_system_prompt(),
-        user_prompt=user_prompt,
+        user_prompt=build_target_prompt(target_loc, known_data, osm),
     )
     if batch is None or not batch.profiles:
         raise ValueError("OpenAI не вернул профиль.")
@@ -932,19 +812,21 @@ def group_centroid(profiles: List[dict]) -> dict:
 
 
 def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict:
-    successful = [r for r in benchmark_rows if r.get("status") == "успешный"]
-    weak = [r for r in benchmark_rows if r.get("status") == "слабый"]
+    successful = [r for r in benchmark_rows if r.get("status") in ("успешная", "успешный", "successful")]
+    weak = [r for r in benchmark_rows if r.get("status") in ("слабая", "слабый", "weak", "неуспешная", "неуспешный")]
 
     success_similarity = []
     for r in successful:
         sim, debug = similarity_debug(target_profile, r.get("profile", {}), r.get("address", ""))
-        success_similarity.append((r.get("address", ""), sim, debug))
+        success_similarity.append((r.get("address", ""), sim, debug, "успешная"))
 
     weak_similarity = []
     for r in weak:
         sim, debug = similarity_debug(target_profile, r.get("profile", {}), r.get("address", ""))
-        weak_similarity.append((r.get("address", ""), sim, debug))
+        weak_similarity.append((r.get("address", ""), sim, debug, "слабая"))
 
+    all_similarity = success_similarity + weak_similarity
+    all_similarity.sort(key=lambda x: x[1], reverse=True)
     success_similarity.sort(key=lambda x: x[1], reverse=True)
     weak_similarity.sort(key=lambda x: x[1], reverse=True)
 
@@ -955,8 +837,10 @@ def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict
     to_weak = similarity_to_reference(target_profile, weak_centroid) if weak_centroid else 0.0
 
     return {
-        "success_similarity": [(a, b) for a, b, _ in success_similarity],
-        "weak_similarity": [(a, b) for a, b, _ in weak_similarity],
+        "all_similarity": [(a, b, c) for a, b, _, c in all_similarity],
+        "all_debug": all_similarity,
+        "success_similarity": [(a, b) for a, b, _, _ in success_similarity],
+        "weak_similarity": [(a, b) for a, b, _, _ in weak_similarity],
         "success_debug": success_similarity,
         "weak_debug": weak_similarity,
         "successful_centroid_similarity": to_success,
@@ -966,14 +850,13 @@ def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict
 
 
 # ==============================================================================
-# HARD RULES  (OSM-зависимые только при доступном OSM)
+# HARD RULES
 # ==============================================================================
 def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List[str]:
     barriers = []
     c = osm.get("counts", {})
     osm_available = osm.get("available", False)
 
-    # Параметры локации — всегда
     if params.get("floor") == "upper":
         if params.get("building_type") in ("bc", "mall"):
             barriers.append("🚨 КРИТИЧНО: Объект на 2+ этаже в БЦ/ТЦ — нет видимости, сложная навигация, офисный трафик.")
@@ -990,7 +873,6 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
     if not params.get("first_line", True):
         barriers.append("⚠️ Не первая линия — меньше проходного трафика, ниже узнаваемость.")
 
-    # OSM-зависимые — только если OSM реально доступен (и не пустой)
     if osm_available:
         if c.get("parking_500m", 0) == 0 and c.get("parking_1000m", 0) == 0:
             barriers.append("🚨 КРИТИЧНО: Нет парковки в радиусе 1 км по OSM.")
@@ -1012,7 +894,6 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
 
 def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: List[str], params: dict, osm_available: bool) -> Tuple[float, float]:
     penalty = 0.0
-    # Параметры локации — всегда
     if params.get("floor") == "upper":
         penalty += 20
     if not params.get("separate_entrance", True):
@@ -1026,7 +907,6 @@ def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: Li
     if not params.get("first_line", True):
         penalty += 5
 
-    # OSM-зависимые — только при доступном OSM
     if osm_available:
         if full_profile.get("parking_supply", 0) <= 10:
             penalty += 15
@@ -1068,29 +948,25 @@ def calculate_confidence(ai_profile: dict, osm: dict) -> int:
 # ==============================================================================
 # FULL ANALYSIS
 # ==============================================================================
-def resolve_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
-    """Геокодирование без хардкода. Nominatim → geocode.xyz fallback."""
-    return get_exact_coordinates(address)
-
-
 def run_full_analysis(
     api_key: str,
     model: str,
     address: str,
     params: dict,
+    known_data: dict,
     target_age: float,
     share_female: float,
     avg_ticket: int,
-    clinic_hours: str,
+    benchmark_profiles: dict,
     status_callback=None,
 ) -> dict:
-    target_lat, target_lon = resolve_coordinates(address)
+    target_lat, target_lon = get_exact_coordinates(address)
     coords_available = target_lat is not None and target_lon is not None
     if not coords_available:
-        st.warning("⚠️ Не удалось определить координаты. Анализ продолжится без OSM (только AI-оценка).")
+        if status_callback:
+            status_callback("1/3", "Координаты не определены — пропускаю OSM…")
 
     target_loc = {
-        "key": "target",
         "address": address,
         "lat": target_lat if coords_available else 0.0,
         "lon": target_lon if coords_available else 0.0,
@@ -1098,10 +974,9 @@ def run_full_analysis(
         "target_age": target_age,
         "share_female": share_female,
         "avg_ticket": avg_ticket,
-        "clinic_hours": clinic_hours,
     }
 
-    # 1. OSM только для target (1 запрос, 5 сек) — только если есть координаты
+    # 1. OSM только для target
     target_osm = {"available": False, "error": "no_coords", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
     osm_target_available = False
     if coords_available:
@@ -1109,52 +984,27 @@ def run_full_analysis(
             status_callback("1/3", "Собираю OSM-данные для target (таймаут 5 сек)…")
         target_osm = collect_osm_context(target_lat, target_lon)
         osm_target_available = target_osm.get("available", False)
-    else:
-        if status_callback:
-            status_callback("1/3", "Координаты не определены — пропускаю OSM…")
 
-    # 2. AI
+    # 2. AI-оценка target
     if status_callback:
-        status_callback("2/3", "Запрашиваю AI-оценку…")
+        status_callback("2/3", "Запрашиваю AI-оценку target…")
 
     ai_failed = False
-    target_profile = {}
+    try:
+        full_ai = generate_target_profile_cached(
+            api_key=api_key,
+            model=model.strip(),
+            target_json=json.dumps(target_loc, ensure_ascii=False, sort_keys=True),
+            known_json=json.dumps(known_data, ensure_ascii=False, sort_keys=True),
+            osm_json=json.dumps(target_osm, ensure_ascii=False, sort_keys=True),
+        )
+        target_profile = dict(full_ai)
+    except Exception as exc:
+        ai_failed = True
+        target_profile = make_default_full_profile()
 
-    if osm_target_available:
-        # Режим 1: OSM доступен — AI оценивает 9 факторов
-        osm_scores = osm_to_factor_scores(target_osm)
-        try:
-            ai_profiles = generate_profiles_batch_cached(
-                api_key=api_key,
-                model=model.strip(),
-                locations_json=json.dumps([target_loc], ensure_ascii=False, sort_keys=True),
-                osm_json=json.dumps({"target": target_osm}, ensure_ascii=False, sort_keys=True),
-            )
-            ai = ai_profiles.get("target", make_default_ai_profile())
-        except Exception as exc:
-            ai_failed = True
-            ai = make_default_ai_profile()
-
-        target_profile = dict(osm_scores)
-        for ai_key in ["income_fit", "age_fit", "gender_fit", "family_profile", "daytime_balance",
-                       "competitor_strength", "market_gap", "noise_safety", "traffic_quality",
-                       "profile_confidence", "evidence_quality"]:
-            target_profile[ai_key] = ai.get(ai_key, 50)
-    else:
-        # Режим 2: OSM недоступен — AI оценивает ВСЕ 21 фактор
-        try:
-            full_ai = generate_full_profile_cached(
-                api_key=api_key,
-                model=model.strip(),
-                location_json=json.dumps(target_loc, ensure_ascii=False, sort_keys=True),
-            )
-            target_profile = dict(full_ai)
-        except Exception as exc:
-            ai_failed = True
-            target_profile = make_default_full_profile()
-
-    # location_param_score — всегда из правил
-    loc_score, _ = compute_location_param_score(params)
+    # location_param_score из правил
+    loc_score, applied_penalties = compute_location_param_score(params)
     target_profile["location_param_score"] = loc_score
 
     target_ai = {k: target_profile.get(k, 50) for k in [
@@ -1163,6 +1013,12 @@ def run_full_analysis(
         "profile_confidence", "evidence_quality"
     ]}
 
+    # Если OSM доступен — заменяем OSM-факторы
+    if osm_target_available:
+        osm_scores = osm_to_factor_scores(target_osm)
+        for k in osm_scores:
+            target_profile[k] = osm_scores[k]
+
     # 3. Scoring
     block_scores = compute_block_scores(target_profile)
     absolute_base = compute_absolute_score(block_scores)
@@ -1170,26 +1026,30 @@ def run_full_analysis(
     hard_barriers = calculate_hard_barriers(target_profile, target_osm, params)
     absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params, osm_target_available)
 
-    # 4. Benchmark (статические профили)
-    benchmark_rows = []
-    for row in DATA_CLINICS:
-        benchmark_rows.append({
-            "address": row["address"],
-            "status": row["status"],
-            "profile": BENCHMARK_PROFILES[row["key"]],
-        })
+    # 4. Benchmark
+    benchmark_rows = [
+        {
+            "address": v["address"],
+            "status": v["status"],
+            "profile": v["profile"],
+        }
+        for v in benchmark_profiles.values()
+    ]
 
     benchmark = benchmark_analysis(target_profile, benchmark_rows)
-    # Benchmark валиден всегда, т.к. эталоны статические и target оценён (OSM или AI)
-    benchmark_valid = True
+    benchmark_valid = len(benchmark_rows) > 0
 
     if status_callback:
         status_callback("3/3", "Расчёт benchmark…")
 
-    benchmark_component = (
-        benchmark["successful_centroid_similarity"] * 0.60 +
-        clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
-    )
+    if benchmark_valid:
+        benchmark_component = (
+            benchmark["successful_centroid_similarity"] * 0.60 +
+            clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
+        )
+    else:
+        benchmark_component = 50.0
+
     final_score = round(absolute_final * 0.60 + benchmark_component * 0.40, 1)
 
     if final_score >= 75:
@@ -1210,8 +1070,8 @@ def run_full_analysis(
         verdict += " — ⚠️ OSM НЕДОСТУПЕН, ФАКТОРЫ ОЦЕНЕНЫ AI"
     if ai_failed:
         verdict += " — ⚠️ AI НЕДОСТУПЕН, НЕЙТРАЛЬНЫЕ ОЦЕНКИ"
-
-    _, applied_penalties = compute_location_param_score(params)
+    if not benchmark_valid:
+        verdict += " — ⚠️ НЕТ ЭТАЛОНОВ, BENCHMARK НЕВОЗМОЖЕН"
 
     return {
         "address": address,
@@ -1239,16 +1099,77 @@ def run_full_analysis(
 
 
 # ==============================================================================
-# UI — ВВОД
+# UI — API KEY
+# ==============================================================================
+if "openai_key" not in st.session_state:
+    st.session_state.openai_key = None
+
+if not st.session_state.openai_key:
+    st.info("Введите OpenAI API-ключ. Хранится только в сессии.")
+    key = st.text_input("OpenAI API Key", type="password", placeholder="sk-...")
+    if st.button("Продолжить", type="primary"):
+        if not key.strip():
+            st.error("Введите ключ.")
+        else:
+            st.session_state.openai_key = key.strip()
+            st.rerun()
+    st.stop()
+
+
+# ==============================================================================
+# UI — ШАГ 1: ЗАГРУЗКА ЭТАЛОНОВ
+# ==============================================================================
+st.header("Шаг 1: Загрузите эталоны")
+st.caption("Загрузите Excel-файл. Ожидается Лист 2 со структурой как на скриншоте.")
+
+uploaded = st.file_uploader("Файл с эталонами (.xlsx)", type=["xlsx"])
+
+df_benchmarks = None
+if uploaded:
+    try:
+        df_benchmarks = pd.read_excel(uploaded, sheet_name=1)
+        st.session_state.df_benchmarks = df_benchmarks
+        st.success(f"Загружено {len(df_benchmarks)} эталонов с Листа 2.")
+        with st.expander("Предпросмотр загруженных данных"):
+            st.dataframe(df_benchmarks, use_container_width=True)
+    except Exception as exc:
+        st.error(f"Ошибка чтения файла: {exc}")
+        st.stop()
+else:
+    if "df_benchmarks" in st.session_state:
+        df_benchmarks = st.session_state.df_benchmarks
+
+if df_benchmarks is not None and "benchmark_profiles" not in st.session_state:
+    if st.button("🤖 Сгенерировать профили эталонов", type="primary"):
+        with st.spinner("AI оценивает эталоны (батч-запрос)…"):
+            try:
+                df_clean = df_benchmarks.where(pd.notnull(df_benchmarks), None)
+                profiles = generate_benchmark_profiles_cached(
+                    api_key=st.session_state.openai_key,
+                    model=DEFAULT_MODEL,
+                    df_json=df_clean.to_json(orient="split"),
+                )
+                st.session_state.benchmark_profiles = profiles
+                st.success(f"Профили сгенерированы для {len(profiles)} эталонов.")
+            except Exception as exc:
+                st.error(f"Ошибка генерации профилей: {exc}")
+                st.exception(exc)
+
+if "benchmark_profiles" in st.session_state:
+    st.info(f"✅ Эталоны готовы: {len(st.session_state.benchmark_profiles)} шт.")
+
+
+# ==============================================================================
+# UI — ШАГ 2: ПАРАМЕТРЫ TARGET
 # ==============================================================================
 st.divider()
+st.header("Шаг 2: Заполните известные данные о планируемом месте")
 
-st.subheader("🤖 Настройки AI")
 model = st.text_input("Модель OpenAI", value=DEFAULT_MODEL,
-    help="Фиксированная модель для стабильности. Если нет GPT-5.1 — укажите gpt-4o.")
+    help="Фиксированная модель. Если нет GPT-5.1 — укажите gpt-4o.")
 
-st.subheader("🏢 Параметры объекта (критично для оценки)")
-st.caption("Отметьте все, что соответствует вашему объекту. Каждый параметр влияет на итоговый score.")
+st.subheader("🏢 Параметры объекта (критично)")
+st.caption("Отметьте все, что соответствует вашему объекту.")
 
 building_type = st.radio(
     "Тип здания",
@@ -1273,7 +1194,7 @@ with col_f1:
     )
 with col_f2:
     first_line = st.toggle(
-        "✅ Первая линия (главная улица, видно с дороги)",
+        "✅ Первая линия (главная улица)",
         value=True,
         help="Если объект во дворе или на второстепенной улице — отключите. Штраф −10.",
     )
@@ -1319,12 +1240,35 @@ with col2:
 with col3:
     avg_ticket = st.number_input("Средний чек, руб.", min_value=0, max_value=1_000_000, value=3500, step=100)
 
-clinic_hours = st.text_input("Часы работы", value="08:00–20:00 будни, 09:00–18:00 выходные")
-
 st.subheader("📍 Адрес")
 address = st.text_input("Адрес объекта", value="Екатеринбург, Энгельса, 36",
     placeholder="Например: Екатеринбург, Энгельса, 36")
 
+st.subheader("📝 Известные данные о районе (опционально)")
+st.caption("Если вы уже изучили локацию — заполните. Это повысит точность AI-оценки.")
+known_data = {}
+
+with st.expander("Заполнить известные данные"):
+    kcol1, kcol2 = st.columns(2)
+    with kcol1:
+        known_data["parking"] = st.selectbox("Парковка", ["неизвестно", "да", "нет", "ограничена"], index=0)
+        known_data["traffic_car"] = st.selectbox("Автотрафик", ["неизвестно", "экстремально_высокий", "высокий", "средний", "низкий"], index=0)
+        known_data["traffic_ped"] = st.selectbox("Пеший трафик", ["неизвестно", "высокий", "средний", "низкий"], index=0)
+        known_data["population_density"] = st.selectbox("Плотность населения", ["неизвестно", "очень_высокая", "высокая", "средняя", "ниже_среднего", "низкая"], index=0)
+        known_data["transport_access"] = st.selectbox("Транспортная доступность", ["неизвестно", "отличная", "очень_хорошая", "хорошая", "средняя"], index=0)
+    with kcol2:
+        known_data["competitors_count"] = st.number_input("Количество конкурентов (если известно)", min_value=0, value=0, step=1)
+        known_data["competitors_list"] = st.text_input("Список конкурентов", value="")
+        known_data["price_segment"] = st.selectbox("Ценовой сегмент", ["неизвестно", "эконом", "средний", "средний+", "бизнес", "премиум"], index=0)
+        known_data["has_trauma_center"] = st.selectbox("Травмпункт", ["неизвестно", "да", "нет"], index=0)
+        known_data["building_type_1km"] = st.text_input("Тип застройки (1км)", value="")
+
+known_data_clean = {k: v for k, v in known_data.items() if str(v).lower() not in ("неизвестно", "", "0", "nan")}
+
+
+# ==============================================================================
+# UI — ШАГ 3: АНАЛИЗ
+# ==============================================================================
 st.divider()
 col_a, col_b = st.columns([2, 1])
 with col_a:
@@ -1334,32 +1278,16 @@ with col_b:
 
 if clear_cache:
     st.cache_data.clear()
-    st.session_state.pop("last_result", None)
+    for k in ["last_result", "benchmark_profiles", "df_benchmarks"]:
+        st.session_state.pop(k, None)
     st.rerun()
 
-# ==============================================================================
-# API KEY
-# ==============================================================================
-if "openai_key" not in st.session_state:
-    st.session_state.openai_key = None
-
-if not st.session_state.openai_key:
-    st.info("Введите OpenAI API-ключ. Хранится только в сессии.")
-    key = st.text_input("OpenAI API Key", type="password", placeholder="sk-...")
-    if st.button("Продолжить", type="primary"):
-        if not key.strip():
-            st.error("Введите ключ.")
-        else:
-            st.session_state.openai_key = key.strip()
-            st.rerun()
-    st.stop()
-
-# ==============================================================================
-# RUN
-# ==============================================================================
 if run_analysis:
     if not address.strip():
         st.error("Адрес не должен быть пустым.")
+        st.stop()
+    if "benchmark_profiles" not in st.session_state:
+        st.error("Сначала загрузите файл эталонов и сгенерируйте профили (Шаг 1).")
         st.stop()
 
     share_female = share_female_percent / 100.0
@@ -1375,10 +1303,11 @@ if run_analysis:
             model=model.strip(),
             address=address.strip(),
             params=params,
+            known_data=known_data_clean,
             target_age=float(target_age),
             share_female=float(share_female),
             avg_ticket=int(avg_ticket),
-            clinic_hours=clinic_hours.strip(),
+            benchmark_profiles=st.session_state.benchmark_profiles,
             status_callback=update_status,
         )
         st.session_state.last_result = result
@@ -1424,11 +1353,14 @@ if "last_result" in st.session_state:
 
     osm_target_available = result.get("osm_target_available", False)
     ai_failed = result.get("ai_failed", False)
+    benchmark_valid = result.get("benchmark_valid", False)
 
     if not osm_target_available:
         st.warning("🤖 OSM недоступен — все факторы оценены AI на основе адреса и общих знаний.")
     if ai_failed:
         st.error("🚨 OpenAI недоступен. Использованы нейтральные оценки 50. Результат может быть неточным.")
+    if not benchmark_valid:
+        st.error("🚨 Нет эталонов — benchmark невозможен.")
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
@@ -1436,7 +1368,7 @@ if "last_result" in st.session_state:
     with m2:
         st.metric("Абсолютное качество", f"{result.get('absolute_score', 0)} / 100")
     with m3:
-        if result.get("benchmark_valid"):
+        if benchmark_valid:
             st.metric("Похожесть на успешные", f"{benchmark.get('successful_centroid_similarity', 0)} / 100")
         else:
             st.metric("Похожесть на успешные", "N/A")
@@ -1464,9 +1396,10 @@ if "last_result" in st.session_state:
             st.markdown(f"**Итог: {profile.get('location_param_score', 0):.0f}/100**")
 
     # BENCHMARK
-    st.subheader("🎯 Benchmark")
-    with st.expander("Как считается similarity?"):
-        st.markdown("""
+    if benchmark_valid:
+        st.subheader("🎯 Benchmark")
+        with st.expander("Как считается similarity?"):
+            st.markdown("""
 **Формула:** взвешенная Manhattan distance по 21 фактору.
 
 ```
@@ -1479,40 +1412,52 @@ similarity = 100 − distance
 - Вес каждого фактора = вес_в_блоке × вес_блока
 """)
 
-    bm1, bm2, bm3 = st.columns(3)
-    success_sim = benchmark.get("success_similarity", [])
-    weak_sim = benchmark.get("weak_similarity", [])
-    with bm1:
-        st.metric("Ближайший успешный", f"{success_sim[0][1]}%" if success_sim else "—")
-    with bm2:
-        st.metric("Средний успешных", f"{benchmark.get('successful_centroid_similarity', 0)}%")
-    with bm3:
-        st.metric("Средний слабых", f"{benchmark.get('weak_centroid_similarity', 0)}%")
+        bm1, bm2, bm3 = st.columns(3)
+        success_sim = benchmark.get("success_similarity", [])
+        weak_sim = benchmark.get("weak_similarity", [])
+        with bm1:
+            st.metric("Ближайший успешный", f"{success_sim[0][1]}%" if success_sim else "—")
+        with bm2:
+            st.metric("Средний успешных", f"{benchmark.get('successful_centroid_similarity', 0)}%")
+        with bm3:
+            st.metric("Средний слабых", f"{benchmark.get('weak_centroid_similarity', 0)}%")
 
-    st.metric("Benchmark Gap", f"{benchmark.get('benchmark_gap', 0):+.1f}",
-        help="Положительный = ближе к успешным, чем к слабым.")
+        st.metric("Benchmark Gap", f"{benchmark.get('benchmark_gap', 0):+.1f}",
+            help="Положительный = ближе к успешным, чем к слабым.")
 
-    bc1, bc2 = st.columns(2)
-    with bc1:
-        st.markdown("#### Успешные эталоны")
-        df_s = pd.DataFrame(success_sim, columns=["Объект", "Similarity"])
-        if not df_s.empty:
-            df_s["Similarity"] = df_s["Similarity"].map(lambda x: f"{x:.1f}%")
-            st.dataframe(df_s, use_container_width=True, hide_index=True)
-            success_debug = benchmark.get("success_debug", [])
-            if success_debug:
-                with st.expander("🔍 Разбор similarity (успешные)"):
-                    for addr, sim, debug in success_debug:
-                        st.markdown(f"**{addr}**: {sim}%")
-                        top5 = debug[:5]
-                        for factor, t_val, b_val, contrib in top5:
-                            st.markdown(f"  • {factor}: target={t_val}, benchmark={b_val}, вклад={contrib}")
-    with bc2:
-        st.markdown("#### Слабые эталоны")
-        df_w = pd.DataFrame(weak_sim, columns=["Объект", "Similarity"])
-        if not df_w.empty:
-            df_w["Similarity"] = df_w["Similarity"].map(lambda x: f"{x:.1f}%")
-            st.dataframe(df_w, use_container_width=True, hide_index=True)
+        # --- ВСЕ ЭТАЛОНЫ (ranked) ---
+        st.subheader("📊 Сравнение со всеми эталонами")
+        all_sim = benchmark.get("all_similarity", [])
+        if all_sim:
+            all_data = []
+            for rank, (addr, sim, status) in enumerate(all_sim, 1):
+                all_data.append({
+                    "#": rank,
+                    "Эталон": addr,
+                    "Similarity": sim,
+                    "Группа": "🟢 Успешный" if status in ("успешная", "успешный") else "🔴 Слабый",
+                })
+            df_all = pd.DataFrame(all_data)
+            st.dataframe(df_all, use_container_width=True, hide_index=True, height=320)
+
+        # --- Детальный разбор ---
+        st.subheader("🔍 Детальный разбор по эталонам")
+        all_debug = benchmark.get("all_debug", [])
+        for addr, sim, debug, status in all_debug:
+            label = f"{addr} — {sim:.1f}% ({status})"
+            with st.expander(label):
+                st.markdown("**Топ-10 факторов с наибольшим вкладом в разницу:**")
+                for factor, t_val, b_val, contrib in debug[:10]:
+                    delta = t_val - b_val
+                    arrow = "🟢" if abs(delta) < 5 else ("🟡" if abs(delta) < 15 else "🔴")
+                    st.markdown(f"{arrow} **{factor}**: target={t_val}, benchmark={b_val}, разница={delta:+.1f}, вклад={contrib}")
+                st.markdown("---")
+                st.markdown("**Полный разбор:**")
+                full_df = pd.DataFrame([
+                    {"Фактор": f, "Target": t, "Benchmark": b, "Разница": round(t-b,1), "Вклад": c}
+                    for f, t, b, c in debug
+                ])
+                st.dataframe(full_df, use_container_width=True, hide_index=True, height=560)
 
     # BLOCKS
     st.subheader("🧭 Сводка по блокам")
@@ -1615,49 +1560,30 @@ with st.sidebar:
     st.header("Сессия")
     st.success("OpenAI API-ключ активен.")
     st.markdown("""
-### Архитектура v3.6
+### Архитектура v4.0
 
-**Параметры локации** (15%)
-- 5 явных параметров (чекбоксы)
-- Каждый — конкретный штраф
+**Шаг 1 — Эталоны**
+- Загрузка Excel (Лист 2)
+- AI оценивает 21 фактор для каждого эталона батчем
+- Без ПроДокторов: только аудиторные данные из файла
 
-**Парковка + Доступность** (20%)
-- OSM: парковки, дороги, транспорт
-- Если OSM недоступен → AI оценивает сам
+**Шаг 2 — Target**
+- Параметры объекта (критичные, со штрафами)
+- Опциональные данные о районе (повышают точность)
+- Адрес + ЦА
 
-**Спрос + ЦА** (20%)
-- OSM: плотность жилой застройки
-- AI: доходы, возраст, пол, семьи
-
-**Конкуренция** (15%)
-- OSM: количество клиник
-- AI: сила конкурентов, зазор
-
-**Мед. экосистема** (15%)
-- OSM: аптеки, диагностика, больницы
-- AI: оценка при отсутствии OSM
-
-**Видимость + Среда** (15%)
-- OSM: тип дорог, видимость
-- AI: шум, безопасность, пешеходный комфорт
+**Шаг 3 — Анализ**
+- Геокодирование target
+- OSM (1 запрос, 5 сек)
+- AI-оценка target (все 21 фактор)
+- Сравнение с эталонами
 
 **Hard rules:** штрафы до 50 баллов
 - OSM-зависимые только при доступном OSM
 
-**Benchmark:** 4 успешных + 3 слабых
-- Статические предвычисленные профили
-- Валиден всегда (нет зависимости от внешних API)
-
-**OSM v3.6.1:**
-- Только 1 запрос для target
-- Таймаут 5 сек
-- Пустой ответ = unavailable → AI fallback
-- Геокодинг: geocode.xyz → photon.komoot.io → Nominatim (fallback)
-- Если координаты не определены — анализ без OSM
-
-**AI fallback:**
-- При отказе OSM: AI оценивает все 21 фактор
-- При отказе OpenAI: нейтральные 50
+**Benchmark:** динамические эталоны из файла
+- Статус: успешная / слабая / спорная
+- Взвешенная Manhattan distance
 """)
     if st.button("Сбросить OpenAI ключ"):
         st.session_state.clear()
