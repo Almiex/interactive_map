@@ -285,7 +285,7 @@ def _overpass_request(query: str, timeout: int = 25) -> List[dict]:
 def collect_osm_context(lat: float, lon: float) -> dict:
     # Два легких запроса вместо одного тяжелого
     query_medical = f"""
-    [out:json][timeout:20];
+    [out:json][timeout:45];
     (
       nwr(around:2000,{lat},{lon})["amenity"~"hospital|clinic|doctors"];
       nwr(around:2000,{lat},{lon})["healthcare"~"centre|clinic|doctor"];
@@ -293,7 +293,7 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     out center tags;
     """
     query_infra = f"""
-    [out:json][timeout:20];
+    [out:json][timeout:45];
     (
       nwr(around:1000,{lat},{lon})["amenity"="parking"];
       nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
@@ -304,8 +304,8 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     out center tags;
     """
     query = query_medical
-    elements = _overpass_request(query_medical, timeout=25)
-    elements_infra = _overpass_request(query_infra, timeout=25)
+    elements = _overpass_request(query_medical, timeout=50)
+    elements_infra = _overpass_request(query_infra, timeout=50)
     elements = elements + elements_infra
 
     if not elements:
@@ -1331,6 +1331,7 @@ if run_analysis:
         )
         st.session_state.last_result = result
         progress_box.success("✅ Анализ завершён.")
+        st.rerun()
     except Exception as exc:
         progress_box.error("❌ Ошибка.")
         st.error(f"{type(exc).__name__}: {exc}")
