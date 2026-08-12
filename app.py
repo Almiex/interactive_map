@@ -1019,11 +1019,12 @@ def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict
 # ==============================================================================
 # HARD RULES
 # ==============================================================================
-def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List[str]:
+def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict, known_data: dict) -> List[str]:
     barriers = []
     c = osm.get("counts", {})
     osm_available = osm.get("available", False)
 
+    # Параметры объекта (всегда проверяем — пользователь их сам ввёл на Шаге 2)
     if params.get("floor") == "upper":
         if params.get("building_type") in ("bc", "mall"):
             barriers.append("🚨 КРИТИЧНО: Объект на 2+ этаже в БЦ/ТЦ — нет видимости, сложная навигация, офисный трафик.")
@@ -1040,20 +1041,51 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
     if not params.get("first_line", True):
         barriers.append("⚠️ Не первая линия — меньше проходного трафика, ниже узнаваемость.")
 
-    if osm_available:
-        if c.get("parking_500m", 0) == 0 and c.get("parking_1000m", 0) == 0:
-            barriers.append("🚨 КРИТИЧНО: Нет парковки в радиусе 1 км по OSM.")
-        elif c.get("parking_500m", 0) == 0:
-            barriers.append("⚠️ Нет парковки в радиусе 500 м.")
+    # --- ПАРКОВКА: приоритет пользовательских данных ---
+    parking = str(known_data.get("parking", "")).lower().strip()
+    if parking == "нет":
+        barriers.append("🚨 КРИТИЧНО: Пользователь подтвердил — парковки нет.")
+    elif parking == "ограничена":
+        barriers.append("⚠️ Пользователь подтвердил — парковка ограничена.")
+    elif parking == "":
+        # Пользователь не ввёл данные — полагаемся на OSM
+        if osm_available:
+            if c.get("parking_500m", 0) == 0 and c.get("parking_1000m", 0) == 0:
+                barriers.append("🚨 КРИТИЧНО: Нет парковки в радиусе 1 км по OSM.")
+            elif c.get("parking_500m", 0) == 0:
+                barriers.append("⚠️ Нет парковки в радиусе 500 м.")
+    # Если parking == "да" — барьер не выводим, пользователь знает лучше
+
+    # --- ПОДЪЕЗД НА АВТО: приоритет пользовательских данных ---
+    traffic_car = str(known_data.get("traffic_car", "")).lower().strip()
+    if traffic_car == "низкий":
+        barriers.append("⚠️ Пользователь подтвердил — низкий автотрафик, плохой подъезд.")
+    elif traffic_car == "":
         if full_profile.get("vehicle_access", 0) <= 25:
             barriers.append("🚨 КРИТИЧНО: Критически неудобный автомобильный подъезд.")
+    # "высокий" и "экстремально_high" = хороший подъезд, барьер не нужен
+
+    # --- ТРАНСПОРТ: приоритет пользовательских данных ---
+    trans = str(known_data.get("transport_access", "")).lower().strip()
+    if trans == "средняя":
+        barriers.append("⚠️ Пользователь подтвердил — средняя транспортная доступность.")
+    elif trans == "":
         if full_profile.get("public_transport", 0) <= 15:
             barriers.append("⚠️ Отсутствует общественный транспорт в пешей доступности.")
-        if full_profile.get("competitor_density", 0) >= 85:
-            barriers.append("⚠️ Очень высокая плотность конкурентов (3+ клиники в 300 м).")
+
+    # --- КОНКУРЕНТЫ: приоритет пользовательских данных ---
+    if full_profile.get("competitor_density", 0) >= 85:
+        barriers.append("⚠️ Очень высокая плотность конкурентов (3+ клиники в 300 м).")
+
+    # --- ПЛОТНОСТЬ: приоритет пользовательских данных ---
+    pop_dens = str(known_data.get("population_density", "")).lower().strip()
+    if pop_dens in ("ниже_medium", "низкая"):
+        barriers.append("⚠️ Пользователь подтвердил — низкая плотность жилой застройки.")
+    elif pop_dens == "":
         if full_profile.get("population_density", 0) <= 20:
             barriers.append("⚠️ Критически низкая плотность жилой застройки.")
-    else:
+
+    if not osm_available:
         barriers.append("ℹ️ OSM-данные недоступны — барьеры по парковке, транспорту и застройке не проверены. Overpass API мог быть перегружен или заблокирован. Попробуйте перезапустить анализ.")
 
     return barriers
@@ -1188,7 +1220,7 @@ def run_full_analysis(
     block_scores = compute_block_scores(target_profile)
     absolute_base = compute_absolute_score(block_scores)
 
-    hard_barriers = calculate_hard_barriers(target_profile, target_osm, params)
+    hard_barriers = calculate_hard_barriers(target_profile, target_osm, params, known_data)
     absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params, osm_target_available)
 
     benchmark_rows = [
