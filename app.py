@@ -85,10 +85,9 @@ FACTORS = [
     ("market_gap",              "competition",     0.25, "ai",    "Незакрытый спрос / рыночная ниша"),
     ("hospital_synergy",        "medical_eco",     0.50, "osm",   "Близость к государственным больницам (ОМС)"),
     ("medical_cluster",         "medical_eco",     0.50, "osm",   "Медицинский кластер"),
-    ("visibility",              "visibility_env",  0.35, "osm",   "Видимость с дороги"),
-    ("road_type_fit",           "visibility_env",  0.25, "osm",   "Тип трафика (жилой vs офисный)"),
-    ("pedestrian_comfort",      "visibility_env",  0.20, "osm",   "Пешеходный комфорт"),
-    ("noise_safety",            "visibility_env",  0.20, "ai",    "Шум и безопасность"),
+    ("visibility",              "visibility_env",  0.44, "osm",   "Видимость с дороги"),
+    ("road_type_fit",           "visibility_env",  0.31, "osm",   "Тип трафика (жилой vs офисный)"),
+    ("pedestrian_comfort",      "visibility_env",  0.25, "osm",   "Пешеходный комфорт"),
 ]
 
 FACTOR_KEYS = [f[0] for f in FACTORS]
@@ -118,7 +117,6 @@ FACTOR_DESCRIPTIONS = {
     "visibility": "Насколько хорошо клинику видно с дороги. 90+ = витрина на главной магистрали. Ниже 30 = двор, подвал, за углом.",
     "road_type_fit": "Тип проезжающего/проходящего трафика. 85+ = жилой район, ваши пациенты живут рядом. Ниже 30 = трасса/промзона/офисный трафик, который едет домой в другой район.",
     "pedestrian_comfort": "Удобство для пешеходов. 80+ = широкие тротуары, освещение, озеленение. Ниже 35 = нет тротуаров, грязь, небезопасно.",
-    "noise_safety": "Шум и безопасность района. 90+ = тихий спальный район, безопасно вечером. Ниже 30 = шумная магистраль, промзона, небезопасно.",
     "traffic_quality": "Качество трафика (не количество, а ЦА). 80+ = мимо идут/едут ваши потенциальные пациенты. Ниже 30 = трафик нецелевой (грузовики, туристы, студенты).",
 }
 
@@ -145,7 +143,6 @@ class GeoAIFullProfile(BaseModel):
     daytime_balance: int = Field(ge=0, le=100)
     competitor_strength: int = Field(ge=0, le=100)
     market_gap: int = Field(ge=0, le=100)
-    noise_safety: int = Field(ge=0, le=100)
     traffic_quality: int = Field(ge=0, le=100)
     profile_confidence: int = Field(ge=0, le=100)
     evidence_quality: int = Field(ge=0, le=100)
@@ -190,7 +187,7 @@ def make_default_full_profile() -> dict:
         "visibility": 50, "road_type_fit": 50, "pedestrian_comfort": 50,
         "income_fit": 50, "age_fit": 50, "gender_fit": 50, "family_profile": 50,
         "daytime_balance": 50, "competitor_strength": 50, "market_gap": 50,
-        "noise_safety": 50, "traffic_quality": 50, "profile_confidence": 30, "evidence_quality": 25,
+        "traffic_quality": 50, "profile_confidence": 30, "evidence_quality": 25,
     }
 
 
@@ -585,8 +582,6 @@ def apply_user_overrides(profile: dict, known_data: dict) -> dict:
                   "Пользователь: экстремально высокий автотрафик = отличная видимость")
         _override("road_type_fit", max(profile.get("road_type_fit", 50), 70),
                   "Пользователь: магистральный трафик")
-        _override("noise_safety", min(profile.get("noise_safety", 50), 40),
-                  "Пользователь: шумная магистраль")
     elif traffic_car == "высокий":
         _override("vehicle_access", max(profile.get("vehicle_access", 50), 80),
                   "Пользователь: высокий автотрафик = хороший подъезд")
@@ -769,7 +764,6 @@ def build_ai_full_system_prompt() -> str:
 16. daytime_balance — баланс дневного/жилого населения.
 17. competitor_strength — сила конкурентов (100 = слабые/отсутствуют).
 18. market_gap — незакрытый спрос / рыночная ниша (100 = большой незакрытый спрос на услуги клиники).
-19. noise_safety — шум и безопасность (100 = тихо и безопасно).
 20. traffic_quality — качество трафика для ЦА (не количество, а соответствие целевой аудитории).
 
 ПРАВИЛА:
@@ -1179,7 +1173,7 @@ def run_full_analysis(
 
     target_ai = {k: target_profile.get(k, 50) for k in [
         "income_fit", "age_fit", "gender_fit", "family_profile", "daytime_balance",
-        "competitor_strength", "market_gap", "noise_safety", "traffic_quality",
+        "competitor_strength", "market_gap", "traffic_quality",
         "profile_confidence", "evidence_quality"
     ]}
 
