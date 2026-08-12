@@ -1347,7 +1347,7 @@ if "last_result" in st.session_state:
         st.stop()
 
     profile = result.get("profile", {})
-    сравнение = result.get("benchmark", {})
+    benchmark = result.get("benchmark", {})
     block_scores = result.get("block_scores", {})
 
     st.divider()
