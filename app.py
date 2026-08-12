@@ -26,12 +26,12 @@ from pydantic import BaseModel, Field
 # STREAMLIT CONFIG
 # ==============================================================================
 st.set_page_config(
-    page_title="Геомаркетинг клиники — Benchmark v3.6",
+    page_title="Геомаркетинг клиники — Benchmark v3.6.1",
     page_icon="📍",
     layout="wide",
 )
 
-st.title("📍 Геомаркетинговый анализ локации клиники — v3.6")
+st.title("📍 Геомаркетинговый анализ локации клиники — v3.6.1")
 st.caption("Явные параметры + детерминированный скоринг. Платные geo-API не нужны.")
 
 # ==============================================================================
@@ -320,28 +320,61 @@ def make_default_full_profile() -> dict:
 # ==============================================================================
 # ГЕОКОДИРОВАНИЕ
 # ==============================================================================
-@st.cache_data(show_spinner=False, ttl=86400)
 def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                NOMINATIM_URL,
-                params={"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1},
-                headers=REQUEST_HEADERS,
-                timeout=12,
-            )
-            response.raise_for_status()
+    """Геокодирование: geocode.xyz → photon.komoot.io → Nominatim. Без кэша — всегда свежий запрос."""
+
+    # Попытка 1: geocode.xyz
+    try:
+        response = requests.get(
+            "https://geocode.xyz",
+            params={"locate": address, "json": "1", "region": "RU"},
+            timeout=6,
+        )
+        if response.status_code == 200:
             data = response.json()
-            if not data:
-                if attempt < 2:
-                    time.sleep(1.0 * (attempt + 1))
-                    continue
-                return None, None
-            return float(data[0]["lat"]), float(data[0]["lon"])
-        except Exception:
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
-            continue
+            # geocode.xyz может вернуть ошибку вместо координат
+            if "error" not in data and "latt" in data and "longt" in data:
+                lat = float(data["latt"])
+                lon = float(data["longt"])
+                if abs(lat) > 0.01 and abs(lon) > 0.01:
+                    return lat, lon
+    except Exception:
+        pass
+
+    # Попытка 2: photon.komoot.io (альтернатива Nominatim, не банит облака)
+    try:
+        response = requests.get(
+            "https://photon.komoot.io/api/",
+            params={"q": address, "limit": 1},
+            timeout=6,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            features = data.get("features", [])
+            if features and len(features) > 0:
+                coords = features[0].get("geometry", {}).get("coordinates", [])
+                if len(coords) >= 2:
+                    lon, lat = coords[0], coords[1]
+                    if abs(lat) > 0.01 and abs(lon) > 0.01:
+                        return lat, lon
+    except Exception:
+        pass
+
+    # Попытка 3: Nominatim (классика, но может банить облачные IP)
+    try:
+        response = requests.get(
+            NOMINATIM_URL,
+            params={"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1},
+            headers=REQUEST_HEADERS,
+            timeout=6,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception:
+        pass
+
     return None, None
 
 
@@ -765,7 +798,7 @@ Target-локация: {target_key}
 """
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=300)
 def generate_profiles_batch_cached(api_key: str, model: str, locations_json: str, osm_json: str) -> dict:
     client = OpenAI(api_key=api_key)
     locations = json.loads(locations_json)
@@ -786,7 +819,7 @@ def generate_profiles_batch_cached(api_key: str, model: str, locations_json: str
     return result
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=300)
 def generate_full_profile_cached(api_key: str, model: str, location_json: str) -> dict:
     """AI оценивает ВСЕ 21 фактор для одной локации (когда OSM недоступен)."""
     client = OpenAI(api_key=api_key)
@@ -1036,11 +1069,7 @@ def calculate_confidence(ai_profile: dict, osm: dict) -> int:
 # FULL ANALYSIS
 # ==============================================================================
 def resolve_coordinates(address: str) -> Tuple[Optional[float], Optional[float]]:
-    address_lower = address.lower()
-    if "энгельса" in address_lower and "екатеринбург" in address_lower:
-        return 56.8339, 60.6211
-    if "молодогвардейцев" in address_lower and "челябинск" in address_lower:
-        return 55.1764, 61.3708
+    """Геокодирование без хардкода. Nominatim → geocode.xyz fallback."""
     return get_exact_coordinates(address)
 
 
@@ -1056,14 +1085,15 @@ def run_full_analysis(
     status_callback=None,
 ) -> dict:
     target_lat, target_lon = resolve_coordinates(address)
-    if target_lat is None or target_lon is None:
-        raise ValueError("Не удалось определить координаты. Проверьте адрес.")
+    coords_available = target_lat is not None and target_lon is not None
+    if not coords_available:
+        st.warning("⚠️ Не удалось определить координаты. Анализ продолжится без OSM (только AI-оценка).")
 
     target_loc = {
         "key": "target",
         "address": address,
-        "lat": target_lat,
-        "lon": target_lon,
+        "lat": target_lat if coords_available else 0.0,
+        "lon": target_lon if coords_available else 0.0,
         "params": params,
         "target_age": target_age,
         "share_female": share_female,
@@ -1071,11 +1101,17 @@ def run_full_analysis(
         "clinic_hours": clinic_hours,
     }
 
-    # 1. OSM только для target (1 запрос, 5 сек)
-    if status_callback:
-        status_callback("1/3", "Собираю OSM-данные для target (таймаут 5 сек)…")
-    target_osm = collect_osm_context(target_lat, target_lon)
-    osm_target_available = target_osm.get("available", False)
+    # 1. OSM только для target (1 запрос, 5 сек) — только если есть координаты
+    target_osm = {"available": False, "error": "no_coords", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
+    osm_target_available = False
+    if coords_available:
+        if status_callback:
+            status_callback("1/3", "Собираю OSM-данные для target (таймаут 5 сек)…")
+        target_osm = collect_osm_context(target_lat, target_lon)
+        osm_target_available = target_osm.get("available", False)
+    else:
+        if status_callback:
+            status_callback("1/3", "Координаты не определены — пропускаю OSM…")
 
     # 2. AI
     if status_callback:
@@ -1181,8 +1217,8 @@ def run_full_analysis(
         "address": address,
         "params": params,
         "applied_penalties": applied_penalties,
-        "latitude": target_lat,
-        "longitude": target_lon,
+        "latitude": target_lat if coords_available else None,
+        "longitude": target_lon if coords_available else None,
         "profile": target_profile,
         "block_scores": block_scores,
         "osm_context": target_osm,
@@ -1564,7 +1600,10 @@ similarity = 100 − distance
     else:
         st.info(f"🤖 OSM недоступен ({osm.get('error', 'unknown')}). Все факторы оценены AI.")
 
-    st.caption(f"Координаты: {result.get('latitude', 0):.6f}, {result.get('longitude', 0):.6f} · Модель: {result.get('model', model)}")
+    lat_disp = result.get('latitude')
+    lon_disp = result.get('longitude')
+    coord_str = f"{lat_disp:.6f}, {lon_disp:.6f}" if lat_disp is not None and lon_disp is not None else "не определены"
+    st.caption(f"Координаты: {coord_str} · Модель: {result.get('model', model)}")
     with st.expander("Показать полный профиль (JSON)"):
         st.json(profile)
 
@@ -1609,10 +1648,12 @@ with st.sidebar:
 - Статические предвычисленные профили
 - Валиден всегда (нет зависимости от внешних API)
 
-**OSM v3.6:**
+**OSM v3.6.1:**
 - Только 1 запрос для target
 - Таймаут 5 сек
 - Пустой ответ = unavailable → AI fallback
+- Геокодинг: geocode.xyz → photon.komoot.io → Nominatim (fallback)
+- Если координаты не определены — анализ без OSM
 
 **AI fallback:**
 - При отказе OSM: AI оценивает все 21 фактор
