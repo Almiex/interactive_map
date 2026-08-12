@@ -1462,8 +1462,11 @@ with col3:
     avg_ticket = st.number_input("Средний чек, руб.", min_value=0, max_value=1_000_000, value=3500, step=100)
 
 st.subheader("📍 Адрес")
-address = st.text_input("Адрес объекта", value="Екатеринбург, Энгельса, 36",
-    placeholder="Например: Екатеринбург, Энгельса, 36")
+# Используем session_state для сохранения адреса между reruns
+if "address_input" not in st.session_state:
+    st.session_state.address_input = "Екатеринбург, Энгельса, 36"
+
+address = st.text_input("Адрес объекта", key="address_input")
 
 st.subheader("📝 Известные данные о районе (опционально)")
 st.caption("Если вы уже изучили локацию — заполните. Это повысит точность AI-оценки.")
