@@ -1272,7 +1272,7 @@ with st.expander("Заполнить известные данные"):
     kcol1, kcol2 = st.columns(2)
     with kcol1:
         known_data["parking"] = st.selectbox("Парковка", ["неизвестно", "да", "нет", "ограничена"], index=0)
-        known_data["traffic_car"] = st.selectbox("Автотрафик", ["неизвестно", "экстремально_high", "высокий", "средний", "низкий"], index=0)
+        known_data["traffic_car"] = st.selectbox("Автотрафик", ["неизвестно", "экстремально_высокий", "высокий", "средний", "низкий"], index=0)
         known_data["traffic_ped"] = st.selectbox("Пеший трафик", ["неизвестно", "высокий", "средний", "низкий"], index=0)
         known_data["population_density"] = st.selectbox("Плотность населения", ["неизвестно", "очень_high", "высокая", "средняя", "ниже_medium", "низкая"], index=0)
         known_data["transport_access"] = st.selectbox("Транспортная доступность", ["неизвестно", "отличная", "очень_good", "хорошая", "средняя"], index=0)
