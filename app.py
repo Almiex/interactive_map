@@ -258,7 +258,7 @@ OVERPASS_MIRRORS = [
 ]
 
 
-def _overpass_request(query: str, timeout: int = 15) -> List[dict]:
+def _overpass_request(query: str, timeout: int = 25) -> List[dict]:
     """Overpass с retry и fallback на зеркала."""
     last_error = None
     for url in OVERPASS_MIRRORS:
@@ -283,11 +283,18 @@ def _overpass_request(query: str, timeout: int = 15) -> List[dict]:
 
 
 def collect_osm_context(lat: float, lon: float) -> dict:
-    query = f"""
-    [out:json][timeout:5];
+    # Два легких запроса вместо одного тяжелого
+    query_medical = f"""
+    [out:json][timeout:20];
     (
       nwr(around:2000,{lat},{lon})["amenity"~"hospital|clinic|doctors"];
       nwr(around:2000,{lat},{lon})["healthcare"~"centre|clinic|doctor"];
+    );
+    out center tags;
+    """
+    query_infra = f"""
+    [out:json][timeout:20];
+    (
       nwr(around:1000,{lat},{lon})["amenity"="parking"];
       nwr(around:300,{lat},{lon})["highway"~"bus_stop|platform"];
       nwr(around:800,{lat},{lon})["public_transport"];
@@ -296,7 +303,10 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     );
     out center tags;
     """
-    elements = _overpass_request(query, timeout=15)
+    query = query_medical
+    elements = _overpass_request(query_medical, timeout=25)
+    elements_infra = _overpass_request(query_infra, timeout=25)
+    elements = elements + elements_infra
 
     if not elements:
         return {"available": False, "error": "empty_or_timeout", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
