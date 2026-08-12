@@ -177,7 +177,7 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
         response = requests.get(
             "https://geocode.xyz",
             params={"locate": address, "json": "1", "region": "RU"},
-            timeout=6,
+            timeout=10,
         )
         if response.status_code == 200:
             data = response.json()
@@ -193,7 +193,7 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
         response = requests.get(
             "https://photon.komoot.io/api/",
             params={"q": address, "limit": 1},
-            timeout=6,
+            timeout=10,
         )
         if response.status_code == 200:
             data = response.json()
@@ -212,7 +212,7 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
             NOMINATIM_URL,
             params={"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1},
             headers=REQUEST_HEADERS,
-            timeout=6,
+            timeout=10,
         )
         if response.status_code == 200:
             data = response.json()
@@ -227,13 +227,34 @@ def get_exact_coordinates(address: str) -> Tuple[Optional[float], Optional[float
 # ==============================================================================
 # OVERPASS / OSM
 # ==============================================================================
-def _overpass_request(query: str) -> List[dict]:
-    try:
-        response = requests.post(OVERPASS_URL, data={"data": query}, headers=REQUEST_HEADERS, timeout=5)
-        response.raise_for_status()
-        return response.json().get("elements", [])
-    except Exception:
-        return []
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+
+
+def _overpass_request(query: str, timeout: int = 15) -> List[dict]:
+    """Overpass с retry и fallback на зеркала."""
+    last_error = None
+    for url in OVERPASS_MIRRORS:
+        for attempt in range(2):
+            try:
+                response = requests.post(url, data={"data": query}, headers=REQUEST_HEADERS, timeout=timeout)
+                response.raise_for_status()
+                return response.json().get("elements", [])
+            except requests.exceptions.Timeout:
+                last_error = f"timeout ({timeout}s)"
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+            except requests.exceptions.HTTPError as e:
+                last_error = f"HTTP {e.response.status_code}"
+                break  # не retry при 4xx/5xx
+            except Exception as e:
+                last_error = str(e)
+                break
+    st.warning(f"⚠️ OSM Overpass недоступен: {last_error}. Все факторы будут оценены AI.")
+    return []
 
 
 def collect_osm_context(lat: float, lon: float) -> dict:
@@ -250,10 +271,7 @@ def collect_osm_context(lat: float, lon: float) -> dict:
     );
     out center tags;
     """
-    try:
-        elements = _overpass_request(query)
-    except Exception as exc:
-        return {"available": False, "error": str(exc), "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
+    elements = _overpass_request(query, timeout=15)
 
     if not elements:
         return {"available": False, "error": "empty_or_timeout", "counts": {}, "roads": {}, "landuse": {}, "buildings": {}, "raw_count": 0}
@@ -862,7 +880,7 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
         if full_profile.get("population_density", 0) <= 20:
             barriers.append("⚠️ Критически низкая плотность жилой застройки.")
     else:
-        barriers.append("ℹ️ OSM-данные недоступны — барьеры по парковке, транспорту и застройке не проверены (оценены AI или нейтральные 50).")
+        barriers.append("ℹ️ OSM-данные недоступны — барьеры по парковке, транспорту и застройке не проверены. Overpass API мог быть перегружен или заблокирован. Попробуйте перезапустить анализ.")
 
     return barriers
 
@@ -1328,7 +1346,7 @@ if "last_result" in st.session_state:
     benchmark_valid = result.get("benchmark_valid", False)
 
     if not osm_target_available:
-        st.warning("🤖 OSM недоступен — все факторы оценены AI на основе адреса и общих знаний.")
+        st.warning("🤖 OSM недоступен (Overpass API не отвечает или заблокирован для облачных IP). Все факторы оценены AI на основе адреса и общих знаний. Попробуйте перезапустить анализ.")
     if ai_failed:
         st.error("🚨 OpenAI недоступен. Использованы нейтральные оценки 50. Результат может быть неточным.")
     if not benchmark_valid:
