@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-GeoMarketing AI — Clinic Location Benchmark v4.0
+GeoMarketing AI — Clinic Location Сравнение v4.0
 Без st.cache_data. Результаты хранятся в session_state.
 """
 
@@ -38,13 +38,13 @@ except ImportError:
 # STREAMLIT CONFIG
 # ==============================================================================
 st.set_page_config(
-    page_title="Геомаркетинг клиники — Benchmark v4.0",
+    page_title="Геомаркетинг клиники — Сравнение v4.0",
     page_icon="📍",
     layout="wide",
 )
 
 st.title("📍 Геомаркетинговый анализ локации клиники — v4.0")
-st.caption("Загрузка эталонов из файла + ручной чеклист target. Без ПроДокторов.")
+st.caption("Загрузка референсов из файла + ручной чеклист target. Без ПроДокторов.")
 
 # ==============================================================================
 # КОНФИГУРАЦИЯ
@@ -562,7 +562,7 @@ def compute_location_param_score(params: dict) -> Tuple[float, List[Tuple[str, i
     return clamp(base, 5.0), applied
 
 
-def parse_benchmark_params(row: pd.Series) -> dict:
+def parse_сравнение_params(row: pd.Series) -> dict:
     bt_raw = str(row.get("building_type", "")).lower()
     if "жилой" in bt_raw:
         bt = "residential"
@@ -633,10 +633,10 @@ def safe_str(val) -> str:
     return str(val)
 
 
-def build_benchmark_batch_prompt(df: pd.DataFrame) -> str:
+def build_сравнение_batch_prompt(df: pd.DataFrame) -> str:
     chunks = []
     for idx, row in df.iterrows():
-        chunk = f"""--- ЭТАЛОН {idx} ---
+        chunk = f"""--- РЕФЕРЕНС {idx} ---
 name: {safe_str(row.get('name', ''))}
 address: {safe_str(row.get('address', ''))}
 building_type: {safe_str(row.get('building_type', ''))}, storeys: {safe_str(row.get('number_of_storeys', ''))}
@@ -662,13 +662,13 @@ type: {safe_str(row.get('type', ''))}
 """
         chunks.append(chunk)
 
-    return f"""Ты — geo-marketing analyst. Оцени гео-маркетинговый профиль для КАЖДОГО эталона из списка ниже.
-Для каждого эталона оцени ВСЕ 21 фактор по шкале 0–100 на основе переданных аудиторных данных.
+    return f"""Ты — geo-marketing analyst. Оцени гео-маркетинговый профиль для КАЖДОГО референса из списка ниже.
+Для каждого референса оцени ВСЕ 21 фактор по шкале 0–100 на основе переданных аудиторных данных.
 Используй свои знания о городе и районе по адресу.
 
 {''.join(chunks)}
 
-Верни РОВНО по одному профилю на каждый эталон (key = индекс строки: 0,1,2...).
+Верни РОВНО по одному профилю на каждый референс (key = индекс строки: 0,1,2...).
 """
 
 
@@ -711,14 +711,14 @@ OSM counts: {json.dumps(osm.get('counts', {}), ensure_ascii=False)}
 # ==============================================================================
 # AI GENERATION (без cache_data)
 # ==============================================================================
-def generate_benchmark_profiles(api_key: str, model: str, df: pd.DataFrame) -> dict:
-    """Генерирует профили для всех эталонов батчем."""
+def generate_сравнение_profiles(api_key: str, model: str, df: pd.DataFrame) -> dict:
+    """Генерирует профили для всех референсов батчем."""
     client = OpenAI(api_key=api_key)
     batch = call_batch_ai_full(
         client=client,
         model=model.strip(),
         system_prompt=build_ai_full_system_prompt(),
-        user_prompt=build_benchmark_batch_prompt(df),
+        user_prompt=build_сравнение_batch_prompt(df),
     )
     if batch is None:
         raise ValueError("OpenAI вернул None.")
@@ -732,11 +732,11 @@ def generate_benchmark_profiles(api_key: str, model: str, df: pd.DataFrame) -> d
             continue
         row = df.iloc[idx]
         profile = item.profile.model_dump()
-        bench_params = parse_benchmark_params(row)
+        bench_params = parse_сравнение_params(row)
         loc_score, _ = compute_location_param_score(bench_params)
         profile["location_param_score"] = loc_score
         result[idx] = {
-            "name": safe_str(row.get("name", f"Эталон {idx}")),
+            "name": safe_str(row.get("name", f"Референс {idx}")),
             "address": safe_str(row.get("address", "")),
             "status": safe_str(row.get("result", "")).lower().strip(),
             "profile": profile,
@@ -796,7 +796,7 @@ def profile_vector(full_profile: dict) -> np.ndarray:
     return np.array([_norm_value(full_profile, f) for f in FACTOR_KEYS], dtype=float)
 
 
-def similarity_to_reference(target: dict, reference: dict) -> float:
+def схожесть_to_reference(target: dict, reference: dict) -> float:
     a = profile_vector(target)
     b = profile_vector(reference)
     weights = np.array([FACTOR_GLOBAL_WEIGHT.get(f, 0) for f in FACTOR_KEYS], dtype=float)
@@ -807,7 +807,7 @@ def similarity_to_reference(target: dict, reference: dict) -> float:
     return round(clamp(100.0 - distance), 1)
 
 
-def similarity_debug(target: dict, reference: dict, ref_name: str) -> Tuple[float, List[Tuple[str, float, float, float]]]:
+def схожесть_debug(target: dict, reference: dict, ref_name: str) -> Tuple[float, List[Tuple[str, float, float, float]]]:
     a = profile_vector(target)
     b = profile_vector(reference)
     weights = np.array([FACTOR_GLOBAL_WEIGHT.get(f, 0) for f in FACTOR_KEYS], dtype=float)
@@ -833,38 +833,38 @@ def group_centroid(profiles: List[dict]) -> dict:
     return centroid
 
 
-def benchmark_analysis(target_profile: dict, benchmark_rows: List[dict]) -> dict:
-    successful = [r for r in benchmark_rows if r.get("status") in ("успешная", "успешный", "successful")]
-    weak = [r for r in benchmark_rows if r.get("status") in ("слабая", "слабый", "weak", "неуспешная", "неуспешный")]
+def benchmark_analysis(target_profile: dict, сравнение_rows: List[dict]) -> dict:
+    successful = [r for r in сравнение_rows if r.get("status") in ("успешная", "успешный", "successful")]
+    weak = [r for r in сравнение_rows if r.get("status") in ("слабая", "слабый", "weak", "неуспешная", "неуспешный")]
 
-    success_similarity = []
+    success_схожесть = []
     for r in successful:
-        sim, debug = similarity_debug(target_profile, r.get("profile", {}), r.get("address", ""))
-        success_similarity.append((r.get("address", ""), sim, debug, "успешная"))
+        sim, debug = схожесть_debug(target_profile, r.get("profile", {}), r.get("address", ""))
+        success_схожесть.append((r.get("address", ""), sim, debug, "успешная"))
 
-    weak_similarity = []
+    weak_схожесть = []
     for r in weak:
-        sim, debug = similarity_debug(target_profile, r.get("profile", {}), r.get("address", ""))
-        weak_similarity.append((r.get("address", ""), sim, debug, "слабая"))
+        sim, debug = схожесть_debug(target_profile, r.get("profile", {}), r.get("address", ""))
+        weak_схожесть.append((r.get("address", ""), sim, debug, "слабая"))
 
-    all_similarity = success_similarity + weak_similarity
+    all_similarity = success_схожесть + weak_схожесть
     all_similarity.sort(key=lambda x: x[1], reverse=True)
-    success_similarity.sort(key=lambda x: x[1], reverse=True)
-    weak_similarity.sort(key=lambda x: x[1], reverse=True)
+    success_схожесть.sort(key=lambda x: x[1], reverse=True)
+    weak_схожесть.sort(key=lambda x: x[1], reverse=True)
 
     successful_centroid = group_centroid([r.get("profile", {}) for r in successful])
     weak_centroid = group_centroid([r.get("profile", {}) for r in weak])
 
-    to_success = similarity_to_reference(target_profile, successful_centroid) if successful_centroid else 0.0
-    to_weak = similarity_to_reference(target_profile, weak_centroid) if weak_centroid else 0.0
+    to_success = схожесть_to_reference(target_profile, successful_centroid) if successful_centroid else 0.0
+    to_weak = схожесть_to_reference(target_profile, weak_centroid) if weak_centroid else 0.0
 
     return {
         "all_similarity": [(a, b, c) for a, b, _, c in all_similarity],
         "all_debug": all_similarity,
-        "success_similarity": [(a, b) for a, b, _, _ in success_similarity],
-        "weak_similarity": [(a, b) for a, b, _, _ in weak_similarity],
-        "success_debug": success_similarity,
-        "weak_debug": weak_similarity,
+        "success_схожесть": [(a, b) for a, b, _, _ in success_схожесть],
+        "weak_схожесть": [(a, b) for a, b, _, _ in weak_схожесть],
+        "success_debug": success_схожесть,
+        "weak_debug": weak_схожесть,
         "successful_centroid_similarity": to_success,
         "weak_centroid_similarity": to_weak,
         "benchmark_gap": round(to_success - to_weak, 1),
@@ -914,7 +914,7 @@ def calculate_hard_barriers(full_profile: dict, osm: dict, params: dict) -> List
     return barriers
 
 
-def apply_hard_penalties(absolute_score: float, full_profile: dict, barriers: List[str], params: dict, osm_available: bool) -> Tuple[float, float]:
+def apply_hard_penalties(absolute_оценка: float, full_profile: dict, barriers: List[str], params: dict, osm_available: bool) -> Tuple[float, float]:
     penalty = 0.0
     if params.get("floor") == "upper":
         penalty += 20
@@ -979,7 +979,7 @@ def run_full_analysis(
     target_age: float,
     share_female: float,
     avg_ticket: int,
-    benchmark_profiles: dict,
+    сравнение_profiles: dict,
     status_callback=None,
 ) -> dict:
     target_lat, target_lon = get_exact_coordinates(address)
@@ -1043,30 +1043,30 @@ def run_full_analysis(
     hard_barriers = calculate_hard_barriers(target_profile, target_osm, params)
     absolute_final, hard_penalty = apply_hard_penalties(absolute_base, target_profile, hard_barriers, params, osm_target_available)
 
-    benchmark_rows = [
+    сравнение_rows = [
         {
             "address": v["address"],
             "status": v["status"],
             "profile": v["profile"],
         }
-        for v in benchmark_profiles.values()
+        for v in сравнение_profiles.values()
     ]
 
-    benchmark = benchmark_analysis(target_profile, benchmark_rows)
-    benchmark_valid = len(benchmark_rows) > 0
+    сравнение = сравнение_analysis(target_profile, сравнение_rows)
+    сравнение_valid = len(сравнение_rows) > 0
 
     if status_callback:
-        status_callback("3/3", "Расчёт benchmark…")
+        status_callback("3/3", "Расчёт сравнение…")
 
-    if benchmark_valid:
-        benchmark_component = (
-            benchmark["successful_centroid_similarity"] * 0.60 +
-            clamp(50 + benchmark["benchmark_gap"] / 2) * 0.40
+    if сравнение_valid:
+        сравнение_component = (
+            сравнение["successful_centroid_similarity"] * 0.60 +
+            clamp(50 + сравнение["разрыв_с_референсами"] / 2) * 0.40
         )
     else:
-        benchmark_component = 50.0
+        сравнение_component = 50.0
 
-    final_score = round(absolute_final * 0.60 + benchmark_component * 0.40, 1)
+    final_score = round(absolute_final * 0.60 + сравнение_component * 0.40, 1)
 
     if final_score >= 75:
         verdict = "СИЛЬНАЯ ЛОКАЦИЯ"
@@ -1086,8 +1086,8 @@ def run_full_analysis(
         verdict += " — ⚠️ OSM НЕДОСТУПЕН, ФАКТОРЫ ОЦЕНЕНЫ AI"
     if ai_failed:
         verdict += " — ⚠️ AI НЕДОСТУПЕН, НЕЙТРАЛЬНЫЕ ОЦЕНКИ"
-    if not benchmark_valid:
-        verdict += " — ⚠️ НЕТ ЭТАЛОНОВ, BENCHMARK НЕВОЗМОЖЕН"
+    if not сравнение_valid:
+        verdict += " — ⚠️ НЕТ РЕФЕРЕНСОВ, BENCHMARK НЕВОЗМОЖЕН"
 
     return {
         "address": address,
@@ -1104,9 +1104,9 @@ def run_full_analysis(
         "hard_penalty": hard_penalty,
         "hard_barriers": hard_barriers,
         "confidence": confidence,
-        "benchmark": benchmark,
-        "benchmark_valid": benchmark_valid,
-        "benchmark_rows": benchmark_rows,
+        "benchmark": сравнение,
+        "сравнение_valid": сравнение_valid,
+        "сравнение_rows": сравнение_rows,
         "final_score": final_score,
         "verdict": verdict,
         "model": model,
@@ -1133,50 +1133,50 @@ if not st.session_state.openai_key:
 
 
 # ==============================================================================
-# UI — ШАГ 1: ЗАГРУЗКА ЭТАЛОНОВ
+# UI — ШАГ 1: ЗАГРУЗКА РЕФЕРЕНСОВ
 # ==============================================================================
-st.header("Шаг 1: Загрузите эталоны")
+st.header("Шаг 1: Загрузите референсы")
 st.caption("Загрузите Excel-файл. Ожидается Лист 2 со структурой как на скриншоте.")
 
-uploaded = st.file_uploader("Файл с эталонами (.xlsx)", type=["xlsx"])
+uploaded = st.file_uploader("Файл с референсами (.xlsx)", type=["xlsx"])
 
-df_benchmarks = None
+df_сравнениеs = None
 if uploaded:
     try:
         if openpyxl is None:
             st.error("📦 Пакет `openpyxl` не установлен. Добавьте строку `openpyxl` в файл `requirements.txt` рядом с `app.py` и перезапустите приложение.")
             st.stop()
-        df_benchmarks = pd.read_excel(uploaded, sheet_name=1)
-        st.session_state.df_benchmarks = df_benchmarks
-        st.success(f"Загружено {len(df_benchmarks)} эталонов с Листа 2.")
+        df_сравнениеs = pd.read_excel(uploaded, sheet_name=1)
+        st.session_state.df_сравнениеs = df_сравнениеs
+        st.success(f"Загружено {len(df_сравнениеs)} референсов с Листа 2.")
         with st.expander("Предпросмотр загруженных данных"):
-            st.dataframe(df_benchmarks, use_container_width=True)
+            st.dataframe(df_сравнениеs, use_container_width=True)
     except Exception as exc:
         st.error(f"Ошибка чтения файла: {exc}")
         st.stop()
 else:
-    if "df_benchmarks" in st.session_state:
-        df_benchmarks = st.session_state.df_benchmarks
+    if "df_сравнениеs" in st.session_state:
+        df_сравнениеs = st.session_state.df_сравнениеs
 
-if df_benchmarks is not None and "benchmark_profiles" not in st.session_state:
-    if st.button("🤖 Сгенерировать профили эталонов", type="primary"):
-        with st.spinner("AI оценивает эталоны (батч-запрос)…"):
+if df_сравнениеs is not None and "сравнение_profiles" not in st.session_state:
+    if st.button("🤖 Сгенерировать профили референсов", type="primary"):
+        with st.spinner("AI оценивает референсы (батч-запрос)…"):
             try:
                 # Заменяем NaN на пустые строки для безопасности
-                df_clean = df_benchmarks.fillna("")
-                profiles = generate_benchmark_profiles(
+                df_clean = df_сравнениеs.fillna("")
+                profiles = generate_сравнение_profiles(
                     api_key=st.session_state.openai_key,
                     model=DEFAULT_MODEL,
                     df=df_clean,
                 )
-                st.session_state.benchmark_profiles = profiles
-                st.success(f"Профили сгенерированы для {len(profiles)} эталонов.")
+                st.session_state.сравнение_profiles = profiles
+                st.success(f"Профили сгенерированы для {len(profiles)} референсов.")
             except Exception as exc:
                 st.error(f"Ошибка генерации профилей: {exc}")
                 st.exception(exc)
 
-if "benchmark_profiles" in st.session_state:
-    st.info(f"✅ Эталоны готовы: {len(st.session_state.benchmark_profiles)} шт.")
+if "сравнение_profiles" in st.session_state:
+    st.info(f"✅ Референсы готовы: {len(st.session_state.сравнение_profiles)} шт.")
 
 
 # ==============================================================================
@@ -1249,7 +1249,7 @@ if preview_penalties:
         st.warning(f"−{penalty} баллов: {name} — {desc}")
 else:
     st.success("Все параметры оптимальны. Штрафов нет.")
-st.info(f"**Базовый score параметров: {preview_score:.0f}/100** (максимум 100, минимум 5)")
+st.info(f"**Базовый score параметров: {preview_оценка:.0f}/100** (максимум 100, минимум 5)")
 
 st.subheader("👤 Портрет целевого пациента")
 col1, col2, col3 = st.columns(3)
@@ -1297,7 +1297,7 @@ with col_b:
     clear_cache = st.button("♻️ Сбросить кэш", use_container_width=True)
 
 if clear_cache:
-    for k in ["last_result", "benchmark_profiles", "df_benchmarks"]:
+    for k in ["last_result", "сравнение_profiles", "df_сравнениеs"]:
         st.session_state.pop(k, None)
     st.rerun()
 
@@ -1305,8 +1305,8 @@ if run_analysis:
     if not address.strip():
         st.error("Адрес не должен быть пустым.")
         st.stop()
-    if "benchmark_profiles" not in st.session_state:
-        st.error("Сначала загрузите файл эталонов и сгенерируйте профили (Шаг 1).")
+    if "сравнение_profiles" not in st.session_state:
+        st.error("Сначала загрузите файл референсов и сгенерируйте профили (Шаг 1).")
         st.stop()
 
     share_female = share_female_percent / 100.0
@@ -1326,7 +1326,7 @@ if run_analysis:
             target_age=float(target_age),
             share_female=float(share_female),
             avg_ticket=int(avg_ticket),
-            benchmark_profiles=st.session_state.benchmark_profiles,
+            сравнение_profiles=st.session_state.сравнение_profiles,
             status_callback=update_status,
         )
         st.session_state.last_result = result
@@ -1347,7 +1347,7 @@ if "last_result" in st.session_state:
         st.stop()
 
     profile = result.get("profile", {})
-    benchmark = result.get("benchmark", {})
+    сравнение = result.get("сравнение", {})
     block_scores = result.get("block_scores", {})
 
     st.divider()
@@ -1372,25 +1372,25 @@ if "last_result" in st.session_state:
 
     osm_target_available = result.get("osm_target_available", False)
     ai_failed = result.get("ai_failed", False)
-    benchmark_valid = result.get("benchmark_valid", False)
+    сравнение_valid = result.get("сравнение_valid", False)
 
     if not osm_target_available:
         st.warning("🤖 OSM недоступен (Overpass API не отвечает или заблокирован для облачных IP). Все факторы оценены AI на основе адреса и общих знаний. Попробуйте перезапустить анализ.")
     if ai_failed:
         st.error("🚨 OpenAI недоступен. Использованы нейтральные оценки 50. Результат может быть неточным.")
-    if not benchmark_valid:
-        st.error("🚨 Нет эталонов — benchmark невозможен.")
+    if not сравнение_valid:
+        st.error("🚨 Нет референсов — сравнение невозможен.")
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("FINAL SCORE", f"{result.get('final_score', 0)} / 100")
+        st.metric("Итоговая оценка", f"{result.get('final_score', 0)} / 100")
     with m2:
-        st.metric("Абсолютное качество", f"{result.get('absolute_score', 0)} / 100")
+        st.metric("Абсолютное качество локации", f"{result.get('absolute_score', 0)} / 100")
     with m3:
-        if benchmark_valid:
-            st.metric("Похожесть на успешные", f"{benchmark.get('successful_centroid_similarity', 0)} / 100")
+        if сравнение_valid:
+            st.metric("Схожесть с успешными референсами", f"{benchmark.get('successful_centroid_similarity', 0)} / 100")
         else:
-            st.metric("Похожесть на успешные", "N/A")
+            st.metric("Схожесть с успешными референсами", "N/A")
     with m4:
         st.metric("Уверенность", f"{result.get('confidence', 0)}%")
 
@@ -1404,7 +1404,7 @@ if "last_result" in st.session_state:
     else:
         st.error(f"### {result.get('verdict', '—')}")
 
-    st.caption(f"Базовый score: {result.get('absolute_base', 0)}; hard-penalty: −{result.get('hard_penalty', 0)}")
+    st.caption(f"Базовый оценка: {result.get('absolute_base', 0)}; hard-penalty: −{result.get('hard_penalty', 0)}")
 
     applied_penalties = result.get("applied_penalties", [])
     if applied_penalties:
@@ -1415,71 +1415,73 @@ if "last_result" in st.session_state:
             st.markdown(f"**Итог: {profile.get('location_param_score', 0):.0f}/100**")
 
     # BENCHMARK
-    if benchmark_valid:
-        st.subheader("🎯 Benchmark")
-        with st.expander("Как считается similarity?"):
+    if сравнение_valid:
+        st.subheader("🎯 Сравнение")
+        with st.expander("Как считается схожесть?"):
             st.markdown("""
-**Формула:** взвешенная Manhattan distance по 21 фактору.
+**Формула:** взвешенное расстояние Манхэттена по всем факторам. Чем меньше разница между планируемой точкой и референсом — тем выше схожесть.
 
 ```
-distance = Σ |target_i − benchmark_i| × weight_i  /  Σ weight_i
-similarity = 100 − distance
+distance = Σ |target_i − сравнение_i| × weight_i  /  Σ weight_i
+схожесть = 100 − distance
 ```
 
-- 100% = профили идентичны
+- 100% = профили идентичны (планируемая точка = референс)
 - 0% = максимально разные
 - Вес каждого фактора = вес_в_блоке × вес_блока
 """)
 
         bm1, bm2, bm3 = st.columns(3)
-        success_sim = benchmark.get("success_similarity", [])
-        weak_sim = benchmark.get("weak_similarity", [])
+        success_sim = benchmark.get("success_схожесть", [])
+        weak_sim = benchmark.get("weak_схожесть", [])
         with bm1:
-            st.metric("Ближайший успешный", f"{success_sim[0][1]}%" if success_sim else "—")
+            st.metric("Ближайший успешный референс", f"{success_sim[0][1]}%" if success_sim else "—")
         with bm2:
-            st.metric("Средний успешных", f"{benchmark.get('successful_centroid_similarity', 0)}%")
+            st.metric("Средняя схожесть с успешными", f"{benchmark.get('successful_centroid_similarity', 0)}%")
         with bm3:
-            st.metric("Средний слабых", f"{benchmark.get('weak_centroid_similarity', 0)}%")
+            st.metric("Средняя схожесть со слабыми", f"{benchmark.get('weak_centroid_similarity', 0)}%")
 
-        st.metric("Benchmark Gap", f"{benchmark.get('benchmark_gap', 0):+.1f}",
-            help="Положительный = ближе к успешным, чем к слабым.")
+        st.metric("Разрыв с референсами", f"{benchmark.get('разрыв_с_референсами', 0):+.1f}",
+            help="Положительный = планируемая точка ближе к успешным референсам, чем к слабым. Отрицательный — наоборот.")
 
-        # --- ВСЕ ЭТАЛОНЫ (ranked) ---
-        st.subheader("📊 Сравнение со всеми эталонами")
+        # --- ВСЕ РЕФЕРЕНСЫ (ranked) ---
+        st.subheader("📊 Сравнение со всеми референсами")
         all_sim = benchmark.get("all_similarity", [])
         if all_sim:
             all_data = []
             for rank, (addr, sim, status) in enumerate(all_sim, 1):
                 all_data.append({
                     "#": rank,
-                    "Эталон": addr,
-                    "Similarity": sim,
+                    "Референс": addr,
+                    "Схожесть": sim,
                     "Группа": "🟢 Успешный" if status in ("успешная", "успешный") else "🔴 Слабый",
                 })
             df_all = pd.DataFrame(all_data)
             st.dataframe(df_all, use_container_width=True, hide_index=True, height=320)
 
         # --- Детальный разбор ---
-        st.subheader("🔍 Детальный разбор по эталонам")
+        st.subheader("🔍 Детальный разбор по референсам")
+        st.caption("Для каждого референса показано: насколько планируемая точка (слева) отличается от референса (справа). Весовой вклад — насколько этот фактор влияет на итоговую схожесть.")
         all_debug = benchmark.get("all_debug", [])
         for addr, sim, debug, status in all_debug:
             label = f"{addr} — {sim:.1f}% ({status})"
             with st.expander(label):
-                st.markdown("**Топ-10 факторов с наибольшим вкладом в разницу:**")
+                st.markdown("**Топ-10 факторов с наибольшим весовым вкладом:**")
                 for factor, t_val, b_val, contrib in debug[:10]:
                     delta = t_val - b_val
                     arrow = "🟢" if abs(delta) < 5 else ("🟡" if abs(delta) < 15 else "🔴")
-                    st.markdown(f"{arrow} **{factor}**: target={t_val}, benchmark={b_val}, разница={delta:+.1f}, вклад={contrib}")
+                    st.markdown(f"{arrow} **{factor}**: планируемая точка={t_val}, референс={b_val}, разница={delta:+.1f}, весовой вклад={contrib}")
                 st.markdown("---")
                 st.markdown("**Полный разбор:**")
                 full_df = pd.DataFrame([
-                    {"Фактор": f, "Target": t, "Benchmark": b, "Разница": round(t-b,1), "Вклад": c}
+                    {"Фактор": f, "Планируемая точка": t, "Сравнение с референсами": b, "Разница": round(t-b,1), "Весовой вклад": c}
                     for f, t, b, c in debug
                 ])
                 st.dataframe(full_df, use_container_width=True, hide_index=True, height=560)
 
     # BLOCKS
     st.subheader("🧭 Сводка по блокам")
+    st.caption("Оценка по 6 группам факторов. Каждый блок взвешен — сумма весов = 100%.")
     block_labels = {
         "location_params": "Параметры локации",
         "parking_access": "Парковка и доступность",
@@ -1489,13 +1491,14 @@ similarity = 100 − distance
         "visibility_env": "Видимость и среда",
     }
     block_df = pd.DataFrame([
-        {"Блок": block_labels.get(b, b), "Score": block_scores.get(b, 0), "Вес": f"{BLOCK_WEIGHTS.get(b, 0)*100:.0f}%"}
+        {"Блок": block_labels.get(b, b), "Оценка": block_scores.get(b, 0), "Вес": f"{BLOCK_WEIGHTS.get(b, 0)*100:.0f}%"}
         for b in BLOCK_WEIGHTS
     ])
     st.dataframe(block_df, use_container_width=True, hide_index=True)
 
     # HARD BARRIERS
     st.subheader("🚨 Жёсткие барьеры и риски")
+    st.caption("Барьеры, которые гарантированно снижают оценку. 🚨 Критично = минус 15–20 баллов. ⚠️ Предупреждение = минус 5–10 баллов.")
     hard_barriers = result.get("hard_barriers", [])
     if hard_barriers:
         for b in hard_barriers:
@@ -1532,7 +1535,7 @@ similarity = 100 − distance
             "": status,
             "Блок": block_labels.get(block, block),
             "Фактор": FACTOR_LABEL.get(factor, factor),
-            "Score": round(suitability, 1),
+            "Оценка": round(suitability, 1),
             "Источник": src_icon,
             "Описание": desc,
         })
@@ -1541,7 +1544,7 @@ similarity = 100 − distance
 
     # STRENGTHS / RISKS
     st.subheader("💪 Сильные стороны")
-    strong = df_f[df_f["Score"] >= 75].head(10)
+    strong = df_f[df_f["Оценка"] >= 75].head(10)
     if strong.empty:
         st.write("Нет факторов ≥75.")
     else:
@@ -1550,7 +1553,7 @@ similarity = 100 − distance
             st.caption(row['Описание'])
 
     st.subheader("⚠️ Ограничения")
-    weak_factors = df_f[df_f["Score"] < 50].sort_values("Score").head(12)
+    weak_factors = df_f[df_f["Оценка"] < 50].sort_values("Оценка").head(12)
     if weak_factors.empty:
         st.success("Нет факторов ниже 50/100.")
     else:
@@ -1560,6 +1563,7 @@ similarity = 100 − distance
 
     # OSM AUDIT
     st.subheader("🗺️ OSM-аудит")
+    st.caption("Данные OpenStreetMap — объективные данные о парковках, дорогах, застройке и медучреждениях вокруг планируемой точки.")
     osm = result.get("osm_context", {})
     if osm.get("available"):
         st.success(f"OSM доступен. Элементов: {osm.get('raw_count', 0)}.")
@@ -1586,30 +1590,30 @@ with st.sidebar:
     st.markdown("""
 ### Архитектура v4.0
 
-**Шаг 1 — Эталоны**
-- Загрузка Excel (Лист 2)
-- AI оценивает 21 фактор для каждого эталона батчем
-- Без ПроДокторов: только аудиторные данные из файла
+**Шаг 1 — Референсы (эталонные клиники)**
+- Загрузка Excel (Лист 2) с существующими клиниками
+- AI оценивает все факторы для каждого референса батчем
+- Референсы делятся на успешные и слабые — для сравнения
 
-**Шаг 2 — Target**
-- Параметры объекта (критичные, со штрафами)
+**Шаг 2 — Планируемая точка (новая клиника)**
+- Параметры объекта (этаж, вход, видимость и т.д.)
 - Опциональные данные о районе (повышают точность)
-- Адрес + ЦА
+- Адрес + портрет целевого пациента
 
 **Шаг 3 — Анализ**
 - Геокодирование target
 - OSM (1 запрос, 5 сек)
 - AI-оценка target (все 21 фактор)
-- Сравнение с эталонами
+- Сравнение с референсами
 
 **Hard rules:** штрафы до 50 баллов
 - OSM-зависимые только при доступном OSM
 
-**Benchmark:** динамические эталоны из файла
-- Статус: успешная / слабая / спорная
-- Взвешенная Manhattan distance
+**Сравнение:** планируемая точка vs референсы
+- Статус референса: успешная / слабая / спорная
+- Чем выше схожесть с успешными — тем лучше локация
 """)
     if st.button("Сбросить OpenAI ключ"):
         st.session_state.clear()
         st.rerun()
-    st.caption("Используйте одну модель и не меняйте эталоны без пересчёта.")
+    st.caption("Используйте одну модель и не меняйте референсы без пересчёта.")
