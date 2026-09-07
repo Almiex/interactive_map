@@ -675,8 +675,10 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 
     if map_type.startswith("7."):
         # ---- Мед. объекты: разбивка по типам + точки на карту ----
+        types = sub_option or list(COMPETITOR_TYPES)
         type_series, points = {}, []
-        for name, (color, matcher) in COMPETITOR_TYPES.items():
+        for name in types:
+            color, matcher = COMPETITOR_TYPES[name]
             mn = nodes_df["tags"].apply(matcher)
             mw = wcent["tags"].apply(matcher)
             type_series[name] = pd.concat(
@@ -881,6 +883,11 @@ with st.sidebar:
     elif map_type.startswith("6."):
         sub_option = st.radio("Что раскрашиваем", TRAFFIC_MODES,
                               help="Тултип гекса показывает оба индекса")
+    elif map_type.startswith("7."):
+        sub_option = st.multiselect(
+            "Типы мед. объектов", list(COMPETITOR_TYPES.keys()),
+            default=list(COMPETITOR_TYPES.keys()),
+            help="Пустой выбор или Select all = все типы")
 
     m2_per_person = 30
     kontur_df = None
@@ -1000,7 +1007,8 @@ elif map_type.startswith("5."):
     legend = [(name, color) for name, (color, _) in SOCIAL_GROUPS.items()
               if sub_option is None or name in sub_option]
 elif map_type.startswith("7."):
-    legend = [(name, color) for name, (color, _) in COMPETITOR_TYPES.items()]
+    legend = [(name, color) for name, (color, _) in COMPETITOR_TYPES.items()
+              if sub_option is None or name in sub_option]
 
 extra_aliases = None
 if map_type.startswith("3."):
@@ -1016,7 +1024,8 @@ elif map_type.startswith("5."):
     extra_aliases = {name: f"{name}: " for name in SOCIAL_GROUPS
                      if sub_option is None or name in sub_option}
 elif map_type.startswith("7."):
-    extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES}
+    extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES
+                     if sub_option is None or name in sub_option}
 
 render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
