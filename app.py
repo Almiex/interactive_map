@@ -702,7 +702,8 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
 
 def render_map(grid, series, unit, geo, map_type, marker=None,
-               points=None, hex_extra=None, extra_aliases=None, legend=None):
+               points=None, hex_extra=None, extra_aliases=None, legend=None,
+               source=None):
     center = [geo["lat"], geo["lon"]]
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
 
@@ -728,6 +729,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         v = float(vals.get(cell, 0.0))
         rv = round(v, 2) if vmax < 100 else round(v)  # большие числа — целыми
         props = {"v": rv}
+        if source:
+            props["src"] = source
         # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
         for c in extra_cols:
             props[safe_cols[c]] = float(hex_extra.loc[cell, c]) \
@@ -748,12 +751,14 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                 "fillOpacity": opacity}
 
     extra_aliases = extra_aliases or {}
-    aliases = [f"{unit}: "] + [extra_aliases.get(c, c) for c in extra_cols]
+    src_fields = ["src"] if source else []
+    aliases = [f"{unit}: "] + [extra_aliases.get(c, c) for c in extra_cols] \
+        + (["Источник: "] if source else [])
     folium.GeoJson(
         gj,
         style_function=_style,
         tooltip=folium.GeoJsonTooltip(
-            fields=["v"] + [safe_cols[c] for c in extra_cols],
+            fields=["v"] + [safe_cols[c] for c in extra_cols] + src_fields,
             aliases=aliases, localize=True,
         ),
     ).add_to(m)
@@ -1106,9 +1111,15 @@ elif map_type.startswith("7."):
     extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES
                      if sub_option is None or name in sub_option}
 
+_src = None
+if map_type.startswith("1."):
+    _src = ("Kontur Population (GHSL+FB, 2023)"
+            if kontur_df is not None
+            else f"Суррогат: OSM-здания, {m2_per_person} м²/чел")
+
 render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
-           legend=legend)
+           legend=legend, source=_src)
 st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное заселение и "
            "незавершённое строительство. Для точной численности загрузите Kontur Population "
            "(data.humdata.org, датасет «Kontur Population»).")
