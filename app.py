@@ -78,6 +78,7 @@ POI_CATEGORIES = {
                               lambda t: "office" in t
                               or re.search(r"бизнес[ -]?центр|business center|(^|\s)бц(\s|$)",
                                            _name_of(t))),
+    "ПВЗ маркетплейсов (Ozon, WB, СДЭК, Авито, Яндекс)": ("#d62728", is_pvz),
     "Продуктовые магазины": ("#2ca02c",
                              lambda t: t.get("shop") in
                              {"supermarket", "convenience", "greengrocer", "deli",
@@ -100,7 +101,6 @@ POI_CATEGORIES = {
                     lambda t: t.get("amenity") in
                     {"school", "kindergarten", "college", "university", "library",
                      "driving_school", "language_school", "music_school", "arts_centre"}),
-    "ПВЗ маркетплейсов (Ozon, WB, СДЭК, Авито, Яндекс)": ("#d62728", is_pvz),
 }
 
 
@@ -599,21 +599,34 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         return idx.round(1), "индекс 0-100", extra, None
 
     if map_type.startswith("4."):
-        cats = sub_option or list(POI_CATEGORIES)
-        type_series, points = {}, []
-        for name in cats:
-            color, matcher = POI_CATEGORIES[name]
-            # bool-обёртка: matcher с re.search может вернуть None, pandas падает
-            mn = nodes_df["tags"].apply(lambda t: bool(matcher(t)))
-            mw = wcent["tags"].apply(lambda t: bool(matcher(t)))
-            type_series[name] = pd.concat(
-                [hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)]
-            ).groupby(level=0).sum()
-            for df_ in (nodes_df[mn], wcent[mw]):
-                for _, row in df_.iterrows():
-                    points.append({"lat": row["lat"], "lon": row["lon"],
-                                   "color": color, "type": name,
-                                   "label": row["tags"].get("name", name)})
+        # «Все POI» — это НЕ отдельная категория, а режим «показать все подразделы»:
+        # точка попадает строго в первую подходящую категорию (без двойного счёта)
+        if not sub_option or "Все POI" in sub_option:
+            cats = [c for c in POI_CATEGORIES if c != "Все POI"]
+        else:
+            cats = [c for c in POI_CATEGORIES if c in sub_option]
+        matchers = [(name, color, POI_CATEGORIES[name][1]) for name in cats]
+
+        def _classify(tags):
+            for name, color, m in matchers:
+                if m(tags):
+                    return name, color
+            return None
+
+        counts = {name: {} for name, _, _ in matchers}
+        points = []
+        for df_ in (nodes_df, wcent):
+            for _, row in df_.iterrows():
+                hit = _classify(row["tags"])
+                if hit is None:
+                    continue
+                name, color = hit
+                cell = h3.latlng_to_cell(row["lat"], row["lon"], res)
+                counts[name][cell] = counts[name].get(cell, 0) + 1
+                points.append({"lat": row["lat"], "lon": row["lon"],
+                               "color": color, "type": name,
+                               "label": row["tags"].get("name", name)})
+        type_series = {name: pd.Series(c) for name, c in counts.items()}
         extra = pd.DataFrame(type_series).fillna(0).round(0)
         total = extra.sum(axis=1) if len(extra) else pd.Series(dtype=float)
         return total, "объектов", extra, points
@@ -982,8 +995,11 @@ c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if l
 
 legend = None
 if map_type.startswith("4."):
+    _sel = ([c for c in POI_CATEGORIES if c != "Все POI"]
+            if (not sub_option or "Все POI" in sub_option)
+            else [c for c in POI_CATEGORIES if c in sub_option])
     legend = [(name, color) for name, (color, _) in POI_CATEGORIES.items()
-              if sub_option is None or name in sub_option]
+              if name in _sel]
 elif map_type.startswith("5."):
     legend = [(name, color) for name, (color, _) in SOCIAL_GROUPS.items()
               if sub_option is None or name in sub_option]
@@ -996,8 +1012,10 @@ if map_type.startswith("3."):
                      "c_biz": "Банки/офисы: ", "c_transit": "Остановки: ",
                      "c_auto": "Парковки/АЗС: "}
 elif map_type.startswith("4."):
-    extra_aliases = {name: f"{name}: " for name in POI_CATEGORIES
-                     if sub_option is None or name in sub_option}
+    _sel = ([c for c in POI_CATEGORIES if c != "Все POI"]
+            if (not sub_option or "Все POI" in sub_option)
+            else [c for c in POI_CATEGORIES if c in sub_option])
+    extra_aliases = {name: f"{name}: " for name in POI_CATEGORIES if name in _sel}
 elif map_type.startswith("6."):
     extra_aliases = {"ped": "Пешеходный трафик: ", "auto": "Автомобильный трафик: "}
 elif map_type.startswith("5."):
