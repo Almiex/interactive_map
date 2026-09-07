@@ -95,7 +95,9 @@ PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_st
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str):
     r = requests.get(NOMINATIM_URL, params={
-        "q": city, "format": "json", "limit": 1, "accept-language": "ru"
+        "q": city, "format": "json", "limit": 1, "accept-language": "ru",
+        "polygon_geojson": 1,          # полигон административной границы
+        "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
     }, headers=HEADERS, timeout=30)
     r.raise_for_status()
     data = r.json()
@@ -106,29 +108,63 @@ def geocode_city(city: str):
         "lat": float(d["lat"]), "lon": float(d["lon"]),
         "display": d["display_name"],
         "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
+        "geojson": d.get("geojson"),                   # граница города или None
     }
 
 # --------------------------------------------------------------------------- #
 #  H3-сетка
 # --------------------------------------------------------------------------- #
-def make_grid(bbox, res):
-    south, north, west, east = bbox
+def _cells_from_polygon(coordinates, res):
+    """coordinates — GeoJSON Polygon: [outer, hole1, ...] в порядке (lng, lat)."""
+    outer = [(lat, lng) for lng, lat in coordinates[0]]
+    if outer[0] != outer[-1]:
+        outer.append(outer[0])
+    holes = []
+    for hole in coordinates[1:]:
+        h = [(lat, lng) for lng, lat in hole]
+        if h[0] != h[-1]:
+            h.append(h[0])
+        holes.append(h)
+    try:
+        poly = h3.LatLngPoly(outer, *holes)          # h3 >= 4.1
+    except AttributeError:
+        poly = {"type": "Polygon",
+                "coordinates": [[[lng, lat] for lat, lng in outer]] +
+                                [[[lng, lat] for lat, lng in h] for h in holes]}
+    return h3.polygon_to_cells(poly, res)
+
+
+def _geojson_bounds(geom):
+    """south, north, west, east из GeoJSON Polygon/MultiPolygon."""
+    polys = geom["coordinates"] if geom["type"] == "MultiPolygon" else [geom["coordinates"]]
+    pts = [p for poly in polys for p in poly[0]]
+    lngs = [p[0] for p in pts]
+    lats = [p[1] for p in pts]
+    return min(lats), max(lats), min(lngs), max(lngs)
+
+
+def make_grid(geo, res):
+    geom = geo.get("geojson")
+    if geom and geom.get("type") in ("Polygon", "MultiPolygon"):
+        polys = geom["coordinates"] if geom["type"] == "MultiPolygon" else [geom["coordinates"]]
+        cells = set()
+        for poly in polys:
+            cells.update(_cells_from_polygon(poly, res))
+        if cells:
+            return sorted(cells), True
+    # fallback: граница не нашлась (лимит Nominatim 0,5 МБ) — старый прямоугольник
+    south, north, west, east = geo["bbox"]
     m = 0.02
-    # h3-py ожидает порядок (lat, lng)
     ring = [(south - m, west - m), (south - m, east + m),
             (north + m, east + m), (north + m, west - m),
             (south - m, west - m)]
     try:
-        poly = h3.LatLngPoly(ring)           # h3 >= 4.1: одно кольцо = список точек
+        poly = h3.LatLngPoly(ring)
     except AttributeError:
-        poly = {"type": "Polygon",
-                "coordinates": [[[lng, lat] for lat, lng in ring]]}  # h3 == 4.0
-    cells = h3.polygon_to_cells(poly, res)
-    return sorted(cells)
+        poly = {"type": "Polygon", "coordinates": [[[lng, lat] for lat, lng in ring]]}
+    return sorted(h3.polygon_to_cells(poly, res)), False
 
-# --------------------------------------------------------------------------- #
-#  Overpass
-# --------------------------------------------------------------------------- #
+
 def _query_overpass(q: str) -> dict:
     last_err = None
     for url in OVERPASS_ENDPOINTS:
@@ -148,9 +184,12 @@ def fetch_city_data(city: str):
     geo = geocode_city(city)
     if geo is None:
         return None, None, None
-    bbox = geo["bbox"]
-    # запас на границах — чтобы гексы по краям не были пустыми
-    south, north, west, east = bbox[0] - 0.02, bbox[1] + 0.02, bbox[2] - 0.02, bbox[3] + 0.02
+    if geo.get("geojson") and geo["geojson"].get("type") in ("Polygon", "MultiPolygon"):
+        south, north, west, east = _geojson_bounds(geo["geojson"])  # гексы только в городе
+    else:
+        south, north, west, east = geo["bbox"]
+    # запас на границах — чтобы объекты у края гексов не потерялись
+    south, north, west, east = south - 0.02, north + 0.02, west - 0.02, east + 0.02
     bb = f"{south},{west},{north},{east}"
 
     q_ways = f"""
@@ -531,7 +570,10 @@ data = st.session_state["data"]
 geo, nodes_df, ways_df = data
 st.success(f"📍 {geo['display']}")
 
-grid = make_grid(geo["bbox"], res)
+grid, in_boundary = make_grid(geo, res)
+if not in_boundary:
+    st.info("Граница города не получена от Nominatim (лимит 0,5 МБ) — сетка построена "
+            "по прямоугольной области. Уточните название города или повторите попытку.")
 if len(grid) > MAX_GRID_CELLS:
     st.error(f"Сетка слишком велика ({len(grid)} гексов при res {res}). "
              f"Понизьте resolution до 7.")
