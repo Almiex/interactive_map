@@ -709,8 +709,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     if vmax <= 0:
         st.warning("Нет данных для выбранного слоя в этом городе.")
         vmax = 1.0
-    cm = LinearColormap(COLORS, vmin=0, vmax=vmax)
-    cm.caption = f"{map_type} — {unit}"
+    cm = LinearColormap(COLORS, vmin=0, vmax=1)  # цвет по доле максимума
+    cm_legend = LinearColormap(COLORS, vmin=0, vmax=vmax)  # легенда — в реальных единицах
+    cm_legend.caption = f"{map_type} — {unit}"
 
     extra_cols = list(hex_extra.columns) if hex_extra is not None else []
     # ключи свойств — машинно-безопасные (x0, x1…): русские ключи с пробелами
@@ -738,9 +739,10 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 
     def _style(f):
         v = f["properties"]["v"]
-        # ноль — почти прозрачный; ненулевые — прозрачность растёт по корневой шкале
-        opacity = 0.03 if v <= 0 else 0.18 + 0.42 * (v / vmax) ** 0.5
-        return {"fillColor": cm(v), "color": "#555555", "weight": 0.6,
+        # квадратичное раскрытие: жёлтое начинается раньше, низ не сливается в синее
+        t = (v / vmax) ** 0.5 if vmax > 0 else 0.0
+        opacity = 0.03 if v <= 0 else 0.20 + 0.40 * t
+        return {"fillColor": cm(t), "color": "#555555", "weight": 0.6,
                 "fillOpacity": opacity}
 
     extra_aliases = extra_aliases or {}
@@ -754,7 +756,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         ),
     ).add_to(m)
 
-    cm.add_to(m)
+    cm_legend.add_to(m)
 
     # легенда типов точек — каноничный паттерн MacroElement (стабилен в streamlit-folium)
     if legend:
