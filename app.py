@@ -1039,11 +1039,7 @@ with st.spinner("Считаю агрегаты по гексам…"):
 if map_type.startswith(("1.", "2.")):
     grid = populated_with_ring(grid, series)
 
-# защита от перегрузки карты: не рисуем больше 2 500 точек (счётчики в гексах полные)
-if points and len(points) > 2500:
-    st.caption(f"Объектов слишком много для точек ({len(points):,}) — на карте показаны "
-               f"первые 2 500. Подсчёт в гексах и тултипах полный.")
-    points = points[:2500]
+# лимита на точки нет: они рисуются одним GeoJSON-слоем и браузер это выдерживает
 
 marker = None
 if address.strip():
