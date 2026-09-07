@@ -816,14 +816,31 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 # --------------------------------------------------------------------------- #
 #  Kontur Population (локальный файл)
 # --------------------------------------------------------------------------- #
-def load_kontur(file, res):
-    """Файл GeoJSON/GeoParquet Kontur Population -> DataFrame[h3, population]."""
+def load_kontur(file, res, bbox=None):
+    """Файл GeoJSON/GeoParquet/GeoPackage Kontur Population -> DataFrame[h3, population].
+    bbox=[south, north, west, east] — обрезать датасет под город (сильно быстрее)."""
     name = file.name.lower()
     if name.endswith(".parquet"):
-        import geopandas as _gpd
-        gdf = _gpd.read_parquet(file)
+        gdf = gpd.read_parquet(file)
+    elif name.endswith(".gpkg"):
+        # geopandas не читает GeoPackage из file-like — пишем во временный файл
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
+            tmp.write(file.getvalue())
+            tmp_path = tmp.name
+        try:
+            gdf = gpd.read_file(tmp_path)
+        finally:
+            os.unlink(tmp_path)
     else:
         gdf = gpd.read_file(file)
+    if bbox is not None:  # предварительная обрезка под город
+        south, north, west, east = bbox
+        gdf = gdf.cx[west - 0.05:east + 0.05, south - 0.05:north + 0.05]
+        if gdf.empty:
+            st.error("Kontur-файл не пересекается с городом.")
+            return None
+
     pop_col = next((c for c in gdf.columns if c.lower() in
                     ("population", "pop", "count")), None)
     if pop_col is None:
@@ -832,7 +849,12 @@ def load_kontur(file, res):
     gdf = gdf[[pop_col, "geometry"]].rename(columns={pop_col: "population"})
     gdf = gdf[gdf["population"] > 0]
     if "h3" in gdf.columns:
-        cells = gdf["h3"].astype(str)
+        raw = gdf["h3"]
+        if raw.dtype == object or str(raw.dtype).startswith("str"):
+            cells = raw.astype(str)
+        else:
+            # Kontur хранит h3 как целое — переводим в hex-строку
+            cells = raw.apply(lambda x: format(int(x), "x"))
     else:
         cent = gdf.geometry.centroid
         cells = [h3.latlng_to_cell(y, x, res) for y, x in zip(cent.y, cent.x)]
@@ -897,11 +919,13 @@ with st.sidebar:
         if src.startswith("Суррогат"):
             m2_per_person = st.slider("Норма м² жилья на человека", 15, 60, 30)
         else:
-            f = st.file_uploader("Файл Kontur Population (.geojson / .parquet)",
-                                 type=["geojson", "json", "parquet"])
+            f = st.file_uploader("Файл Kontur Population (.gpkg / .geojson / .parquet)",
+                                 type=["gpkg", "geojson", "json", "parquet"])
             if f is not None:
                 with st.spinner("Загружаю Kontur Population…"):
-                    kontur_df = load_kontur(f, res)
+                    _prev = (st.session_state.get("data") or {}).get("geo")
+                    kontur_df = load_kontur(f, res,
+                                            _prev["bbox"] if _prev else None)
 
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
