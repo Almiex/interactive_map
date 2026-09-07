@@ -704,6 +704,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     cm.caption = f"{map_type} — {unit}"
 
     extra_cols = list(hex_extra.columns) if hex_extra is not None else []
+    # ключи свойств — машинно-безопасные (x0, x1…): русские ключи с пробелами
+    # вставляются folium в JS-тултип и могут уронить весь скрипт карты
+    safe_cols = {c: f"x{i}" for i, c in enumerate(extra_cols)}
     # вся сетка — один GeoJSON FeatureCollection (быстро на тысячах гексов)
     feats = []
     for cell in grid:
@@ -715,7 +718,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         props = {"v": rv}
         # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
         for c in extra_cols:
-            props[c] = float(hex_extra.loc[cell, c]) if cell in hex_extra.index else 0
+            props[safe_cols[c]] = float(hex_extra.loc[cell, c]) \
+                if cell in hex_extra.index else 0
         feats.append({
             "type": "Feature",
             "properties": props,
@@ -736,7 +740,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         gj,
         style_function=_style,
         tooltip=folium.GeoJsonTooltip(
-            fields=["v"] + extra_cols, aliases=aliases, localize=True,
+            fields=["v"] + [safe_cols[c] for c in extra_cols],
+            aliases=aliases, localize=True,
         ),
     ).add_to(m)
 
