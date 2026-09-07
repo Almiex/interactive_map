@@ -113,13 +113,17 @@ def geocode_city(city: str):
 # --------------------------------------------------------------------------- #
 def make_grid(bbox, res):
     south, north, west, east = bbox
-    margin = 0.02
-    coords = [[
-        [west - margin, south - margin], [east + margin, south - margin],
-        [east + margin, north + margin], [west - margin, north + margin],
-        [west - margin, south - margin],
-    ]]
-    cells = h3.polygon_to_cells({"type": "Polygon", "coordinates": coords}, res)
+    m = 0.02
+    # h3-py ожидает порядок (lat, lng)
+    ring = [(south - m, west - m), (south - m, east + m),
+            (north + m, east + m), (north + m, west - m),
+            (south - m, west - m)]
+    try:
+        poly = h3.LatLngPoly(*ring)          # h3 >= 4.1
+    except AttributeError:
+        poly = {"type": "Polygon",
+                "coordinates": [[[lng, lat] for lat, lng in ring]]}  # h3 == 4.0
+    cells = h3.polygon_to_cells(poly, res)
     return sorted(cells)
 
 # --------------------------------------------------------------------------- #
@@ -306,8 +310,8 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         if b.empty:
             return pd.Series(dtype=float), "чел. (оценка)"
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
-        vol = b.assign(cell=cells).groupby("cell").apply(
-            lambda g: (g["area"] * g["levels"]).sum(), include_groups=False)
+        vol = (b.assign(cell=cells, vol=b["area"] * b["levels"])
+                 .groupby("cell")["vol"].sum())
         return vol / m2_per_person, f"чел. (суррогат, {m2_per_person} м²/чел)"
 
     if map_type.startswith("2."):
@@ -315,8 +319,8 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         if b.empty:
             return pd.Series(dtype=float), "м²"
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
-        vol = b.assign(cell=cells).groupby("cell").apply(
-            lambda g: (g["area"] * g["levels"]).sum(), include_groups=False)
+        vol = (b.assign(cell=cells, vol=b["area"] * b["levels"])
+                 .groupby("cell")["vol"].sum())
         return vol, "м² застройки"
 
     if map_type.startswith("3."):
@@ -419,11 +423,10 @@ def render_map(grid, series, unit, geo, map_type):
         ).add_to(m)
 
     cm.add_to(m)
-    sw = [min(h3.cell_to_boundary(c)[i][0] for c in grid for i in range(6)),
-          min(h3.cell_to_boundary(c)[i][1] for c in grid for i in range(6))]
-    ne = [max(h3.cell_to_boundary(c)[i][0] for c in grid for i in range(6)),
-          max(h3.cell_to_boundary(c)[i][1] for c in grid for i in range(6))]
-    m.fit_bounds([sw, ne])
+    bounds = [h3.cell_to_boundary(c) for c in grid]
+    lats = [p[0] for b_ in bounds for p in b_]
+    lngs = [p[1] for b_ in bounds for p in b_]
+    m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
     st_folium(m, width=1150, height=680, returned_objects=[])
 
 # --------------------------------------------------------------------------- #
