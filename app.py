@@ -29,6 +29,9 @@ from branca.colormap import LinearColormap
 OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
+    "https://overpass.maps.mail.ru/api/interpreter",
 ]
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
@@ -203,17 +206,19 @@ def make_grid(geo, res):
 
 
 def _query_overpass(q: str) -> dict:
-    last_err = None
+    errors = []
     for url in OVERPASS_ENDPOINTS:
-        try:
-            r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=420)
-            if r.status_code == 200:
-                return r.json()
-            last_err = f"{url}: HTTP {r.status_code}"
-        except Exception as e:  # noqa: BLE001
-            last_err = f"{url}: {e}"
-        time.sleep(2)
-    raise RuntimeError(f"Overpass недоступен: {last_err}")
+        for attempt in range(2):  # два захода на зеркало с нарастающей паузой
+            try:
+                r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=600)
+                if r.status_code == 200:
+                    return r.json()
+                errors.append(f"{url}: HTTP {r.status_code}")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{url}: {type(e).__name__}")
+            time.sleep(3 + 3 * attempt)
+    raise RuntimeError("Overpass недоступен на всех зеркалах: "
+                       + "; ".join(errors[-4:]))
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_city_data(city: str):
@@ -236,7 +241,6 @@ def fetch_city_data(city: str):
   way["highway"]({bb});
   way["amenity"]({bb});
   way["shop"]({bb});
-  way["leisure"]({bb});
   way["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
   way["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
 );
