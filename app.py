@@ -531,13 +531,16 @@ def render_map(grid, series, unit, geo, map_type, marker=None):
         })
     gj = {"type": "FeatureCollection", "features": feats}
 
+    def _style(f):
+        v = f["properties"]["v"]
+        # ноль — почти прозрачный; ненулевые — прозрачность растёт по корневой шкале
+        opacity = 0.03 if v <= 0 else 0.18 + 0.42 * (v / vmax) ** 0.5
+        return {"fillColor": cm(v), "color": "#555555", "weight": 0.6,
+                "fillOpacity": opacity}
+
     folium.GeoJson(
         gj,
-        style_function=lambda f: {
-            "fillColor": cm(f["properties"]["v"]),
-            "color": "#555555", "weight": 0.6,
-            "fillOpacity": 0.55,
-        },
+        style_function=_style,
         tooltip=folium.GeoJsonTooltip(
             fields=["v"], aliases=[f"{unit}: "], localize=True,
         ),
