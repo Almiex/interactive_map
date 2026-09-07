@@ -791,8 +791,13 @@ if load_btn:
                                 "nodes": nodes_df, "ways": ways_df}
 
 stored = st.session_state.get("data")
+# миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
+if stored is not None and (not isinstance(stored, dict) or stored.get("geo") is None):
+    st.session_state.pop("data", None)
+    stored = None
 if stored is None:
-    st.info("Введите город в боковой панели и нажмите «Построить сетку».")
+    st.info("Введите город в боковой панели и нажмите «Построить сетку». "
+            "(После обновления приложения данные нужно загрузить заново.)")
     st.stop()
 
 geo, nodes_df, ways_df = stored["geo"], stored["nodes"], stored["ways"]
