@@ -117,6 +117,58 @@ TRAFFIC_MODES = [
     "Автомобильный (primary/secondary/tertiary и выше)",
 ]
 
+SOCIAL_CARE_RE = re.compile(
+    r"престарел|соцзащит|социальн|реабилитац|инвалид", re.IGNORECASE)
+
+# группа -> (цвет точки, matcher по тегам). None = особый случай (общежития-здания)
+SOCIAL_GROUPS = {
+    "Образование": ("#1f77b4",
+                    lambda t: t.get("amenity") in
+                    {"kindergarten", "school", "college", "university",
+                     "arts_centre", "music_school"}),
+    "Культура и досуг": ("#9467bd",
+                         lambda t: t.get("amenity") in
+                         {"theatre", "museum", "library", "cinema", "community_centre"}
+                         or t.get("leisure") == "park"),
+    "Физкультура и спорт": ("#2ca02c",
+                            lambda t: t.get("leisure") in
+                            {"stadium", "sports_centre", "fitness_centre", "pitch",
+                             "swimming_pool", "track"}),
+    "Социальная защита": ("#8c564b",
+                          lambda t: t.get("amenity") == "social_facility"
+                          or bool(SOCIAL_CARE_RE.search(t.get("name", "")))),
+    "Жилищный фонд (общежития)": ("#7f7f7f", None),
+}
+
+
+# лаборатории/диагностика выделяем из amenity=doctors по названию
+LAB_RE = re.compile(
+    r"invitro|инвитро|гемотест|gemotest|хеликс|helix|кдл|лаборатор|диагност",
+    re.IGNORECASE)
+
+
+def is_med_lab(tags: dict) -> bool:
+    text = f"{tags.get('name', '')} {tags.get('brand', '')}"
+    return bool(LAB_RE.search(text))
+
+
+# тип -> (цвет точки, matcher по тегам). Моноклиники в OSM тегируются как
+# amenity=doctors — отделить их от кабинетов нельзя, честно пишем оба.
+COMPETITOR_TYPES = {
+    "Аптеки": ("#1f6fd6", lambda t: t.get("amenity") == "pharmacy"),
+    "Больницы": ("#d62728", lambda t: t.get("amenity") == "hospital"),
+    "Клиники и медцентры": ("#2ca02c", lambda t: t.get("amenity") == "clinic"),
+    "Диагностика и лаборатории": ("#9467bd",
+                                  lambda t: t.get("amenity") == "doctors" and is_med_lab(t)),
+    "Врачебные кабинеты и моноклиники": ("#ff7f0e",
+                                         lambda t: t.get("amenity") == "doctors"
+                                         and not is_med_lab(t)),
+    "Травмпункты": ("#8B4513",
+                    lambda t: t.get("emergency") == "trauma_centre"
+                    or "травмпункт" in t.get("name", "").lower()),
+}
+
+
 AUTO_HIGHWAYS = {"motorway", "motorway_link", "trunk", "trunk_link", "primary",
                  "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
 PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_street"}
