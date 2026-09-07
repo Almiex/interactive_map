@@ -52,23 +52,6 @@ MAP_TYPES = [
     "8. Мед. учреждения и аптеки",
 ]
 
-POI_CATEGORIES = {
-    "Все POI (любые)": None,
-    "Продуктовые магазины": ("shop", {"supermarket", "convenience", "greengrocer",
-                                      "deli", "bakery", "butcher", "seafood"}),
-    "Общепит": ("amenity", {"restaurant", "cafe", "fast_food", "bar", "pub",
-                            "food_court", "biergarten"}),
-    "Аптеки": ("amenity", {"pharmacy"}),
-    "Салоны красоты": ("shop", {"hairdresser", "beauty", "massage", "tattoo"}),
-    "Спорт и фитнес": ("leisure", {"fitness_centre", "sports_centre", "pitch",
-                                   "stadium", "track", "swimming_pool"}),
-    "Банки и банкоматы": ("amenity", {"bank", "atm", "bureau_de_change"}),
-    "Образование": ("amenity", {"school", "kindergarten", "college", "university",
-                                "library", "driving_school", "language_school"}),
-    "Офисы и услуги (office/craft)": "__OFFICE_CRAFT__",
-    "ПВЗ маркетплейсов (Ozon, WB, СДЭК, Авито, Яндекс)": "__PVZ__",
-}
-
 # ПВЗ в OSM не имеют единого тега — находим по названию/бренду
 PVZ_RE = re.compile(
     r"ozon|озон|wildberries|вайлдберриз|сдэк|cdek|авито|avito|"
@@ -80,35 +63,47 @@ def is_pvz(tags: dict) -> bool:
     text = f"{tags.get('name', '')} {tags.get('brand', '')}"
     return bool(PVZ_RE.search(text) or PVZ_WB_RE.search(text))
 
-SOCIAL_CATEGORIES = {
-    "Школы": ("amenity", {"school"}),
-    "Детские сады": ("amenity", {"kindergarten"}),
-    "Спортплощадки": ("leisure", {"pitch", "sports_centre", "stadium", "fitness_centre"}),
-}
 
-# лаборатории/диагностика выделяем из amenity=doctors по названию
-LAB_RE = re.compile(
-    r"invitro|инвитро|гемотест|gemotest|хеликс|helix|кдл|лаборатор|диагност",
-    re.IGNORECASE)
+def _name_of(tags: dict) -> str:
+    return f"{tags.get('name', '')} {tags.get('brand', '')}".lower()
 
 
-def is_med_lab(tags: dict) -> bool:
-    text = f"{tags.get('name', '')} {tags.get('brand', '')}"
-    return bool(LAB_RE.search(text))
-
-
-# тип -> (цвет точки, matcher по тегам). Моноклиники в OSM тегируются как
-# amenity=doctors — отделить их от кабинетов нельзя, честно пишем оба.
-COMPETITOR_TYPES = {
+# категория -> (цвет точки, matcher по тегам)
+POI_CATEGORIES = {
+    "Все POI": ("#666666",
+                lambda t: any(k in t for k in ("amenity", "shop", "craft", "office"))),
+    "Торговые центры": ("#e377c2",
+                        lambda t: t.get("shop") in {"mall", "department_store"}
+                        or re.search(r"торгов(ый|ого) центр|(^|\s)тц(\s|$)|молл", _name_of(t))),
+    "Бизнес-центры и офисы": ("#17becf",
+                              lambda t: "office" in t
+                              or re.search(r"бизнес[ -]?центр|business center|(^|\s)бц(\s|$)",
+                                           _name_of(t))),
+    "Продуктовые магазины": ("#2ca02c",
+                             lambda t: t.get("shop") in
+                             {"supermarket", "convenience", "greengrocer", "deli",
+                              "butcher", "bakery", "seafood"}),
+    "Общепит": ("#ff7f0e",
+                lambda t: t.get("amenity") in
+                {"restaurant", "cafe", "fast_food", "bar", "pub",
+                 "food_court", "biergarten"}),
     "Аптеки": ("#1f6fd6", lambda t: t.get("amenity") == "pharmacy"),
-    "Больницы": ("#d62728", lambda t: t.get("amenity") == "hospital"),
-    "Клиники и медцентры": ("#2ca02c", lambda t: t.get("amenity") == "clinic"),
-    "Диагностика и лаборатории": ("#9467bd",
-                                  lambda t: t.get("amenity") == "doctors" and is_med_lab(t)),
-    "Врачебные кабинеты и моноклиники": ("#ff7f0e",
-                                         lambda t: t.get("amenity") == "doctors"
-                                         and not is_med_lab(t)),
+    "Салоны красоты и барбершопы": ("#9467bd",
+                                    lambda t: t.get("shop") in
+                                    {"hairdresser", "beauty", "massage", "tattoo"}),
+    "Спорт и фитнес": ("#8c564b",
+                       lambda t: t.get("leisure") in
+                       {"fitness_centre", "sports_centre", "pitch", "stadium",
+                        "track", "swimming_pool"}),
+    "Банки и банкоматы": ("#bcbd22",
+                          lambda t: t.get("amenity") in {"bank", "atm", "bureau_de_change"}),
+    "Образование": ("#1f77b4",
+                    lambda t: t.get("amenity") in
+                    {"school", "kindergarten", "college", "university", "library",
+                     "driving_school", "language_school", "music_school", "arts_centre"}),
+    "ПВЗ маркетплейсов (Ozon, WB, СДЭК, Авито, Яндекс)": ("#d62728", is_pvz),
 }
+
 
 TRANSPORT_MODES = [
     "Остановки общественного транспорта (кол-во)",
@@ -256,6 +251,8 @@ def fetch_city_data(city: str):
   way["shop"]({bb});
   way["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
   way["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
+  way["emergency"="trauma_centre"]({bb});
+  way["building"="dormitory"]({bb});
 );
 out geom;"""
 
@@ -271,6 +268,7 @@ out geom;"""
   node["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
   node["highway"~"^(bus_stop|bus_station|tram_stop)$"]({bb});
   node["public_transport"~"^(platform|stop_position)$"]({bb});
+  node["emergency"="trauma_centre"]({bb});
 );
 out body;"""
 
@@ -379,6 +377,21 @@ def roads_gdf(ways_df):
     metric = gdf.to_crs(gdf.estimate_utm_crs())
     gdf["len_km"] = metric.length.values / 1000.0
     return gdf
+
+def dorm_centroids(ways_df):
+    """Общежития (building=dormitory) — центроиды для точек и подсчёта по гексам."""
+    empty = pd.DataFrame(columns=["lat", "lon"])
+    if ways_df.empty:
+        return empty
+    mask = ways_df["tags"].apply(lambda t: t.get("building") == "dormitory")
+    sub = ways_df[mask]
+    if sub.empty:
+        return empty
+    return pd.DataFrame({
+        "lat": sub["coords"].apply(lambda c: float(np.mean([p[1] for p in c]))),
+        "lon": sub["coords"].apply(lambda c: float(np.mean([p[0] for p in c]))),
+    })
+
 
 def parking_gdf(ways_df):
     """Парковки-way: площадь и центроид."""
@@ -535,23 +548,17 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         return idx.round(1), "индекс 0-100", extra, None
 
     if map_type.startswith("4."):
-        spec = POI_CATEGORIES[sub_option]
-        if spec == "__OFFICE_CRAFT__":
-            mn = nodes_df["tags"].apply(lambda t: "office" in t or "craft" in t)
-            mw = wcent["tags"].apply(lambda t: "office" in t or "craft" in t)
-        elif spec == "__PVZ__":
-            mn = nodes_df["tags"].apply(is_pvz)
-            mw = wcent["tags"].apply(is_pvz)
-        elif spec is None:  # все POI
-            keys = ("amenity", "shop", "craft", "office")
-            mn = nodes_df["tags"].apply(lambda t: any(k in t for k in keys))
-            mw = wcent["tags"].apply(lambda t: any(k in t for k in keys))
-        else:
-            key, values = spec
-            mn = mask_by_tag(nodes_df, key, values)
-            mw = mask_by_tag(wcent, key, values)
+        color, matcher = POI_CATEGORIES[sub_option]
+        mn = nodes_df["tags"].apply(matcher)
+        mw = wcent["tags"].apply(matcher)
         s = pd.concat([hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)])
-        return s.groupby(level=0).sum(), "объектов", None, None
+        points = []
+        for df_ in (nodes_df[mn], wcent[mw]):
+            for _, row in df_.iterrows():
+                points.append({"lat": row["lat"], "lon": row["lon"],
+                               "color": color, "type": sub_option,
+                               "label": row["tags"].get("name", sub_option)})
+        return s.groupby(level=0).sum(), "объектов", None, points
 
     if map_type.startswith("5."):
         if sub_option.startswith("Остановки"):
@@ -582,13 +589,31 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         return s / hex_area_km2(res), "км/км²", None, None
 
     if map_type.startswith("6."):
-        parts = []
-        for cat in sub_option:
-            key, values = SOCIAL_CATEGORIES[cat]
-            parts.append(hex_counts(nodes_df, res, mask_by_tag(nodes_df, key, values)))
-            parts.append(hex_counts(wcent, res, mask_by_tag(wcent, key, values)))
-        s = pd.concat([p for p in parts if len(p)]).groupby(level=0).sum()
-        return s, "объектов", None, None
+        groups = sub_option or list(SOCIAL_GROUPS)
+        type_series, points = {}, []
+        for name in groups:
+            color, matcher = SOCIAL_GROUPS[name]
+            if matcher is None:  # общежития — отдельный источник
+                d = dorm_centroids(ways_df)
+                type_series[name] = hex_counts(d, res)
+                for _, row in d.iterrows():
+                    points.append({"lat": row["lat"], "lon": row["lon"],
+                                   "color": color, "type": name,
+                                   "label": "общежитие"})
+                continue
+            mn = nodes_df["tags"].apply(matcher)
+            mw = wcent["tags"].apply(matcher)
+            type_series[name] = pd.concat(
+                [hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)]
+            ).groupby(level=0).sum()
+            for df_ in (nodes_df[mn], wcent[mw]):
+                for _, row in df_.iterrows():
+                    points.append({"lat": row["lat"], "lon": row["lon"],
+                                   "color": color, "type": name,
+                                   "label": row["tags"].get("name", name)})
+        extra = pd.DataFrame(type_series).fillna(0).round(0)
+        total = extra.sum(axis=1) if len(extra) else pd.Series(dtype=float)
+        return total, "объектов", extra, points
 
     if map_type.startswith("7."):
         # ---- Трафик: оба показателя нормируем в индекс 0-100 ----
@@ -789,9 +814,9 @@ with st.sidebar:
     elif map_type.startswith("5."):
         sub_option = st.selectbox("Показатель", TRANSPORT_MODES)
     elif map_type.startswith("6."):
-        sub_option = st.multiselect("Объекты соц. инфраструктуры",
-                                    list(SOCIAL_CATEGORIES.keys()),
-                                    default=list(SOCIAL_CATEGORIES.keys()))
+        sub_option = st.multiselect("Группы соц. инфраструктуры",
+                                    list(SOCIAL_GROUPS.keys()),
+                                    default=list(SOCIAL_GROUPS.keys()))
     elif map_type.startswith("7."):
         sub_option = st.radio("Что раскрашиваем", TRAFFIC_MODES,
                               help="Тултип гекса показывает оба индекса")
@@ -862,6 +887,12 @@ with st.spinner("Считаю агрегаты по гексам…"):
 if map_type.startswith(("1.", "2.")):
     grid = populated_with_ring(grid, series)
 
+# защита от перегрузки карты: не рисуем больше 2 500 точек (счётчики в гексах полные)
+if points and len(points) > 2500:
+    st.caption(f"Объектов слишком много для точек ({len(points):,}) — на карте показаны "
+               f"первые 2 500. Подсчёт в гексах и тултипах полный.")
+    points = points[:2500]
+
 marker = None
 if address.strip():
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
@@ -874,13 +905,27 @@ if address.strip():
     else:
         st.info(f"📌 Метка: {marker['display']}")
 
+if map_type.startswith("7."):
+    st.info("**Как считается индекс трафика.** Берётся суммарная длина дорог нужного "
+            "класса внутри гекса, делится на площадь гекса (км/км²), затем нормируется "
+            "в индекс 0–100 относительно самого загруженного гекса города. "
+            "**Пешеходный**: footway, pedestrian, path, steps, cycleway, living_street. "
+            "**Автомобильный**: motorway–tertiary и съезды. Тултип каждого гекса показывает "
+            "оба индекса сразу. Это интенсивность сети, а не реальные потоки машин — "
+            "для потоков нужны платные данные (TomTom и т.п.).")
+
 c1, c2, c3 = st.columns(3)
 c1.metric("Гексов в сетке", f"{len(grid):,}")
 c2.metric("Resolution", f"res {res} (~{RES_SPACING_KM[res]} км между центрами)")
 c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if len(series) else "—")
 
 legend = None
-if map_type.startswith("8."):
+if map_type.startswith("4."):
+    legend = [(name, color) for name, (color, _) in POI_CATEGORIES.items()]
+elif map_type.startswith("6."):
+    legend = [(name, color) for name, (color, _) in SOCIAL_GROUPS.items()
+              if sub_option is None or name in sub_option]
+elif map_type.startswith("8."):
     legend = [(name, color) for name, (color, _) in COMPETITOR_TYPES.items()]
 
 extra_aliases = None
@@ -890,6 +935,9 @@ if map_type.startswith("3."):
                      "c_auto": "Парковки/АЗС: "}
 elif map_type.startswith("7."):
     extra_aliases = {"ped": "Пешеходный трафик: ", "auto": "Автомобильный трафик: "}
+elif map_type.startswith("6."):
+    extra_aliases = {name: f"{name}: " for name in SOCIAL_GROUPS
+                     if sub_option is None or name in sub_option}
 elif map_type.startswith("8."):
     extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES}
 
