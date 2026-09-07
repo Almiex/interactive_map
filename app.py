@@ -49,7 +49,7 @@ MAP_TYPES = [
     "5. Транспортная доступность",
     "6. Социальная инфраструктура",
     "7. Трафик (индекс, пеший/авто)",
-    "8. Конкурентная среда (медицина)",
+    "8. Мед. учреждения и аптеки",
 ]
 
 POI_CATEGORIES = {
@@ -86,13 +86,28 @@ SOCIAL_CATEGORIES = {
     "Спортплощадки": ("leisure", {"pitch", "sports_centre", "stadium", "fitness_centre"}),
 }
 
-COMPETITOR_TAGS = ("amenity", {"clinic", "doctors", "hospital", "pharmacy"})  # dentist НЕ включаем!
-# тип -> (значения amenity, цвет точки на карте)
+# лаборатории/диагностика выделяем из amenity=doctors по названию
+LAB_RE = re.compile(
+    r"invitro|инвитро|гемотест|gemotest|хеликс|helix|кдл|лаборатор|диагност",
+    re.IGNORECASE)
+
+
+def is_med_lab(tags: dict) -> bool:
+    text = f"{tags.get('name', '')} {tags.get('brand', '')}"
+    return bool(LAB_RE.search(text))
+
+
+# тип -> (цвет точки, matcher по тегам). Моноклиники в OSM тегируются как
+# amenity=doctors — отделить их от кабинетов нельзя, честно пишем оба.
 COMPETITOR_TYPES = {
-    "Аптеки": ({"pharmacy"}, "#1f6fd6"),
-    "Клиники и медцентры": ({"clinic"}, "#2ca02c"),
-    "Врачебные кабинеты": ({"doctors"}, "#ff7f0e"),
-    "Больницы": ({"hospital"}, "#d62728"),
+    "Аптеки": ("#1f6fd6", lambda t: t.get("amenity") == "pharmacy"),
+    "Больницы": ("#d62728", lambda t: t.get("amenity") == "hospital"),
+    "Клиники и медцентры": ("#2ca02c", lambda t: t.get("amenity") == "clinic"),
+    "Диагностика и лаборатории": ("#9467bd",
+                                  lambda t: t.get("amenity") == "doctors" and is_med_lab(t)),
+    "Врачебные кабинеты и моноклиники": ("#ff7f0e",
+                                         lambda t: t.get("amenity") == "doctors"
+                                         and not is_med_lab(t)),
 }
 
 TRANSPORT_MODES = [
@@ -595,12 +610,11 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         return extra["auto"], "индекс автотрафика 0-100", extra, None
 
     if map_type.startswith("8."):
-        # ---- Конкуренты: разбивка по типам + точки на карту ----
-        # приоритет типа, если объект попал в несколько групп
+        # ---- Мед. объекты: разбивка по типам + точки на карту ----
         type_series, points = {}, []
-        for name, (values, color) in COMPETITOR_TYPES.items():
-            mn = mask_by_tag(nodes_df, "amenity", values)
-            mw = mask_by_tag(wcent, "amenity", values)
+        for name, (color, matcher) in COMPETITOR_TYPES.items():
+            mn = nodes_df["tags"].apply(matcher)
+            mw = wcent["tags"].apply(matcher)
             type_series[name] = pd.concat(
                 [hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)]
             ).groupby(level=0).sum()
@@ -611,7 +625,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
                                    "label": row["tags"].get("name", name)})
         extra = pd.DataFrame(type_series).fillna(0).round(0)
         total = extra.sum(axis=1) if len(extra) else pd.Series(dtype=float)
-        return total, "конкурентов", extra, points
+        return total, "мед. объектов", extra, points
 
     return pd.Series(dtype=float), "", None, None
 
