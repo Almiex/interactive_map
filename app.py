@@ -112,6 +112,22 @@ def geocode_city(city: str):
     }
 
 # --------------------------------------------------------------------------- #
+#  Геокодинг адреса (улица, дом) — опционально
+# --------------------------------------------------------------------------- #
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_address(address: str):
+    r = requests.get(NOMINATIM_URL, params={
+        "q": address, "format": "json", "limit": 1, "accept-language": "ru"
+    }, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if not data:
+        return None
+    return {"lat": float(data[0]["lat"]), "lon": float(data[0]["lon"]),
+            "display": data[0]["display_name"]}
+
+
+# --------------------------------------------------------------------------- #
 #  H3-сетка
 # --------------------------------------------------------------------------- #
 def _cells_from_polygon(coordinates, res):
@@ -490,7 +506,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 # --------------------------------------------------------------------------- #
 COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
 
-def render_map(grid, series, unit, geo, map_type):
+def render_map(grid, series, unit, geo, map_type, marker=None):
     center = [geo["lat"], geo["lon"]]
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
 
@@ -532,6 +548,13 @@ def render_map(grid, series, unit, geo, map_type):
     lats = [p[0] for b_ in bounds for p in b_]
     lngs = [p[1] for b_ in bounds for p in b_]
     m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
+
+    if marker:
+        folium.Marker(
+            location=[marker["lat"], marker["lon"]],
+            tooltip=marker["display"],
+            icon=folium.Icon(color="blue", icon="glyphicon-map-marker"),
+        ).add_to(m)
     st_folium(m, width=1150, height=680, returned_objects=[])
 
 
@@ -576,6 +599,9 @@ st.caption("Одна карта на экран. Источники: OpenStreetM
 with st.sidebar:
     st.header("Город")
     city = st.text_input("Введите город", value="Новосибирск")
+    address = st.text_input("Улица и дом (необязательно)",
+                            placeholder="пр. Ленина, 1",
+                            help="Если заполнить, на карте появится метка по этому адресу")
     load_btn = st.button("🔍 Построить сетку", type="primary")
 
     st.header("Сетка H3")
@@ -654,12 +680,21 @@ with st.spinner("Считаю агрегаты по гексам…"):
 if map_type.startswith(("1.", "2.")):
     grid = populated_with_ring(grid, series)
 
+marker = None
+if address.strip():
+    with st.spinner(f"Ищу адрес «{address.strip()}»…"):
+        marker = geocode_address(f"{address.strip()}, {city}")
+    if marker is None:
+        st.warning(f"Адрес «{address.strip()}» не найден — метка не поставлена.")
+    else:
+        st.info(f"📌 Метка: {marker['display']}")
+
 c1, c2, c3 = st.columns(3)
 c1.metric("Гексов в сетке", f"{len(grid):,}")
 c2.metric("Resolution", f"res {res} (~{RES_SPACING_KM[res]} км между центрами)")
 c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if len(series) else "—")
 
-render_map(grid, series, unit, geo, map_type)
+render_map(grid, series, unit, geo, map_type, marker=marker)
 st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное заселение и "
            "незавершённое строительство. Для точной численности загрузите Kontur Population "
            "(data.humdata.org, датасет «Kontur Population»).")
