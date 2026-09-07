@@ -119,7 +119,7 @@ def make_grid(bbox, res):
             (north + m, east + m), (north + m, west - m),
             (south - m, west - m)]
     try:
-        poly = h3.LatLngPoly(*ring)          # h3 >= 4.1
+        poly = h3.LatLngPoly(ring)           # h3 >= 4.1: одно кольцо = список точек
     except AttributeError:
         poly = {"type": "Polygon",
                 "coordinates": [[[lng, lat] for lat, lng in ring]]}  # h3 == 4.0
