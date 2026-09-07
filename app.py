@@ -69,8 +69,6 @@ def _name_of(tags: dict) -> str:
 
 # категория -> (цвет точки, matcher по тегам)
 POI_CATEGORIES = {
-    "Все POI": ("#666666",
-                lambda t: any(k in t for k in ("amenity", "shop", "craft", "office"))),
     "Торговые центры": ("#e377c2",
                         lambda t: t.get("shop") in {"mall", "department_store"}
                         or re.search(r"торгов(ый|ого) центр|(^|\s)тц(\s|$)|молл", _name_of(t))),
@@ -599,12 +597,9 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         return idx.round(1), "индекс 0-100", extra, None
 
     if map_type.startswith("4."):
-        # «Все POI» — это НЕ отдельная категория, а режим «показать все подразделы»:
-        # точка попадает строго в первую подходящую категорию (без двойного счёта)
-        if not sub_option or "Все POI" in sub_option:
-            cats = [c for c in POI_CATEGORIES if c != "Все POI"]
-        else:
-            cats = [c for c in POI_CATEGORIES if c in sub_option]
+        # пустой выбор / Select all = все подразделы; точка попадает строго
+        # в первую подходящую категорию (без двойного счёта)
+        cats = [c for c in POI_CATEGORIES if not sub_option or c in sub_option]
         matchers = [(name, POI_CATEGORIES[name][0], POI_CATEGORIES[name][1])
                     for name in cats]
 
@@ -875,8 +870,8 @@ with st.sidebar:
         sub_option = st.multiselect(
             "Категории POI", list(POI_CATEGORIES.keys()),
             default=["Торговые центры", "Бизнес-центры и офисы", "Общепит"],
-            help="Цвет гекса — суммарное число объектов выбранных категорий, "
-                 "точки окрашены по категориям")
+            help="Пустой выбор или Select all = все подразделы. "
+                 "Цвет гекса — суммарное число объектов, точки окрашены по категориям")
     elif map_type.startswith("5."):
         sub_option = st.multiselect("Группы соц. инфраструктуры",
                                     list(SOCIAL_GROUPS.keys()),
@@ -996,9 +991,7 @@ c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if l
 
 legend = None
 if map_type.startswith("4."):
-    _sel = ([c for c in POI_CATEGORIES if c != "Все POI"]
-            if (not sub_option or "Все POI" in sub_option)
-            else [c for c in POI_CATEGORIES if c in sub_option])
+    _sel = [c for c in POI_CATEGORIES if not sub_option or c in sub_option]
     legend = [(name, color) for name, (color, _) in POI_CATEGORIES.items()
               if name in _sel]
 elif map_type.startswith("5."):
@@ -1013,9 +1006,7 @@ if map_type.startswith("3."):
                      "c_biz": "Банки/офисы: ", "c_transit": "Остановки: ",
                      "c_auto": "Парковки/АЗС: "}
 elif map_type.startswith("4."):
-    _sel = ([c for c in POI_CATEGORIES if c != "Все POI"]
-            if (not sub_option or "Все POI" in sub_option)
-            else [c for c in POI_CATEGORIES if c in sub_option])
+    _sel = [c for c in POI_CATEGORIES if not sub_option or c in sub_option]
     extra_aliases = {name: f"{name}: " for name in POI_CATEGORIES if name in _sel}
 elif map_type.startswith("6."):
     extra_aliases = {"ped": "Пешеходный трафик: ", "auto": "Автомобильный трафик: "}
