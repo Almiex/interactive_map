@@ -83,8 +83,6 @@ def is_pvz(tags: dict) -> bool:
 SOCIAL_CATEGORIES = {
     "Школы": ("amenity", {"school"}),
     "Детские сады": ("amenity", {"kindergarten"}),
-    "Больницы": ("amenity", {"hospital"}),
-    "Поликлиники/клиники": ("amenity", {"clinic", "doctors"}),
     "Спортплощадки": ("leisure", {"pitch", "sports_centre", "stadium", "fitness_centre"}),
 }
 
@@ -105,8 +103,8 @@ TRANSPORT_MODES = [
 ]
 
 TRAFFIC_MODES = [
-    "Автомобильный (primary/secondary/tertiary и выше)",
     "Пешеходный (footway/pedestrian/path и т.п.)",
+    "Автомобильный (primary/secondary/tertiary и выше)",
 ]
 
 AUTO_HIGHWAYS = {"motorway", "motorway_link", "trunk", "trunk_link", "primary",
@@ -463,7 +461,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
         vol = (b.assign(cell=cells, vol=b["area"] * b["levels"])
                  .groupby("cell")["vol"].sum())
-        return vol, "м² застройки", None, None
+        return vol, "м² суммарной площади жилых зданий", None, None
 
     if map_type.startswith("3."):
         # ---- Индекс спроса (суррогат платёжеспособности), 0-100 ----
@@ -643,9 +641,12 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         boundary = h3.cell_to_boundary(cell)          # [(lat,lng),...]
         ring = [[lng, lat] for lat, lng in boundary]
         ring.append(ring[0])
-        props = {"v": round(float(vals.get(cell, 0.0)), 2)}
-        if hex_extra is not None and cell in hex_extra.index:
-            props.update(hex_extra.loc[cell].to_dict())
+        v = float(vals.get(cell, 0.0))
+        rv = round(v, 2) if vmax < 100 else round(v)  # большие числа — целыми
+        props = {"v": rv}
+        # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
+        for c in extra_cols:
+            props[c] = float(hex_extra.loc[cell, c]) if cell in hex_extra.index else 0
         feats.append({
             "type": "Feature",
             "properties": props,
@@ -660,8 +661,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         return {"fillColor": cm(v), "color": "#555555", "weight": 0.6,
                 "fillOpacity": opacity}
 
-    aliases = ["Значение: "] + [extra_aliases.get(c, c) for c in extra_cols] \
-        if extra_aliases else ["Значение: "] + extra_cols
+    extra_aliases = extra_aliases or {}
+    aliases = [f"{unit}: "] + [extra_aliases.get(c, c) for c in extra_cols]
     folium.GeoJson(
         gj,
         style_function=_style,
