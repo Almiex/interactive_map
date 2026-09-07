@@ -763,15 +763,28 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             "{% endmacro %}")
         m.get_root().add_child(macro)
 
-    # точки конкурентов (или других объектов) поверх гексов, цвет по типу
+    # точки объектов поверх гексов — ОДИН GeoJSON-слой (на тысячах точек
+    # отдельные CircleMarker с тултипами ломают/тормозят карту)
     if points:
-        for p in points:
-            folium.CircleMarker(
-                location=[p["lat"], p["lon"]],
-                radius=5, color=p["color"], weight=1.5,
-                fill=True, fill_color=p["color"], fill_opacity=0.9,
-                tooltip=f'{p["type"]}: {p["label"]}',
-            ).add_to(m)
+        def _clean(s):
+            return re.sub(r'["\'<>\n\r\\]', " ", str(s))[:120]
+
+        pfeats = [{
+            "type": "Feature",
+            "properties": {"tip": f'{_clean(p["type"])}: {_clean(p["label"])}',
+                           "c": p["color"]},
+            "geometry": {"type": "Point",
+                         "coordinates": [p["lon"], p["lat"]]},
+        } for p in points]
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": pfeats},
+            marker=folium.CircleMarker(radius=5, weight=1.5,
+                                       fill=True, fill_opacity=0.9),
+            style_function=lambda f: {"color": f["properties"]["c"],
+                                      "fillColor": f["properties"]["c"]},
+            tooltip=folium.GeoJsonTooltip(fields=["tip"], aliases=[""],
+                                          localize=False),
+        ).add_to(m)
 
     bounds = [h3.cell_to_boundary(c) for c in grid]
     lats = [p[0] for b_ in bounds for p in b_]
