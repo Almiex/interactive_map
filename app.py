@@ -687,16 +687,21 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 
     cm.add_to(m)
 
-    # легенда типов точек — HTML внутри карты (Streamlit-маркдаун вырезает style)
+    # легенда типов точек — каноничный паттерн MacroElement (стабилен в streamlit-folium)
     if legend:
+        from branca.element import MacroElement, Template
         rows = "".join(
             f'<div><span style="color:{color}; font-size:1.15em;">&#9679;</span>'
             f"&nbsp;{name}</div>" for name, color in legend)
-        m.get_root().html.add_child(folium.Element(
+        macro = MacroElement()
+        macro._template = Template(
+            "{% macro html(this, kwargs) %}"
             '<div style="position: fixed; bottom: 55px; left: 55px; z-index: 9999; '
             'background: rgba(255,255,255,0.92); padding: 8px 12px; border-radius: 6px; '
             'border: 1px solid #999; font-size: 13px; line-height: 1.5;">'
-            f"{rows}</div>"))
+            f"{rows}</div>"
+            "{% endmacro %}")
+        m.get_root().add_child(macro)
 
     # точки конкурентов (или других объектов) поверх гексов, цвет по типу
     if points:
