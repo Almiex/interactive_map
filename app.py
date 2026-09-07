@@ -10,6 +10,7 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
 Запуск:  streamlit run app.py
 """
 
+import re
 import time
 import requests
 import numpy as np
@@ -40,11 +41,12 @@ MAX_GRID_CELLS = 25000  # потолок сетки; отрисовка — од
 MAP_TYPES = [
     "1. Плотность населения",
     "2. Объём жилого фонда",
-    "3. Инфраструктура и POI",
-    "4. Транспортная доступность",
-    "5. Социальная инфраструктура",
-    "6. Трафик (пеший / автомобильный)",
-    "7. Конкурентная среда (медицина)",
+    "3. Индекс спроса (платёжеспособность)",
+    "4. Инфраструктура и POI",
+    "5. Транспортная доступность",
+    "6. Социальная инфраструктура",
+    "7. Трафик (индекс, пеший/авто)",
+    "8. Конкурентная среда (медицина)",
 ]
 
 POI_CATEGORIES = {
@@ -61,7 +63,19 @@ POI_CATEGORIES = {
     "Образование": ("amenity", {"school", "kindergarten", "college", "university",
                                 "library", "driving_school", "language_school"}),
     "Офисы и услуги (office/craft)": "__OFFICE_CRAFT__",
+    "ПВЗ маркетплейсов (Ozon, WB, СДЭК, Авито, Яндекс)": "__PVZ__",
 }
+
+# ПВЗ в OSM не имеют единого тега — находим по названию/бренду
+PVZ_RE = re.compile(
+    r"ozon|озон|wildberries|вайлдберриз|сдэк|cdek|авито|avito|"
+    r"яндекс[ -]?маркет|yandex[ -]?market", re.IGNORECASE)
+PVZ_WB_RE = re.compile(r"(^|[^a-z])wb([^a-z]|$)|(^|\s)вб(\s|$)", re.IGNORECASE)
+
+
+def is_pvz(tags: dict) -> bool:
+    text = f"{tags.get('name', '')} {tags.get('brand', '')}"
+    return bool(PVZ_RE.search(text) or PVZ_WB_RE.search(text))
 
 SOCIAL_CATEGORIES = {
     "Школы": ("amenity", {"school"}),
@@ -72,6 +86,13 @@ SOCIAL_CATEGORIES = {
 }
 
 COMPETITOR_TAGS = ("amenity", {"clinic", "doctors", "hospital", "pharmacy"})  # dentist НЕ включаем!
+# тип -> (значения amenity, цвет точки на карте)
+COMPETITOR_TYPES = {
+    "Аптеки": ({"pharmacy"}, "#1f6fd6"),
+    "Клиники и медцентры": ({"clinic"}, "#2ca02c"),
+    "Врачебные кабинеты": ({"doctors"}, "#ff7f0e"),
+    "Больницы": ({"hospital"}, "#d62728"),
+}
 
 TRANSPORT_MODES = [
     "Остановки общественного транспорта (кол-во)",
@@ -216,6 +237,8 @@ def fetch_city_data(city: str):
   way["amenity"]({bb});
   way["shop"]({bb});
   way["leisure"]({bb});
+  way["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
+  way["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
 );
 out geom;"""
 
@@ -227,6 +250,8 @@ out geom;"""
   node["craft"]({bb});
   node["office"]({bb});
   node["leisure"]({bb});
+  node["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
+  node["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
   node["highway"~"^(bus_stop|bus_station|tram_stop)$"]({bb});
   node["public_transport"~"^(platform|stop_position)$"]({bb});
 );
@@ -401,6 +426,14 @@ def hex_area_km2(res):
 # --------------------------------------------------------------------------- #
 #  Контроль карты: ОДНА карта на выбор
 # --------------------------------------------------------------------------- #
+def _norm100(s):
+    """Мин-макс нормировка в индекс 0-100."""
+    if s is None or s.empty:
+        return pd.Series(dtype=float)
+    mx = float(s.max())
+    return s / mx * 100.0 if mx > 0 else s * 0.0
+
+
 def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_person=30):
     geo, nodes_df, ways_df = data
     wcent = ways_centroids(ways_df)
@@ -410,29 +443,88 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
             cells = [h3.cell_to_parent(c, res) if h3.get_resolution(c) > res else c
                      for c in kontur_df["h3"]]
             s = kontur_df.assign(cell=cells).groupby("cell")["population"].sum()
-            return s, "чел."
+            return s, "чел.", None, None
         b = buildings_gdf(ways_df)
         if b.empty:
-            return pd.Series(dtype=float), "чел. (оценка)"
+            return pd.Series(dtype=float), "чел. (оценка)", None, None
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
         vol = (b.assign(cell=cells, vol=b["area"] * b["levels"])
                  .groupby("cell")["vol"].sum())
-        return vol / m2_per_person, f"чел. (суррогат, {m2_per_person} м²/чел)"
+        return vol / m2_per_person, f"чел. (суррогат, {m2_per_person} м²/чел)", None, None
 
     if map_type.startswith("2."):
         b = buildings_gdf(ways_df)
         if b.empty:
-            return pd.Series(dtype=float), "м²"
+            return pd.Series(dtype=float), "м²", None, None
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
         vol = (b.assign(cell=cells, vol=b["area"] * b["levels"])
                  .groupby("cell")["vol"].sum())
-        return vol, "м² застройки"
+        return vol, "м² застройки", None, None
 
     if map_type.startswith("3."):
+        # ---- Индекс спроса (суррогат платёжеспособности), 0-100 ----
+        # 40% жилой фонд (люди) + 20% розница/общепит + 15% банки/офисы
+        # + 15% остановки + 10% парковки/АЗС; каждый компонент в индексе 0-100
+        b = buildings_gdf(ways_df)
+        parts = {}
+        if not b.empty:
+            cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
+            parts["people"] = _norm100(
+                b.assign(cell=cells, vol=b["area"] * b["levels"])
+                 .groupby("cell")["vol"].sum())
+        food = {"supermarket", "convenience", "greengrocer", "deli", "butcher",
+                "bakery", "seafood"}
+        retail_amen = {"restaurant", "cafe", "fast_food", "bar", "pub", "food_court"}
+        mr = (nodes_df["tags"].apply(lambda t: "shop" in t and t.get("shop") not in food)
+              | nodes_df["tags"].apply(lambda t: t.get("amenity") in retail_amen))
+        wr = (wcent["tags"].apply(lambda t: "shop" in t and t.get("shop") not in food)
+              | wcent["tags"].apply(lambda t: t.get("amenity") in retail_amen))
+        parts["retail"] = _norm100(pd.concat(
+            [hex_counts(nodes_df, res, mr), hex_counts(wcent, res, wr)]
+        ).groupby(level=0).sum())
+        mb = (nodes_df["tags"].apply(lambda t: t.get("amenity") in {"bank", "bureau_de_change"}
+                                     or "office" in t))
+        wb_ = (wcent["tags"].apply(lambda t: t.get("amenity") in {"bank", "bureau_de_change"}
+                                   or "office" in t))
+        parts["biz"] = _norm100(pd.concat(
+            [hex_counts(nodes_df, res, mb), hex_counts(wcent, res, wb_)]
+        ).groupby(level=0).sum())
+        stops = ("bus_stop", "bus_station", "tram_stop")
+        mt = (nodes_df["tags"].apply(lambda t: t.get("highway") in stops or
+                                               t.get("public_transport") in ("platform", "stop_position")))
+        wt = (wcent["tags"].apply(lambda t: t.get("highway") in stops or
+                                             t.get("public_transport") in ("platform", "stop_position")))
+        parts["transit"] = _norm100(pd.concat(
+            [hex_counts(nodes_df, res, mt), hex_counts(wcent, res, wt)]
+        ).groupby(level=0).sum())
+        ma = nodes_df["tags"].apply(lambda t: t.get("amenity") in {"parking", "fuel"})
+        wa = wcent["tags"].apply(lambda t: t.get("amenity") in {"parking", "fuel"})
+        parts["auto"] = _norm100(pd.concat(
+            [hex_counts(nodes_df, res, ma), hex_counts(wcent, res, wa)]
+        ).groupby(level=0).sum())
+        if not parts:
+            return pd.Series(dtype=float), "индекс 0-100", None, None
+        idx = None
+        weights = {"people": 0.40, "retail": 0.20, "biz": 0.15,
+                   "transit": 0.15, "auto": 0.10}
+        for name, w in weights.items():
+            if name not in parts:
+                continue
+            idx = parts[name] * w if idx is None else idx.add(parts[name] * w, fill_value=0)
+        idx = idx.fillna(0)
+        # компоненты — в тултип для прозрачности
+        extra = pd.DataFrame(parts).reindex(idx.index).fillna(0).round(0)
+        extra.columns = [f"c_{c}" for c in extra.columns]
+        return idx.round(1), "индекс 0-100", extra, None
+
+    if map_type.startswith("4."):
         spec = POI_CATEGORIES[sub_option]
         if spec == "__OFFICE_CRAFT__":
             mn = nodes_df["tags"].apply(lambda t: "office" in t or "craft" in t)
             mw = wcent["tags"].apply(lambda t: "office" in t or "craft" in t)
+        elif spec == "__PVZ__":
+            mn = nodes_df["tags"].apply(is_pvz)
+            mw = wcent["tags"].apply(is_pvz)
         elif spec is None:  # все POI
             keys = ("amenity", "shop", "craft", "office")
             mn = nodes_df["tags"].apply(lambda t: any(k in t for k in keys))
@@ -442,9 +534,9 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
             mn = mask_by_tag(nodes_df, key, values)
             mw = mask_by_tag(wcent, key, values)
         s = pd.concat([hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)])
-        return s.groupby(level=0).sum(), "объектов"
+        return s.groupby(level=0).sum(), "объектов", None, None
 
-    if map_type.startswith("4."):
+    if map_type.startswith("5."):
         if sub_option.startswith("Остановки"):
             keys = ("bus_stop", "bus_station", "tram_stop")
             mn = nodes_df["tags"].apply(lambda t: t.get("highway") in keys or
@@ -452,61 +544,83 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
             mw = wcent["tags"].apply(lambda t: t.get("highway") in keys or
                                                    t.get("public_transport") in ("platform", "stop_position"))
             s = pd.concat([hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)])
-            return s.groupby(level=0).sum(), "остановок"
+            return s.groupby(level=0).sum(), "остановок", None, None
         if sub_option.startswith("Парковки (кол-во"):
             mn = mask_by_tag(nodes_df, "amenity", {"parking"})
             mw = mask_by_tag(wcent, "amenity", {"parking"})
             s = pd.concat([hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)])
-            return s.groupby(level=0).sum(), "парковок"
+            return s.groupby(level=0).sum(), "парковок", None, None
         if sub_option.startswith("Парковки (площадь"):
             p = parking_gdf(ways_df)
             if p.empty:
-                return pd.Series(dtype=float), "м²"
+                return pd.Series(dtype=float), "м²", None, None
             cells = [h3.latlng_to_cell(a, b, res) for a, b in zip(p["lat"], p["lon"])]
-            return p.assign(cell=cells).groupby("cell")["area"].sum(), "м² парковок"
+            return p.assign(cell=cells).groupby("cell")["area"].sum(), "м² парковок", None, None
         # плотность дорожной сети
         r = roads_gdf(ways_df)
         if r.empty:
-            return pd.Series(dtype=float), "км/км²"
+            return pd.Series(dtype=float), "км/км²", None, None
         cells = [h3.latlng_to_cell(a, b, res) for a, b in zip(r["lat"], r["lon"])]
         s = r.assign(cell=cells).groupby("cell")["len_km"].sum()
-        return s / hex_area_km2(res), "км/км²"
+        return s / hex_area_km2(res), "км/км²", None, None
 
-    if map_type.startswith("5."):
+    if map_type.startswith("6."):
         parts = []
         for cat in sub_option:
             key, values = SOCIAL_CATEGORIES[cat]
             parts.append(hex_counts(nodes_df, res, mask_by_tag(nodes_df, key, values)))
             parts.append(hex_counts(wcent, res, mask_by_tag(wcent, key, values)))
         s = pd.concat([p for p in parts if len(p)]).groupby(level=0).sum()
-        return s, "объектов"
-
-    if map_type.startswith("6."):
-        r = roads_gdf(ways_df)
-        if r.empty:
-            return pd.Series(dtype=float), "км/км²"
-        hw = AUTO_HIGHWAYS if sub_option.startswith("Автомобильный") else PED_HIGHWAYS
-        r = r[r["highway"].isin(hw)]
-        if r.empty:
-            return pd.Series(dtype=float), "км/км²"
-        cells = [h3.latlng_to_cell(a, b, res) for a, b in zip(r["lat"], r["lon"])]
-        s = r.assign(cell=cells).groupby("cell")["len_km"].sum()
-        return s / hex_area_km2(res), "км/км²"
+        return s, "объектов", None, None
 
     if map_type.startswith("7."):
-        key, values = COMPETITOR_TAGS
-        s = pd.concat([hex_counts(nodes_df, res, mask_by_tag(nodes_df, key, values)),
-                       hex_counts(wcent, res, mask_by_tag(wcent, key, values))])
-        return s.groupby(level=0).sum(), "объектов"
+        # ---- Трафик: оба показателя нормируем в индекс 0-100 ----
+        r = roads_gdf(ways_df)
+        if r.empty:
+            return pd.Series(dtype=float), "индекс 0-100", None, None
+        area = hex_area_km2(res)
+        cells = [h3.latlng_to_cell(a, b, res) for a, b in zip(r["lat"], r["lon"])]
+        by_cell = r.assign(cell=cells).groupby("cell")
+        ped = by_cell.apply(lambda g: g["len_km"][g["highway"].isin(PED_HIGHWAYS)].sum(),
+                            include_groups=False) / area
+        auto = by_cell.apply(lambda g: g["len_km"][g["highway"].isin(AUTO_HIGHWAYS)].sum(),
+                             include_groups=False) / area
+        extra = pd.DataFrame({
+            "ped": _norm100(ped).round(0), "auto": _norm100(auto).round(0),
+        }).fillna(0)
+        if sub_option.startswith("Пешеходный"):
+            return extra["ped"], "индекс пешего трафика 0-100", extra, None
+        return extra["auto"], "индекс автотрафика 0-100", extra, None
 
-    return pd.Series(dtype=float), ""
+    if map_type.startswith("8."):
+        # ---- Конкуренты: разбивка по типам + точки на карту ----
+        # приоритет типа, если объект попал в несколько групп
+        type_series, points = {}, []
+        for name, (values, color) in COMPETITOR_TYPES.items():
+            mn = mask_by_tag(nodes_df, "amenity", values)
+            mw = mask_by_tag(wcent, "amenity", values)
+            type_series[name] = pd.concat(
+                [hex_counts(nodes_df, res, mn), hex_counts(wcent, res, mw)]
+            ).groupby(level=0).sum()
+            for df_ in (nodes_df[mn], wcent[mw]):
+                for _, row in df_.iterrows():
+                    points.append({"lat": row["lat"], "lon": row["lon"],
+                                   "color": color, "type": name,
+                                   "label": row["tags"].get("name", name)})
+        extra = pd.DataFrame(type_series).fillna(0).round(0)
+        total = extra.sum(axis=1) if len(extra) else pd.Series(dtype=float)
+        return total, "конкурентов", extra, points
+
+    return pd.Series(dtype=float), "", None, None
+
 
 # --------------------------------------------------------------------------- #
 #  Отрисовка ОДНОЙ карты
 # --------------------------------------------------------------------------- #
 COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
 
-def render_map(grid, series, unit, geo, map_type, marker=None):
+def render_map(grid, series, unit, geo, map_type, marker=None,
+               points=None, hex_extra=None, extra_aliases=None):
     center = [geo["lat"], geo["lon"]]
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
 
@@ -518,15 +632,19 @@ def render_map(grid, series, unit, geo, map_type, marker=None):
     cm = LinearColormap(COLORS, vmin=0, vmax=vmax)
     cm.caption = f"{map_type} — {unit}"
 
+    extra_cols = list(hex_extra.columns) if hex_extra is not None else []
     # вся сетка — один GeoJSON FeatureCollection (быстро на тысячах гексов)
     feats = []
     for cell in grid:
         boundary = h3.cell_to_boundary(cell)          # [(lat,lng),...]
         ring = [[lng, lat] for lat, lng in boundary]
         ring.append(ring[0])
+        props = {"v": round(float(vals.get(cell, 0.0)), 2)}
+        if hex_extra is not None and cell in hex_extra.index:
+            props.update(hex_extra.loc[cell].to_dict())
         feats.append({
             "type": "Feature",
-            "properties": {"v": round(float(vals.get(cell, 0.0)), 2)},
+            "properties": props,
             "geometry": {"type": "Polygon", "coordinates": [ring]},
         })
     gj = {"type": "FeatureCollection", "features": feats}
@@ -538,15 +656,28 @@ def render_map(grid, series, unit, geo, map_type, marker=None):
         return {"fillColor": cm(v), "color": "#555555", "weight": 0.6,
                 "fillOpacity": opacity}
 
+    aliases = ["Значение: "] + [extra_aliases.get(c, c) for c in extra_cols] \
+        if extra_aliases else ["Значение: "] + extra_cols
     folium.GeoJson(
         gj,
         style_function=_style,
         tooltip=folium.GeoJsonTooltip(
-            fields=["v"], aliases=[f"{unit}: "], localize=True,
+            fields=["v"] + extra_cols, aliases=aliases, localize=True,
         ),
     ).add_to(m)
 
     cm.add_to(m)
+
+    # точки конкурентов (или других объектов) поверх гексов, цвет по типу
+    if points:
+        for p in points:
+            folium.CircleMarker(
+                location=[p["lat"], p["lon"]],
+                radius=5, color=p["color"], weight=1.5,
+                fill=True, fill_color=p["color"], fill_opacity=0.9,
+                tooltip=f'{p["type"]}: {p["label"]}',
+            ).add_to(m)
+
     bounds = [h3.cell_to_boundary(c) for c in grid]
     lats = [p[0] for b_ in bounds for p in b_]
     lngs = [p[1] for b_ in bounds for p in b_]
@@ -618,16 +749,17 @@ with st.sidebar:
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
 
     sub_option = None
-    if map_type.startswith("3."):
+    if map_type.startswith("4."):
         sub_option = st.selectbox("Категория POI", list(POI_CATEGORIES.keys()))
-    elif map_type.startswith("4."):
-        sub_option = st.selectbox("Показатель", TRANSPORT_MODES)
     elif map_type.startswith("5."):
+        sub_option = st.selectbox("Показатель", TRANSPORT_MODES)
+    elif map_type.startswith("6."):
         sub_option = st.multiselect("Объекты соц. инфраструктуры",
                                     list(SOCIAL_CATEGORIES.keys()),
                                     default=list(SOCIAL_CATEGORIES.keys()))
-    elif map_type.startswith("6."):
-        sub_option = st.selectbox("Вид трафика", TRAFFIC_MODES)
+    elif map_type.startswith("7."):
+        sub_option = st.radio("Что раскрашиваем", TRAFFIC_MODES,
+                              help="Тултип гекса показывает оба индекса")
 
     m2_per_person = 30
     kontur_df = None
@@ -645,26 +777,31 @@ with st.sidebar:
 
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
-    with st.spinner(f"Геокодирую «{city}»…"):
-        geo = geocode_city(city)
+    with st.spinner("Загружаю данные OpenStreetMap через Overpass API (1–5 минут)…"):
+        try:
+            geo, nodes_df, ways_df = fetch_city_data(city)
+        except Exception as e:  # noqa: BLE001 — любая сетевая/парсер-ошибка
+            st.error(f"Не удалось загрузить данные для «{city}»: {e}")
+            st.stop()
     if geo is None:
         st.error("Город не найден. Уточните название.")
         st.stop()
-    with st.spinner("Загружаю данные OpenStreetMap через Overpass API (это может занять 1–5 минут)…"):
-        try:
-            geo, nodes_df, ways_df = fetch_city_data(city)
-        except RuntimeError as e:
-            st.error(str(e))
-            st.stop()
-    st.session_state["data"] = (geo, nodes_df, ways_df)
+    # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
+    st.session_state["data"] = {"city": city.strip(), "geo": geo,
+                                "nodes": nodes_df, "ways": ways_df}
 
-if "data" not in st.session_state:
+stored = st.session_state.get("data")
+if stored is None:
     st.info("Введите город в боковой панели и нажмите «Построить сетку».")
     st.stop()
 
-data = st.session_state["data"]
-geo, nodes_df, ways_df = data
+geo, nodes_df, ways_df = stored["geo"], stored["nodes"], stored["ways"]
 st.success(f"📍 {geo['display']}")
+
+# если в поле уже другой город — честно говорим, что на экране НЕ он
+if city.strip() and city.strip() != stored["city"]:
+    st.warning(f"Сейчас показан город «{stored['city']}», а в поле введён «{city.strip()}». "
+               f"Нажмите «Построить сетку» ещё раз, чтобы перестроить карту.")
 
 grid, in_boundary = make_grid(geo, res)
 if not in_boundary:
@@ -676,8 +813,10 @@ if len(grid) > MAX_GRID_CELLS:
     st.stop()
 
 with st.spinner("Считаю агрегаты по гексам…"):
-    series, unit = compute_series(map_type, sub_option, res, data,
-                                  kontur_df=kontur_df, m2_per_person=m2_per_person)
+    series, unit, hex_extra, points = compute_series(map_type, sub_option, res,
+                                                     (geo, nodes_df, ways_df),
+                                                     kontur_df=kontur_df,
+                                                     m2_per_person=m2_per_person)
 
 # суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
 if map_type.startswith(("1.", "2.")):
@@ -686,7 +825,10 @@ if map_type.startswith(("1.", "2.")):
 marker = None
 if address.strip():
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
-        marker = geocode_address(f"{address.strip()}, {city}")
+        try:
+            marker = geocode_address(f"{address.strip()}, {stored['city']}")
+        except Exception:  # noqa: BLE001
+            marker = None
     if marker is None:
         st.warning(f"Адрес «{address.strip()}» не найден — метка не поставлена.")
     else:
@@ -697,7 +839,24 @@ c1.metric("Гексов в сетке", f"{len(grid):,}")
 c2.metric("Resolution", f"res {res} (~{RES_SPACING_KM[res]} км между центрами)")
 c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if len(series) else "—")
 
-render_map(grid, series, unit, geo, map_type, marker=marker)
+if map_type.startswith("8."):
+    dots = " ".join(
+        f'<span style="color:{color}; font-size:1.2em;">●</span> {name}'
+        for name, (_, color) in COMPETITOR_TYPES.items())
+    st.markdown(f"**Точки конкурентов:** {dots}", unsafe_allow_html=True)
+
+extra_aliases = None
+if map_type.startswith("3."):
+    extra_aliases = {"c_people": "Жилой фонд: ", "c_retail": "Розница/общепит: ",
+                     "c_biz": "Банки/офисы: ", "c_transit": "Остановки: ",
+                     "c_auto": "Парковки/АЗС: "}
+elif map_type.startswith("7."):
+    extra_aliases = {"ped": "Пешеходный трафик: ", "auto": "Автомобильный трафик: "}
+elif map_type.startswith("8."):
+    extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES}
+
+render_map(grid, series, unit, geo, map_type, marker=marker,
+           points=points, hex_extra=hex_extra, extra_aliases=extra_aliases)
 st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное заселение и "
            "незавершённое строительство. Для точной численности загрузите Kontur Population "
            "(data.humdata.org, датасет «Kontur Population»).")
