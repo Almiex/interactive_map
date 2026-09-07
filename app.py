@@ -247,6 +247,26 @@ def ways_centroids(ways_df):
     lon = ways_df["coords"].apply(lambda c: np.mean([p[0] for p in c]))
     return pd.DataFrame({"lat": lat, "lon": lon, "tags": ways_df["tags"]})
 
+def _ring_coords(coords, min_pts):
+    """Чистим кольцо/линию от подряд идущих дублей; None если точек < min_pts."""
+    pts = []
+    for p in coords:
+        if not pts or p != pts[-1]:
+            pts.append(p)
+    return pts if len(pts) >= min_pts else None
+
+
+def _safe_polygon(coords):
+    pts = _ring_coords(coords, 3)
+    if pts is None:
+        return None
+    try:
+        poly = Polygon(pts)
+        return poly if poly.is_valid else poly.buffer(0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def buildings_gdf(ways_df):
     """Жилые здания с площадью застройки (м², в метрической проекции) и этажностью."""
     if ways_df.empty:
@@ -255,14 +275,19 @@ def buildings_gdf(ways_df):
     sub = ways_df[mask]
     if sub.empty:
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
-    geoms = [Polygon(c) for c in sub["coords"]]
-    gdf = gpd.GeoDataFrame(
-        {"levels": sub["tags"].apply(lambda t: _to_int(t.get("building:levels"), 1)),
-         "lat": sub["coords"].apply(lambda c: np.mean([p[1] for p in c])),
-         "lon": sub["coords"].apply(lambda c: np.mean([p[0] for p in c]))},
-        geometry=geoms, crs="EPSG:4326",
-    )
-    gdf = gdf[gdf.is_valid]
+    recs, geoms = [], []
+    for coords, tags in zip(sub["coords"], sub["tags"]):
+        geom = _safe_polygon(coords)
+        if geom is None or geom.is_empty:
+            continue
+        recs.append({"levels": _to_int(tags.get("building:levels"), 1),
+                     "lat": float(np.mean([p[1] for p in coords])),
+                     "lon": float(np.mean([p[0] for p in coords]))})
+        geoms.append(geom)
+    if not geoms:
+        return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"],
+                                geometry=[], crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs="EPSG:4326")
     metric = gdf.to_crs(gdf.estimate_utm_crs())
     gdf["area"] = metric.area.values
     return gdf
@@ -276,12 +301,23 @@ def roads_gdf(ways_df):
     if sub.empty:
         return gpd.GeoDataFrame(columns=["highway", "len_km", "lat", "lon"], geometry=[], crs="EPSG:4326")
     from shapely.geometry import LineString
-    gdf = gpd.GeoDataFrame(
-        {"highway": sub["tags"].apply(lambda t: t.get("highway", "")),
-         "lat": sub["coords"].apply(lambda c: np.mean([p[1] for p in c])),
-         "lon": sub["coords"].apply(lambda c: np.mean([p[0] for p in c]))},
-        geometry=[LineString(c) for c in sub["coords"]], crs="EPSG:4326",
-    )
+    recs, geoms = [], []
+    for coords, tags in zip(sub["coords"], sub["tags"]):
+        pts = _ring_coords(coords, 2)
+        if pts is None:
+            continue
+        try:
+            geom = LineString(pts)
+        except Exception:  # noqa: BLE001
+            continue
+        recs.append({"highway": tags.get("highway", ""),
+                     "lat": float(np.mean([p[1] for p in pts])),
+                     "lon": float(np.mean([p[0] for p in pts]))})
+        geoms.append(geom)
+    if not geoms:
+        return gpd.GeoDataFrame(columns=["highway", "len_km", "lat", "lon"],
+                                geometry=[], crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs="EPSG:4326")
     metric = gdf.to_crs(gdf.estimate_utm_crs())
     gdf["len_km"] = metric.length.values / 1000.0
     return gdf
@@ -294,12 +330,17 @@ def parking_gdf(ways_df):
     sub = ways_df[mask]
     if sub.empty:
         return gpd.GeoDataFrame(columns=["area", "lat", "lon"], geometry=[], crs="EPSG:4326")
-    gdf = gpd.GeoDataFrame(
-        {"lat": sub["coords"].apply(lambda c: np.mean([p[1] for p in c])),
-         "lon": sub["coords"].apply(lambda c: np.mean([p[0] for p in c]))},
-        geometry=[Polygon(c) for c in sub["coords"]], crs="EPSG:4326",
-    )
-    gdf = gdf[gdf.is_valid]
+    recs, geoms = [], []
+    for coords in sub["coords"]:
+        geom = _safe_polygon(coords)
+        if geom is None or geom.is_empty:
+            continue
+        recs.append({"lat": float(np.mean([p[1] for p in coords])),
+                     "lon": float(np.mean([p[0] for p in coords]))})
+        geoms.append(geom)
+    if not geoms:
+        return gpd.GeoDataFrame(columns=["area", "lat", "lon"], geometry=[], crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs="EPSG:4326")
     metric = gdf.to_crs(gdf.estimate_utm_crs())
     gdf["area"] = metric.area.values
     return gdf
