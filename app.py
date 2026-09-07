@@ -35,7 +35,7 @@ HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
 # расстояние между центрами соседних гексов, км (по стандарту Uber H3)
 RES_SPACING_KM = {7: 2.4, 8: 0.92, 9: 0.35, 10: 0.13}
 
-MAX_GRID_CELLS = 4000  # защита Overpass от слишком больших выгрузок
+MAX_GRID_CELLS = 25000  # потолок сетки; отрисовка — одним GeoJSON-слоем
 
 MAP_TYPES = [
     "1. Плотность населения",
@@ -495,21 +495,37 @@ def render_map(grid, series, unit, geo, map_type):
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
 
     vals = series.reindex(grid).fillna(0.0)
-    vmax = vals.max()
+    vmax = float(vals.max()) if len(vals) else 0.0
     if vmax <= 0:
         st.warning("Нет данных для выбранного слоя в этом городе.")
         vmax = 1.0
     cm = LinearColormap(COLORS, vmin=0, vmax=vmax)
     cm.caption = f"{map_type} — {unit}"
 
+    # вся сетка — один GeoJSON FeatureCollection (быстро на тысячах гексов)
+    feats = []
     for cell in grid:
-        val = float(vals.get(cell, 0.0))
-        boundary = h3.cell_to_boundary(cell)  # [(lat,lng),...]
-        folium.Polygon(
-            locations=boundary, color="#666666", weight=0.6,
-            fill=True, fill_color=cm(val), fill_opacity=0.55,
-            tooltip=f"{val:,.0f} {unit}",
-        ).add_to(m)
+        boundary = h3.cell_to_boundary(cell)          # [(lat,lng),...]
+        ring = [[lng, lat] for lat, lng in boundary]
+        ring.append(ring[0])
+        feats.append({
+            "type": "Feature",
+            "properties": {"v": round(float(vals.get(cell, 0.0)), 2)},
+            "geometry": {"type": "Polygon", "coordinates": [ring]},
+        })
+    gj = {"type": "FeatureCollection", "features": feats}
+
+    folium.GeoJson(
+        gj,
+        style_function=lambda f: {
+            "fillColor": cm(f["properties"]["v"]),
+            "color": "#555555", "weight": 0.6,
+            "fillOpacity": 0.55,
+        },
+        tooltip=folium.GeoJsonTooltip(
+            fields=["v"], aliases=[f"{unit}: "], localize=True,
+        ),
+    ).add_to(m)
 
     cm.add_to(m)
     bounds = [h3.cell_to_boundary(c) for c in grid]
@@ -517,6 +533,7 @@ def render_map(grid, series, unit, geo, map_type):
     lngs = [p[1] for b_ in bounds for p in b_]
     m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
     st_folium(m, width=1150, height=680, returned_objects=[])
+
 
 # --------------------------------------------------------------------------- #
 #  Kontur Population (локальный файл)
@@ -625,8 +642,8 @@ if not in_boundary:
     st.info("Граница города не получена от Nominatim (лимит 0,5 МБ) — сетка построена "
             "по прямоугольной области. Уточните название города или повторите попытку.")
 if len(grid) > MAX_GRID_CELLS:
-    st.error(f"Сетка слишком велика ({len(grid)} гексов при res {res}). "
-             f"Понизьте resolution до 7.")
+    st.error(f"Сетка слишком велика ({len(grid)} гексов при res {res}, "
+             f"лимит {MAX_GRID_CELLS}). Понизьте resolution.")
     st.stop()
 
 with st.spinner("Считаю агрегаты по гексам…"):
