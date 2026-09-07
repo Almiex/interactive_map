@@ -817,52 +817,107 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 #  Kontur Population (локальный файл)
 # --------------------------------------------------------------------------- #
 def load_kontur(file, res, bbox=None):
-    """Файл GeoJSON/GeoParquet/GeoPackage Kontur Population -> DataFrame[h3, population].
-    bbox=[south, north, west, east] — обрезать датасет под город (сильно быстрее)."""
+    """Файл Kontur Population (.gpkg/.geojson/.parquet) -> DataFrame[h3, population].
+    bbox=[south, north, west, east] — обрезать под город."""
     name = file.name.lower()
-    if name.endswith(".parquet"):
-        gdf = gpd.read_parquet(file)
-    elif name.endswith(".gpkg"):
-        # geopandas не читает GeoPackage из file-like — пишем во временный файл
-        import tempfile, os
+    tmp_path = None
+    if name.endswith(".gpkg"):
+        # pyogrio читает только с пути — пишем во временный файл
+        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
             tmp.write(file.getvalue())
             tmp_path = tmp.name
-        try:
-            gdf = gpd.read_file(tmp_path)
-        finally:
-            os.unlink(tmp_path)
+        src_path = tmp_path
     else:
-        gdf = gpd.read_file(file)
-    if bbox is not None:  # предварительная обрезка под город
-        south, north, west, east = bbox
-        gdf = gdf.cx[west - 0.05:east + 0.05, south - 0.05:north + 0.05]
-        if gdf.empty:
-            st.error("Kontur-файл не пересекается с городом.")
-            return None
+        src_path = file
 
-    pop_col = next((c for c in gdf.columns if c.lower() in
-                    ("population", "pop", "count")), None)
-    if pop_col is None:
-        st.error("В файле нет колонки population.")
+    try:
+        try:
+            import pyogrio
+            info = pyogrio.read_info(src_path)
+            fields = list(info["fields"])
+            lower = {c.lower(): c for c in fields}
+            pop_col = next((lower[k] for k in ("population", "pop", "count")
+                            if k in lower), None)
+            if pop_col is None:
+                st.error(f"Колонка population не найдена. Колонки файла: {fields[:15]}")
+                return None
+
+            if "h3" in lower:
+                # быстрый путь: только h3+population, без геометрии (в разы быстрее)
+                df = pyogrio.read_dataframe(src_path, read_geometry=False,
+                                            columns=[lower["h3"], pop_col])
+                df = df.rename(columns={lower["h3"]: "h3", pop_col: "population"})
+                raw = df["h3"]
+                cells = raw.astype(str) \
+                    if (raw.dtype == object or str(raw.dtype).startswith("str")) \
+                    else raw.apply(lambda x: format(int(x), "x"))
+                out = pd.DataFrame({
+                    "h3": cells,
+                    "population": pd.to_numeric(df["population"],
+                                                errors="coerce").fillna(0)})
+                if bbox is not None:  # фильтр по центрам ячеек
+                    south, north, west, east = bbox
+                    ll = out["h3"].map(h3.cell_to_latlng)
+                    keep = ll.map(lambda p: south - 0.1 <= p[0] <= north + 0.1
+                                  and west - 0.1 <= p[1] <= east + 0.1)
+                    out = out[keep]
+            else:
+                gdf = pyogrio.read_dataframe(src_path, columns=[pop_col])
+                gdf = gdf.rename(columns={pop_col: "population"})
+                if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs(4326)  # Kontur иногда в 3857 — .cx тогда пустой
+                if bbox is not None:
+                    south, north, west, east = bbox
+                    gdf = gdf.cx[west - 0.05:east + 0.05, south - 0.05:north + 0.05]
+                if gdf.empty:
+                    st.error("Kontur-файл не пересекается с городом. Проверьте, что "
+                             "скачан датасет «400m H3 Hexagons», а не «Administrative "
+                             "Division», и что город загружен.")
+                    return None
+                cent = gdf.geometry.centroid
+                cells = [h3.latlng_to_cell(y, x, res)
+                         for y, x in zip(cent.y, cent.x)]
+                out = pd.DataFrame({
+                    "h3": cells,
+                    "population": pd.to_numeric(gdf["population"],
+                                                errors="coerce").fillna(0)})
+        except ImportError:
+            gdf = gpd.read_file(src_path)
+            if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs(4326)
+            if bbox is not None:
+                south, north, west, east = bbox
+                gdf = gdf.cx[west - 0.05:east + 0.05, south - 0.05:north + 0.05]
+            if gdf.empty:
+                st.error("Kontur-файл не пересекается с городом.")
+                return None
+            pop_col = next((c for c in gdf.columns if c.lower() in
+                            ("population", "pop", "count")), None)
+            if pop_col is None:
+                st.error("В файле нет колонки population.")
+                return None
+            cent = gdf.geometry.centroid
+            cells = [h3.latlng_to_cell(y, x, res)
+                     for y, x in zip(cent.y, cent.x)]
+            out = pd.DataFrame({"h3": cells,
+                                "population": gdf[pop_col].astype(float).values})
+    finally:
+        if tmp_path:
+            import os
+            os.unlink(tmp_path)
+
+    if out.empty:
+        st.error("После обрезки под город данные пусты — файл точно датасет "
+                 "«Population Density for 400m H3 Hexagons»?")
         return None
-    gdf = gdf[[pop_col, "geometry"]].rename(columns={pop_col: "population"})
-    gdf = gdf[gdf["population"] > 0]
-    if "h3" in gdf.columns:
-        raw = gdf["h3"]
-        if raw.dtype == object or str(raw.dtype).startswith("str"):
-            cells = raw.astype(str)
-        else:
-            # Kontur хранит h3 как целое — переводим в hex-строку
-            cells = raw.apply(lambda x: format(int(x), "x"))
-    else:
-        cent = gdf.geometry.centroid
-        cells = [h3.latlng_to_cell(y, x, res) for y, x in zip(cent.y, cent.x)]
-    src_res = h3.get_resolution(cells.iloc[0])
+    out = out[out["population"] > 0]
+    src_res = h3.get_resolution(out["h3"].iloc[0])
     if res > src_res:
-        st.warning(f"Kontur идёт в res{src_res}: показ возможен только при res ≤ {src_res}. "
-                   f"Понижаю детализацию до res{src_res}.")
-    return pd.DataFrame({"h3": cells, "population": gdf["population"].values})
+        st.warning(f"Kontur идёт в res{src_res}: показ возможен только при "
+                   f"res ≤ {src_res}. Понижаю детализацию до res{src_res}.")
+    return out
+
 
 # --------------------------------------------------------------------------- #
 #  UI
