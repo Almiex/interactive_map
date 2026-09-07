@@ -636,7 +636,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
 
 def render_map(grid, series, unit, geo, map_type, marker=None,
-               points=None, hex_extra=None, extra_aliases=None):
+               points=None, hex_extra=None, extra_aliases=None, legend=None):
     center = [geo["lat"], geo["lon"]]
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
 
@@ -686,6 +686,17 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     ).add_to(m)
 
     cm.add_to(m)
+
+    # легенда типов точек — HTML внутри карты (Streamlit-маркдаун вырезает style)
+    if legend:
+        rows = "".join(
+            f'<div><span style="color:{color}; font-size:1.15em;">&#9679;</span>'
+            f"&nbsp;{name}</div>" for name, color in legend)
+        m.get_root().html.add_child(folium.Element(
+            '<div style="position: fixed; bottom: 55px; left: 55px; z-index: 9999; '
+            'background: rgba(255,255,255,0.92); padding: 8px 12px; border-radius: 6px; '
+            'border: 1px solid #999; font-size: 13px; line-height: 1.5;">'
+            f"{rows}</div>"))
 
     # точки конкурентов (или других объектов) поверх гексов, цвет по типу
     if points:
@@ -863,11 +874,9 @@ c1.metric("Гексов в сетке", f"{len(grid):,}")
 c2.metric("Resolution", f"res {res} (~{RES_SPACING_KM[res]} км между центрами)")
 c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if len(series) else "—")
 
+legend = None
 if map_type.startswith("8."):
-    dots = " ".join(
-        f'<span style="color:{color}; font-size:1.2em;">●</span> {name}'
-        for name, (_, color) in COMPETITOR_TYPES.items())
-    st.markdown(f"**Точки конкурентов:** {dots}", unsafe_allow_html=True)
+    legend = [(name, color) for name, (color, _) in COMPETITOR_TYPES.items()]
 
 extra_aliases = None
 if map_type.startswith("3."):
@@ -880,7 +889,8 @@ elif map_type.startswith("8."):
     extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES}
 
 render_map(grid, series, unit, geo, map_type, marker=marker,
-           points=points, hex_extra=hex_extra, extra_aliases=extra_aliases)
+           points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
+           legend=legend)
 st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное заселение и "
            "незавершённое строительство. Для точной численности загрузите Kontur Population "
            "(data.humdata.org, датасет «Kontur Population»).")
