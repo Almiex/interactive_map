@@ -605,7 +605,8 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
             cats = [c for c in POI_CATEGORIES if c != "Все POI"]
         else:
             cats = [c for c in POI_CATEGORIES if c in sub_option]
-        matchers = [(name, color, POI_CATEGORIES[name][1]) for name in cats]
+        matchers = [(name, POI_CATEGORIES[name][0], POI_CATEGORIES[name][1])
+                    for name in cats]
 
         def _classify(tags):
             for name, color, m in matchers:
