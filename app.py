@@ -326,6 +326,15 @@ def hex_counts(points_df, res, mask=None):
 def mask_by_tag(df, key, values):
     return df["tags"].apply(lambda t: t.get(key) in values)
 
+def populated_with_ring(grid, series):
+    """Гексы с value>0 + кольцо соседей (k=1) вокруг них. Нули дальше кольца отбрасываем."""
+    populated = set(series[series > 0].index)
+    keep = set(populated)
+    for cell in populated:
+        keep.update(h3.grid_disk(cell, 1))
+    return [c for c in grid if c in keep]
+
+
 def hex_area_km2(res):
     b = h3.cell_to_boundary(h3.latlng_to_cell(55.0, 83.0, res))
     ll = [(lng, lat) for lat, lng in b]
@@ -582,6 +591,10 @@ if len(grid) > MAX_GRID_CELLS:
 with st.spinner("Считаю агрегаты по гексам…"):
     series, unit = compute_series(map_type, sub_option, res, data,
                                   kontur_df=kontur_df, m2_per_person=m2_per_person)
+
+# суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
+if map_type.startswith(("1.", "2.")):
+    grid = populated_with_ring(grid, series)
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Гексов в сетке", f"{len(grid):,}")
