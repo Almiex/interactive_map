@@ -196,24 +196,62 @@ def geocode_city(city: str):
 #  Геокодинг адреса (улица, дом) — опционально
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=86400, show_spinner=False)
-def geocode_address(address: str):
+def geocode_address(address: str, bbox=None):
+    """Геокодинг адреса: 1) Nominatim, 2) fallback — поиск по addr-тегам OSM."""
     r = requests.get(NOMINATIM_URL, params={
         "q": address, "format": "json", "limit": 1, "accept-language": "ru",
         "addressdetails": 1,
     }, headers=HEADERS, timeout=30)
     r.raise_for_status()
     data = r.json()
-    if not data:
+    if data:
+        d = data[0]
+        addr = d.get("address", {})
+        street = ", ".join(x for x in (addr.get("road"), addr.get("house_number")) if x)
+        city = (addr.get("city") or addr.get("town") or addr.get("village")
+                or addr.get("municipality") or "")
+        label = ", ".join(x for x in (street, city) if x) or d["display_name"]
+        return {"lat": float(d["lat"]), "lon": float(d["lon"]),
+                "display": label}
+
+    # fallback: индекс Nominatim пропустил адрес — ищем по тегам addr:* в OSM
+    if bbox is None:
         return None
-    d = data[0]
-    # короткая подпись: улица, дом + город — вместо длинной строки Nominatim
-    addr = d.get("address", {})
-    street = ", ".join(x for x in (addr.get("road"), addr.get("house_number")) if x)
-    city = (addr.get("city") or addr.get("town") or addr.get("village")
-            or addr.get("municipality") or "")
-    label = ", ".join(x for x in (street, city) if x) or d["display_name"]
-    return {"lat": float(d["lat"]), "lon": float(d["lon"]),
-            "display": label}
+    m = re.search(r"(\d+)\s*[кk]\s*(\d+)", address)
+    plain = re.search(r"(\d+)", address)
+    if not (m or plain):
+        return None
+    d1 = m.group(1) if m else plain.group(1)
+    d2 = m.group(2) if m else None
+    variants = ([f"{d1}к{d2}", f"{d1} к{d2}", f"{d1}К{d2}", f"{d1}к{d2} ".strip(), d1]
+                if d2 else [d1])
+    hre = "^(" + "|".join(re.escape(v) for v in variants) + ")$"
+    street = address[: (m.start() if m else plain.start())]
+    street = re.sub(r"\b[1-5]-я\b", "", street)
+    street = re.sub(r"\b(улица|ул\.?|переулок|проспект|пр-кт|бульвар|б-р|"
+                    r"шоссе|ш\.)\b", "", street, flags=re.IGNORECASE).strip(" ,.")
+    if not street:
+        return None
+    south, north, west, east = bbox
+    bb = f"{south - 0.05},{west - 0.05},{north + 0.05},{east + 0.05}"
+    q = f"""[out:json][timeout:60];(
+  nwr["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
+);out center 3;"""
+    try:
+        els = _query_overpass(q).get("elements", [])
+    except Exception:  # noqa: BLE001
+        return None
+    if not els:
+        return None
+    el = els[0]
+    lat = el.get("lat") or (el.get("center") or {}).get("lat")
+    lon = el.get("lon") or (el.get("center") or {}).get("lon")
+    if lat is None or lon is None:
+        return None
+    tags = el.get("tags", {})
+    label = ", ".join(x for x in (tags.get("addr:street"),
+                                  tags.get("addr:housenumber")) if x) or address
+    return {"lat": float(lat), "lon": float(lon), "display": label}
 
 
 # --------------------------------------------------------------------------- #
@@ -1091,7 +1129,8 @@ marker = None
 if address.strip() and city.strip() == stored["city"]:
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
         try:
-            marker = geocode_address(f"{address.strip()}, {stored['city']}")
+            marker = geocode_address(f"{address.strip()}, {stored['city']}",
+                                     stored["geo"]["bbox"])
         except Exception:  # noqa: BLE001
             marker = None
     if marker is None:
