@@ -1011,7 +1011,11 @@ with st.sidebar:
         st.session_state["addr_input"] = ""
 
     st.header("Город")
-    city = st.text_input("Введите город", value="Новосибирск", key="city_input")
+    def _clear_addr():
+        st.session_state["addr_input"] = ""  # адрес от старого города не нужен
+
+    city = st.text_input("Введите город", value="Новосибирск", key="city_input",
+                         on_change=_clear_addr)
     address = st.text_input("Улица и дом (необязательно)",
                             placeholder="пр. Ленина, 1", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
