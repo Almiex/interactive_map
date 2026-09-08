@@ -1023,7 +1023,18 @@ if city.strip() and city.strip() != stored["city"]:
     st.warning(f"Сейчас показан город «{stored['city']}», а в поле введён «{city.strip()}». "
                f"Нажмите «Построить сетку» ещё раз, чтобы перестроить карту.")
 
-grid, in_boundary = make_grid(geo, res)
+# Kontur идёт в своём resolution: сетку принудительно понижаем под источник,
+# иначе ячейки разных res не совпадут и фильтр заселённости обнулит сетку
+res_eff = res
+if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
+    src_res = h3.get_resolution(kontur_df["h3"].iloc[0])
+    if res > src_res:
+        res_eff = src_res
+        st.info(f"Kontur Population рассчитан в res{src_res} — сетка понижена "
+                f"с res {res} до res{src_res}. Повысить детализацию можно только "
+                f"с суррогатным источником.")
+
+grid, in_boundary = make_grid(geo, res_eff)
 if not in_boundary:
     st.info("Граница города не получена от Nominatim (лимит 0,5 МБ) — сетка построена "
             "по прямоугольной области. Уточните название города или повторите попытку.")
@@ -1033,7 +1044,7 @@ if len(grid) > MAX_GRID_CELLS:
     st.stop()
 
 with st.spinner("Считаю агрегаты по гексам…"):
-    series, unit, hex_extra, points = compute_series(map_type, sub_option, res,
+    series, unit, hex_extra, points = compute_series(map_type, sub_option, res_eff,
                                                      (geo, nodes_df, ways_df),
                                                      kontur_df=kontur_df,
                                                      m2_per_person=m2_per_person)
@@ -1078,7 +1089,7 @@ if map_type.startswith("6."):
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Гексов в сетке", f"{len(grid):,}")
-c2.metric("Resolution", f"res {res} (~{RES_SPACING_KM[res]} км между центрами)")
+c2.metric("Resolution", f"res {res_eff} (~{RES_SPACING_KM[res_eff]} км между центрами)")
 c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if len(series) else "—")
 
 legend = None
