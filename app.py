@@ -198,14 +198,22 @@ def geocode_city(city: str):
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_address(address: str):
     r = requests.get(NOMINATIM_URL, params={
-        "q": address, "format": "json", "limit": 1, "accept-language": "ru"
+        "q": address, "format": "json", "limit": 1, "accept-language": "ru",
+        "addressdetails": 1,
     }, headers=HEADERS, timeout=30)
     r.raise_for_status()
     data = r.json()
     if not data:
         return None
-    return {"lat": float(data[0]["lat"]), "lon": float(data[0]["lon"]),
-            "display": data[0]["display_name"]}
+    d = data[0]
+    # короткая подпись: улица, дом + город — вместо длинной строки Nominatim
+    addr = d.get("address", {})
+    street = ", ".join(x for x in (addr.get("road"), addr.get("house_number")) if x)
+    city = (addr.get("city") or addr.get("town") or addr.get("village")
+            or addr.get("municipality") or "")
+    label = ", ".join(x for x in (street, city) if x) or d["display_name"]
+    return {"lat": float(d["lat"]), "lon": float(d["lon"]),
+            "display": label}
 
 
 # --------------------------------------------------------------------------- #
@@ -1155,6 +1163,8 @@ if map_type.startswith("1."):
 render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
            legend=legend, source=_src)
-st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное заселение и "
-           "незавершённое строительство. Для точной численности загрузите Kontur Population "
-           "(data.humdata.org, датасет «Kontur Population»).")
+if map_type.startswith("1.") and kontur_df is None:
+    st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное "
+               "заселение и незавершённое строительство. Для точной численности "
+               "загрузите Kontur Population (data.humdata.org, датасет "
+               "«Population Density for 400m H3 Hexagons»).")
