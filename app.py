@@ -197,24 +197,40 @@ def geocode_city(city: str):
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_address(address: str, bbox=None):
-    """Геокодинг адреса: 1) Nominatim, 2) fallback — поиск по addr-тегам OSM."""
-    r = requests.get(NOMINATIM_URL, params={
-        "q": address, "format": "json", "limit": 1, "accept-language": "ru",
-        "addressdetails": 1,
-    }, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if data:
-        d = data[0]
-        addr = d.get("address", {})
-        street = ", ".join(x for x in (addr.get("road"), addr.get("house_number")) if x)
-        city = (addr.get("city") or addr.get("town") or addr.get("village")
-                or addr.get("municipality") or "")
-        label = ", ".join(x for x in (street, city) if x) or d["display_name"]
-        return {"lat": float(d["lat"]), "lon": float(d["lon"]),
-                "display": label}
+    """Геокодинг адреса: 1) Nominatim (с вариантами написания),
+    2) fallback — поиск по addr-тегам OSM с КОРОТКИМ таймаутом."""
+    # варианты написания: «7к1» -> «7 к1», убрать «1-я» и лишние пробелы
+    variants = [address]
+    v = re.sub(r"(\d)\s*к\s*(\d)", r"\1 к\2", address)
+    v = re.sub(r"\b[1-5]-я\b", "", v)
+    v = re.sub(r"\s+", " ", v).strip(" ,")
+    if v != address:
+        variants.append(v)
 
-    # fallback: индекс Nominatim пропустил адрес — ищем по тегам addr:* в OSM
+    for cand in variants:
+        try:
+            r = requests.get(NOMINATIM_URL, params={
+                "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
+                "addressdetails": 1,
+            }, headers=HEADERS, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+            else:
+                data = []
+        except Exception:  # noqa: BLE001
+            data = []
+        if data:
+            d = data[0]
+            addr = d.get("address", {})
+            street = ", ".join(x for x in (addr.get("road"),
+                                           addr.get("house_number")) if x)
+            city = (addr.get("city") or addr.get("town") or addr.get("village")
+                    or addr.get("municipality") or "")
+            label = ", ".join(x for x in (street, city) if x) or d["display_name"]
+            return {"lat": float(d["lat"]), "lon": float(d["lon"]),
+                    "display": label}
+
+    # fallback: ищем по тегам addr:* в OSM — только 2 зеркала, жёсткий таймаут
     if bbox is None:
         return None
     m = re.search(r"(\d+)\s*[кk]\s*(\d+)", address)
@@ -223,9 +239,8 @@ def geocode_address(address: str, bbox=None):
         return None
     d1 = m.group(1) if m else plain.group(1)
     d2 = m.group(2) if m else None
-    variants = ([f"{d1}к{d2}", f"{d1} к{d2}", f"{d1}К{d2}", f"{d1}к{d2} ".strip(), d1]
-                if d2 else [d1])
-    hre = "^(" + "|".join(re.escape(v) for v in variants) + ")$"
+    hvars = ([f"{d1}к{d2}", f"{d1} к{d2}", f"{d1}К{d2}", d1] if d2 else [d1])
+    hre = "^(" + "|".join(re.escape(v2) for v2 in hvars) + ")$"
     street = address[: (m.start() if m else plain.start())]
     street = re.sub(r"\b[1-5]-я\b", "", street)
     street = re.sub(r"\b(улица|ул\.?|переулок|проспект|пр-кт|бульвар|б-р|"
@@ -234,13 +249,19 @@ def geocode_address(address: str, bbox=None):
         return None
     south, north, west, east = bbox
     bb = f"{south - 0.05},{west - 0.05},{north + 0.05},{east + 0.05}"
-    q = f"""[out:json][timeout:60];(
-  nwr["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
+    q = f"""[out:json][timeout:25];(
+  way["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
+  node["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
 );out center 3;"""
-    try:
-        els = _query_overpass(q).get("elements", [])
-    except Exception:  # noqa: BLE001
-        return None
+    els = []
+    for url in OVERPASS_ENDPOINTS[:2]:
+        try:
+            r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=35)
+            if r.status_code == 200:
+                els = r.json().get("elements", [])
+                break
+        except Exception:  # noqa: BLE001
+            time.sleep(1)
     if not els:
         return None
     el = els[0]
@@ -1136,7 +1157,8 @@ if address.strip() and city.strip() == stored["city"]:
     if marker is None:
         st.warning(f"Адрес «{address.strip()}» не найден — метка не поставлена.")
     else:
-        st.info(f"📌 Метка: {marker['display']}")
+        st.info(f"📌 Метка: {marker['display']} "
+                f"({marker['lat']:.5f}, {marker['lon']:.5f})")
 
 if map_type.startswith("3."):
     st.info("**Из чего складывается индекс спроса.** Каждая строка тултипа — "
