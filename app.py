@@ -939,7 +939,7 @@ with st.sidebar:
     st.header("Город")
     city = st.text_input("Введите город", value="Новосибирск")
     address = st.text_input("Улица и дом (необязательно)",
-                            placeholder="пр. Ленина, 1",
+                            placeholder="пр. Ленина, 1", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
     load_btn = st.button("🔍 Построить сетку", type="primary")
 
@@ -978,10 +978,18 @@ with st.sidebar:
             f = st.file_uploader("Файл Kontur Population (.gpkg / .geojson / .parquet)",
                                  type=["gpkg", "geojson", "json", "parquet"])
             if f is not None:
-                with st.spinner("Загружаю Kontur Population…"):
-                    _prev = (st.session_state.get("data") or {}).get("geo")
-                    kontur_df = load_kontur(f, 8,
-                                            _prev["bbox"] if _prev else None)
+                _kkey = (f.name, f.size)
+                if (st.session_state.get("_kontur_key") == _kkey
+                        and st.session_state.get("_kontur") is not None):
+                    kontur_df = st.session_state["_kontur"]  # уже разобран
+                else:
+                    with st.spinner("Загружаю Kontur Population…"):
+                        _prev = (st.session_state.get("data") or {}).get("geo")
+                        kontur_df = load_kontur(f, 8,
+                                                _prev["bbox"] if _prev else None)
+                    if kontur_df is not None:
+                        st.session_state["_kontur"] = kontur_df
+                        st.session_state["_kontur_key"] = _kkey
 
     # слайдер — в конце сайдбара: если выбран Kontur, его res ограничивает максимум
     _max_res = 10
@@ -1015,8 +1023,11 @@ if load_btn:
         st.error("Город не найден. Уточните название.")
         st.stop()
     # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
+    _prev_city = (st.session_state.get("data") or {}).get("city")
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
                                 "nodes": nodes_df, "ways": ways_df}
+    if _prev_city and _prev_city != city.strip():
+        st.session_state["addr_input"] = ""  # адрес от старого города не нужен
 
 stored = st.session_state.get("data")
 # миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
@@ -1069,7 +1080,7 @@ if map_type.startswith(("1.", "2.")):
 # лимита на точки нет: они рисуются одним GeoJSON-слоем и браузер это выдерживает
 
 marker = None
-if address.strip():
+if address.strip() and city.strip() == stored["city"]:
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
         try:
             marker = geocode_address(f"{address.strip()}, {stored['city']}")
