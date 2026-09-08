@@ -1003,8 +1003,15 @@ st.caption("Одна карта на экран. Источники: OpenStreetM
 
 # ------------------------------- сайдбар ---------------------------------- #
 with st.sidebar:
+    # если в поле города уже другой город — адрес от старого чистим ДО отрисовки
+    # (значение виджета после отрисовки менять нельзя — StreamlitWidgetAlreadyInstantiatedError)
+    _stored_city = (st.session_state.get("data") or {}).get("city")
+    _typed_city = st.session_state.get("city_input", "")
+    if _stored_city and _typed_city.strip() and _stored_city != _typed_city.strip():
+        st.session_state["addr_input"] = ""
+
     st.header("Город")
-    city = st.text_input("Введите город", value="Новосибирск")
+    city = st.text_input("Введите город", value="Новосибирск", key="city_input")
     address = st.text_input("Улица и дом (необязательно)",
                             placeholder="пр. Ленина, 1", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
@@ -1090,11 +1097,8 @@ if load_btn:
         st.error("Город не найден. Уточните название.")
         st.stop()
     # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
-    _prev_city = (st.session_state.get("data") or {}).get("city")
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
                                 "nodes": nodes_df, "ways": ways_df}
-    if _prev_city and _prev_city != city.strip():
-        st.session_state["addr_input"] = ""  # адрес от старого города не нужен
 
 stored = st.session_state.get("data")
 # миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
