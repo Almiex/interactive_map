@@ -943,13 +943,6 @@ with st.sidebar:
                             help="Если заполнить, на карте появится метка по этому адресу")
     load_btn = st.button("🔍 Построить сетку", type="primary")
 
-    st.header("Сетка H3")
-    res = st.select_slider(
-        "Размер гекса (resolution)",
-        options=[7, 8, 9, 10], value=8,
-        help="Res 7 ≈ 2,4 км между центрами · Res 8 ≈ 0,92 км · Res 9 ≈ 0,35 км · Res 10 ≈ 0,13 км",
-    )
-
     st.header("Тип карты (одна на экран)")
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
 
@@ -987,8 +980,28 @@ with st.sidebar:
             if f is not None:
                 with st.spinner("Загружаю Kontur Population…"):
                     _prev = (st.session_state.get("data") or {}).get("geo")
-                    kontur_df = load_kontur(f, res,
+                    kontur_df = load_kontur(f, 8,
                                             _prev["bbox"] if _prev else None)
+
+    # слайдер — в конце сайдбара: если выбран Kontur, его res ограничивает максимум
+    _max_res = 10
+    if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
+        _max_res = h3.get_resolution(kontur_df["h3"].iloc[0])
+        if st.session_state.get("res_slider", 8) > _max_res:
+            # слайдер ещё не отрисован в этом прогоне — менять значение можно
+            st.session_state["res_slider"] = _max_res
+
+    st.header("Сетка H3")
+    res = st.select_slider(
+        "Размер гекса (resolution)",
+        options=[7, 8, 9, 10], value=8, key="res_slider",
+        help="Res 7 ≈ 2,4 км между центрами · Res 8 ≈ 0,92 км · "
+             "Res 9 ≈ 0,35 км · Res 10 ≈ 0,13 км",
+    )
+    if _max_res < 10:
+        st.caption(f"⚠️ Kontur Population рассчитан в res{_max_res} — "
+                   f"детализация выше res{_max_res} недоступна. "
+                   f"Переключитесь на суррогатный источник для res 9–10.")
 
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
