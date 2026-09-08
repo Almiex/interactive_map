@@ -39,7 +39,7 @@ HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
 # расстояние между центрами соседних гексов, км (по стандарту Uber H3)
 RES_SPACING_KM = {7: 2.4, 8: 0.92, 9: 0.35, 10: 0.13}
 
-MAX_GRID_CELLS = 25000  # потолок сетки; отрисовка — одним GeoJSON-слоем
+MAX_GRID_CELLS = 50000  # потолок сетки; canvas-рендер держит десятки тысяч полигонов
 
 MAP_TYPES = [
     "1. Плотность населения",
@@ -705,7 +705,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
                source=None):
     center = [geo["lat"], geo["lon"]]
-    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
+    # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
+    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
+                   prefer_canvas=True)
 
     vals = series.reindex(grid).fillna(0.0)
     vmax = float(vals.max()) if len(vals) else 0.0
@@ -971,6 +973,7 @@ with st.sidebar:
             default=list(COMPETITOR_TYPES.keys()),
             help="Пустой выбор или Select all = все типы")
 
+
     m2_per_person = 30
     kontur_df = None
     if map_type.startswith("1."):
@@ -1106,6 +1109,7 @@ elif map_type.startswith("5."):
 elif map_type.startswith("7."):
     extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES
                      if sub_option is None or name in sub_option}
+
 
 _src = None
 if map_type.startswith("1."):
