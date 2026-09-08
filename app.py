@@ -770,7 +770,7 @@ COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd
 
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
-               source=None):
+               source=None, yzoom=15):
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
@@ -800,6 +800,11 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         props = {"v": rv}
         if source:
             props["src"] = source
+        # киллер-фича: клик по гексу -> ссылка на Яндекс.Карты по центру гекса
+        _lat, _lon = h3.cell_to_latlng(cell)
+        props["link"] = (f'<a href="https://yandex.ru/maps/?pt={_lon:.6f},{_lat:.6f}'
+                         f'&z={yzoom}&l=map" target="_blank" rel="noopener">'
+                         f'🗺 Открыть в Яндекс.Картах</a>')
         # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
         for c in extra_cols:
             props[safe_cols[c]] = float(hex_extra.loc[cell, c]) \
@@ -830,6 +835,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             fields=["v"] + [safe_cols[c] for c in extra_cols] + src_fields,
             aliases=aliases, localize=True,
         ),
+        popup=folium.GeoJsonPopup(fields=["link"], aliases=[""], labels=False,
+                                  localize=False, max_width=280),
     ).add_to(m)
 
     cm_legend.add_to(m)
@@ -1231,7 +1238,8 @@ if map_type.startswith("1."):
 
 render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
-           legend=legend, source=_src)
+           legend=legend, source=_src,
+           yzoom={7: 13, 8: 15, 9: 16, 10: 17}.get(res_eff, 15))
 if map_type.startswith("1.") and kontur_df is None:
     st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное "
                "заселение и незавершённое строительство. Для точной численности "
