@@ -973,31 +973,46 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     lngs = [p[1] for b_ in bounds for p in b_]
     m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
 
-    # Вид карты (центр/зум) запоминаем в localStorage и восстанавливаем
-    # после каждой пересборки — смена слоя/resolution не отдаляет карту.
-    # Клиентский механизм: pan/zoom НЕ вызывают rerun Streamlit (в отличие
-    # от returned_objects=["center","zoom"]). Ключ привязан к городу — для
-    # нового города сработает обычный fit_bounds выше. Скрипт добавляем в
-    # конец figure.script, чтобы выполнился ПОСЛЕ fit_bounds и перебил его.
+    # Вид карты (центр/зум) запоминаем в localStorage и восстанавливаем после
+    # каждой пересборки — смена слоя/resolution не отдаляет карту. Клиентский
+    # механизм: pan/zoom НЕ вызывают rerun Streamlit. Ключ привязан к городу —
+    # для нового города сработает обычный fit_bounds выше.
+    # NB: обязательно MacroElement c {% macro script %} как РЕБЁНОК карты:
+    # streamlit-folium собирает JS только из script-макросов элементов дерева
+    # карты (plain Element молча пропускается). Восстановление — по window.load
+    # (все script-теги уже выполнились, включая fitBounds) + повтор через 400мс
+    # против анимации fitBounds. Имя переменной карты берём из this._parent —
+    # оно совпадает с тем, что сгенерировал сам шаблон карты.
+    from branca.element import MacroElement, Template
     _city_tag = hashlib.md5(geo["display"].encode("utf-8")).hexdigest()[:10]
-    m.get_root().script.add_child(folium.Element(f"""
-<script>
-(function() {{
-  var KEY = "geohex_view_{_city_tag}";
-  var m = {m.get_name()};
-  m.on("moveend", function() {{
-    try {{
-      localStorage.setItem(KEY, JSON.stringify({{
-        c: [m.getCenter().lat, m.getCenter().lng], z: m.getZoom()}}));
-    }} catch (e) {{}}
-  }});
-  try {{
-    var v = JSON.parse(localStorage.getItem(KEY) || "null");
-    if (v && v.c && v.z != null) m.setView(v.c, v.z);
-  }} catch (e) {{}}
-}})();
-</script>
-"""))
+    _view_saver = MacroElement()
+    _view_saver._template = Template("""
+{% macro script(this, kwargs) %}
+(function() {
+  var KEY = "geohex_view_{{ this.city_tag }}";
+  var m = {{ this._parent.get_name() }};
+  function applySaved() {
+    try {
+      var v = JSON.parse(localStorage.getItem(KEY) || "null");
+      if (v && v.c && v.z != null) {
+        m.setView(v.c, v.z, {animate: false});
+        setTimeout(function() { m.setView(v.c, v.z, {animate: false}); }, 400);
+      }
+    } catch (e) {}
+    m.on("moveend", function() {
+      try {
+        localStorage.setItem(KEY, JSON.stringify({
+          c: [m.getCenter().lat, m.getCenter().lng], z: m.getZoom()}));
+      } catch (e) {}
+    });
+  }
+  if (document.readyState === "complete") { applySaved(); }
+  else { window.addEventListener("load", applySaved); }
+})();
+{% endmacro %}
+""")
+    _view_saver.city_tag = _city_tag
+    m.add_child(_view_saver)
 
     # Круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
     # Ключевое: они живут в ОТДЕЛЬНОМ FeatureGroup и передаются через
