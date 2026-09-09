@@ -807,11 +807,15 @@ class HexTooltip(folium.GeoJsonTooltip):
     return div
     }
     """
+    # NB: ТОЛЬКО встроенные фильтры jinja2 (tojson/safe). Кастомный фильтр
+    # folium "tojavascript" живёт в его собственном окружении — в сыром
+    # jinja2.Template его нет и компиляция падает с TemplateAssertionError.
+    # tooltip_options — плоский dict, tojson даёт валидный JS-литерал.
     _template = _Jinja2Template(
         """
     {% macro script(this, kwargs) %}
     {{ this._parent.get_name() }}.bindTooltip("""
-        + base_template + """,{{ this.tooltip_options | tojavascript }});
+        + base_template + """,{{ this.tooltip_options | tojson }});
                      {% endmacro %}
                      """
     )
