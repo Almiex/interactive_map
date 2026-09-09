@@ -764,6 +764,20 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 
 
 # --------------------------------------------------------------------------- #
+#  Агрегаты с кэшем: данные города тянем из session по версии, а не хэшируем
+#  многомегабайтные DataFrame при каждом rerun
+# --------------------------------------------------------------------------- #
+@st.cache_data(ttl=3600, show_spinner=False)
+def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
+                           kontur_loaded, m2_per_person):
+    stored = st.session_state["data"]
+    _kontur = st.session_state.get("_kontur") if kontur_loaded else None
+    return compute_series(map_type, sub_option, res_eff,
+                          (stored["geo"], stored["nodes"], stored["ways"]),
+                          kontur_df=_kontur, m2_per_person=m2_per_person)
+
+
+# --------------------------------------------------------------------------- #
 #  Отрисовка ОДНОЙ карты
 # --------------------------------------------------------------------------- #
 COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
@@ -773,16 +787,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                source=None, yzoom=15):
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
-    # streamlit-folium пересобирает карту при КАЖДОМ rerun -> fit_bounds снова
-    # отдалял бы карту. Поэтому после первого рендера вид храним в session_state
-    saved_view = st.session_state.get("map_view")
-    if saved_view:
-        m = folium.Map(location=[saved_view["lat"], saved_view["lng"]],
-                       zoom_start=saved_view["zoom"], tiles="OpenStreetMap",
-                       control_scale=True, prefer_canvas=True)
-    else:
-        m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
-                       prefer_canvas=True)
+    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
+                   prefer_canvas=True)
 
     vals = series.reindex(grid).fillna(0.0)
     vmax = float(vals.max()) if len(vals) else 0.0
@@ -881,23 +887,30 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                                           localize=False),
         ).add_to(m)
 
-    if not saved_view:  # иначе rerun сбросил бы вид пользователя
-        bounds = [h3.cell_to_boundary(c) for c in grid]
-        lats = [p[0] for b_ in bounds for p in b_]
-        lngs = [p[1] for b_ in bounds for p in b_]
-        m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
+    bounds = [h3.cell_to_boundary(c) for c in grid]
+    lats = [p[0] for b_ in bounds for p in b_]
+    lngs = [p[1] for b_ in bounds for p in b_]
+    m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
 
-    # круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
-    # interactive=False: круги не ловят события мыши — тултипы гексов под ними
-    # работают, клик по линии круга попадает в гекс под ним
+    # Круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
+    # Ключевое: они живут в ОТДЕЛЬНОМ FeatureGroup и передаются через
+    # feature_group_to_add — streamlit-folium подменяет такой слой ДИНАМИЧЕСКИ,
+    # без пересборки карты: зум/центр/тултипы не трогаются, ничего не мигает.
+    # interactive=False прописываем прямо в options: у части версий folium
+    # kwargs векторных слоёв молча отбрасываются, а так флаг точно долетит
+    # до Leaflet и круги не будут перехватывать мышь (тултипы гексов под
+    # кругами работают, клик по линии круга попадает в гекс под ней).
+    circles_fg = None
     if st.session_state.get("circle_center"):
         _cc = st.session_state["circle_center"]
-        folium.Circle(location=_cc, radius=2000, color="#2ca02c", weight=2.5,
-                      dash_array="8 6", fill=False, interactive=False).add_to(m)
-        folium.Circle(location=_cc, radius=5000, color="#d62728", weight=2.5,
-                      dash_array="8 6", fill=False, interactive=False).add_to(m)
+        circles_fg = folium.FeatureGroup(name="circles")
+        for _r, _col in ((2000, "#2ca02c"), (5000, "#d62728")):
+            _c = folium.Circle(location=_cc, radius=_r, color=_col, weight=2.5,
+                               dash_array="8 6", fill=False)
+            _c.options["interactive"] = False
+            circles_fg.add_child(_c)
         # ссылка на Яндекс.Карты — Streamlit-кнопка, а не leaflet-попап:
-        # попап гаснет при каждом rerun (карта пересобирается), кнопка — нет
+        # попап гаснет при пересборке карты, кнопка — нет
         _la, _lo = _cc
         st.link_button("🗺 Открыть выбранный гекс в Яндекс.Картах",
                        f"https://yandex.ru/maps/?pt={_lo:.6f},{_la:.6f}"
@@ -909,13 +922,13 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             tooltip=marker["display"],
             icon=folium.Icon(color="blue", icon="glyphicon-map-marker"),
         ).add_to(m)
+    # returned_objects ТОЛЬКО last_object_clicked: pan/zoom/драг карты не меняют
+    # возвращаемое значение -> Streamlit НЕ делает rerun -> карта летает.
+    # Клик по гексу меняет last_object_clicked -> один rerun -> новый
+    # feature_group_to_add подменяет круги на лету, карта не пересобирается.
     out = st_folium(m, width=1150, height=680,
-                    returned_objects=["last_object_clicked", "center", "zoom"])
-    # запоминаем вид, чтобы при следующих rerun карта не отлетала на fit_bounds
-    if out and out.get("center") and out.get("zoom") is not None:
-        st.session_state["map_view"] = {
-            "lat": out["center"]["lat"], "lng": out["center"]["lng"],
-            "zoom": out["zoom"]}
+                    returned_objects=["last_object_clicked"],
+                    feature_group_to_add=circles_fg)
     # streamlit-folium отдаёт last_object_clicked как {"lat", "lng"} —
     # точку клика (feature с properties НЕ возвращается). Берём гекс,
     # содержащий точку клика, в resolution текущей сетки, центр его — центр кругов.
@@ -1065,9 +1078,9 @@ with st.sidebar:
     if st.button("Сбросить круги", disabled=not st.session_state.get("circle_center"),
                  help="Убрать пунктирные круги 2/5 км с карты"):
         st.session_state.pop("circle_center", None)
-    st.caption("💡 Клик по гексу — круги 2 км (зелёный) и 5 км (красный) с центром "
-               "в нём + кнопка «Открыть в Яндекс.Картах» над картой. Вид карты "
-               "при этом сохраняется.")
+    st.caption("💡 Клик по гексу — пунктирные круги 2 км и 5 км + кнопка "
+               "«Открыть в Яндекс.Картах» над картой. Pan/zoom карты НЕ "
+               "перезагружает приложение.")
 
     st.header("Тип карты (одна на экран)")
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
@@ -1150,8 +1163,10 @@ if load_btn:
         st.stop()
     # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
-                                "nodes": nodes_df, "ways": ways_df}
-    st.session_state.pop("map_view", None)  # вид старого города не переносим
+                                "nodes": nodes_df, "ways": ways_df,
+                                # версия данных — ключ кэша агрегатов
+                                "ver": st.session_state.get("_data_ver", 0) + 1}
+    st.session_state["_data_ver"] = st.session_state["data"]["ver"]
 
 stored = st.session_state.get("data")
 # миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
@@ -1192,10 +1207,9 @@ if len(grid) > MAX_GRID_CELLS:
     st.stop()
 
 with st.spinner("Считаю агрегаты по гексам…"):
-    series, unit, hex_extra, points = compute_series(map_type, sub_option, res_eff,
-                                                     (geo, nodes_df, ways_df),
-                                                     kontur_df=kontur_df,
-                                                     m2_per_person=m2_per_person)
+    series, unit, hex_extra, points = _compute_series_cached(
+        map_type, sub_option, res_eff, stored["ver"],
+        kontur_df is not None, m2_per_person)
 
 # суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
 if map_type.startswith(("1.", "2.")):
