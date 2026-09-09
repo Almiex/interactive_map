@@ -797,7 +797,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         ring.append(ring[0])
         v = float(vals.get(cell, 0.0))
         rv = round(v, 2) if vmax < 100 else round(v)  # большие числа — целыми
-        props = {"v": rv, "cell": cell}
+        props = {"v": rv}
         if source:
             props["src"] = source
         # киллер-фича: клик по гексу -> ссылка на Яндекс.Карты по центру гекса
@@ -903,14 +903,17 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         ).add_to(m)
     out = st_folium(m, width=1150, height=680,
                     returned_objects=["last_object_clicked"])
+    # streamlit-folium отдаёт last_object_clicked как {"lat", "lng"} —
+    # точку клика (feature с properties НЕ возвращается). Берём гекс,
+    # содержащий точку клика, в resolution текущей сетки, центр его — центр кругов.
     clicked = (out or {}).get("last_object_clicked")
-    if isinstance(clicked, dict):
-        cell = (clicked.get("properties") or {}).get("cell")
-        if cell:
-            new_center = tuple(h3.cell_to_latlng(cell))
-            if st.session_state.get("circle_center") != new_center:
-                st.session_state["circle_center"] = new_center
-                st.rerun()  # без rerun круги отрисуются только при след. действии
+    if isinstance(clicked, dict) and "lat" in clicked and "lng" in clicked:
+        cell = h3.latlng_to_cell(clicked["lat"], clicked["lng"],
+                                 h3.get_resolution(grid[0]))
+        new_center = tuple(h3.cell_to_latlng(cell))
+        if st.session_state.get("circle_center") != new_center:
+            st.session_state["circle_center"] = new_center
+            st.rerun()  # без rerun круги отрисуются только при след. действии
 
 
 # --------------------------------------------------------------------------- #
