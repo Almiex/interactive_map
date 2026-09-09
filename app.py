@@ -177,22 +177,48 @@ PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_st
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str):
-    r = requests.get(NOMINATIM_URL, params={
-        "q": city, "format": "json", "limit": 1, "accept-language": "ru",
-        "polygon_geojson": 1,          # полигон административной границы
-        "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
-    }, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if not data:
-        return None
-    d = data[0]
-    return {
-        "lat": float(d["lat"]), "lon": float(d["lon"]),
-        "display": d["display_name"],
-        "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
-        "geojson": d.get("geojson"),                   # граница города или None
-    }
+    """Геокодинг с повторами: публичный Nominatim режет частые запросы
+    ответом 429 (лимит ~1 запрос/сек с IP) — ждём и пробуем ещё,
+    до 4 попыток с нарастающей паузой."""
+    last_status = None
+    for attempt in range(4):
+        try:
+            r = requests.get(NOMINATIM_URL, params={
+                "q": city, "format": "json", "limit": 1, "accept-language": "ru",
+                "polygon_geojson": 1,          # полигон административной границы
+                "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
+            }, headers=HEADERS, timeout=30)
+        except requests.RequestException as e:
+            last_status = f"{type(e).__name__}: {e}"
+            time.sleep(2 + 2 * attempt)
+            continue
+        if r.status_code == 429:
+            # лимит запросов: пауза; Nominatim может подсказать её в Retry-After
+            try:
+                wait = int(r.headers.get("Retry-After", 0))
+            except (ValueError, TypeError):
+                wait = 0
+            time.sleep(max(wait, 5 * (attempt + 1)))
+            continue
+        if r.status_code != 200:
+            last_status = f"HTTP {r.status_code}"
+            time.sleep(2 + 2 * attempt)
+            continue
+        data = r.json()
+        if not data:
+            return None
+        d = data[0]
+        return {
+            "lat": float(d["lat"]), "lon": float(d["lon"]),
+            "display": d["display_name"],
+            "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
+            "geojson": d.get("geojson"),                   # граница города или None
+        }
+    raise RuntimeError(
+        "Nominatim (геокодер OSM) временно ограничил запросы с этого IP "
+        "(лимит ~1 запрос/сек). Подождите 1–2 минуты и нажмите "
+        "«Построить сетку» снова."
+        + (f" Последний ответ: {last_status}." if last_status else ""))
 
 # --------------------------------------------------------------------------- #
 #  Геокодинг адреса (улица, дом) — опционально
@@ -210,17 +236,22 @@ def geocode_address(address: str, bbox=None):
         variants.append(v)
 
     for cand in variants:
-        try:
-            r = requests.get(NOMINATIM_URL, params={
-                "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
-                "addressdetails": 1,
-            }, headers=HEADERS, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-            else:
+        data = []
+        for _attempt in (1, 2):  # один повтор с паузой при 429 (лимит Nominatim)
+            try:
+                r = requests.get(NOMINATIM_URL, params={
+                    "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
+                    "addressdetails": 1,
+                }, headers=HEADERS, timeout=15)
+                if r.status_code == 429:
+                    time.sleep(5)
+                    continue
+                if r.status_code == 200:
+                    data = r.json()
+                break
+            except Exception:  # noqa: BLE001
                 data = []
-        except Exception:  # noqa: BLE001
-            data = []
+                break
         if data:
             d = data[0]
             addr = d.get("address", {})
@@ -1217,11 +1248,14 @@ with st.sidebar:
         st.session_state["addr_input"] = ""
 
     st.header("Город")
-    def _clear_addr():
-        st.session_state["addr_input"] = ""  # адрес от старого города не нужен
+    def _city_committed():
+        # фиксация значения (Enter / уход из поля) = нажать "Построить сетку"
+        st.session_state["addr_input"] = ""       # адрес от старого города не нужен
+        st.session_state["build_on_enter"] = True  # флаг для блока загрузки
 
     city = st.text_input("Введите город", value="Новосибирск", key="city_input",
-                         on_change=_clear_addr)
+                         on_change=_city_committed,
+                         help="Enter в поле = кнопка «Построить сетку»")
     address = st.text_input("Улица и дом (необязательно)",
                             placeholder="пр. Ленина, 1", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
@@ -1318,7 +1352,7 @@ with st.sidebar:
 if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_type):
     st.session_state.pop("circle_sums", None)
 
-if load_btn:
+if load_btn or st.session_state.pop("build_on_enter", False):
     with st.spinner("Загружаю данные OpenStreetMap через Overpass API (1–5 минут)…"):
         try:
             geo, nodes_df, ways_df = fetch_city_data(city)
