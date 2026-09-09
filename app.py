@@ -42,6 +42,25 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 PHOTON_URL = "https://photon.komoot.io/api/"
 HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
 
+# ── Защита от бана Nominatim ──────────────────────────────────────────────
+# Публичный Nominatim разрешает ~1 запрос/сек с IP; на shared-хостинге IP
+# общий с чужими приложениями — лимит срабатывает «сам». Поэтому:
+# 1) throttle: приложение физически не шлёт запросы чаще интервала;
+# 2) без ретраев при 429: повтор на общем IP почти всегда снова 429,
+#    а агрессивные попытки продлевают блокировку. При 429 уходим на резерв.
+NOMINATIM_MIN_INTERVAL = 1.2    # минимальный интервал между запросами, сек
+_last_nominatim_ts = [0.0]      # изменяемая ячейка: время последнего запроса
+
+
+def _nominatim_throttle():
+    """Гарантирует NOMINATIM_MIN_INTERVAL между запросами к Nominatim
+    по ВСЕМУ приложению (город, адрес, догеокодинг за полигоном)."""
+    now = time.monotonic()
+    gap = now - _last_nominatim_ts[0]
+    if gap < NOMINATIM_MIN_INTERVAL:
+        time.sleep(NOMINATIM_MIN_INTERVAL - gap)
+    _last_nominatim_ts[0] = time.monotonic()
+
 # расстояние между центрами соседних гексов, км (по стандарту Uber H3)
 RES_SPACING_KM = {7: 2.4, 8: 0.92, 9: 0.35, 10: 0.13}
 
@@ -180,42 +199,31 @@ PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_st
 #  Геокодинг
 # --------------------------------------------------------------------------- #
 def _nominatim_geocode(city: str):
-    """Основной геокодер OSM (отдаёт полигон административной границы).
-    -> ("ok", geo) | ("notfound", None) | ("unavailable", None).
-    Повторов мало и пауза одна: Nominatim банит IP за частые попытки —
-    агрессивный ретрай делает блокировку длиннее, а не короче."""
-    for attempt in (1, 2):
-        try:
-            r = requests.get(NOMINATIM_URL, params={
-                "q": city, "format": "json", "limit": 1, "accept-language": "ru",
-                "polygon_geojson": 1,          # полигон административной границы
-                "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
-            }, headers=HEADERS, timeout=30)
-        except requests.RequestException:
-            return "unavailable", None
-        if r.status_code == 429:
-            if attempt == 1:
-                # лимит: ОДНА вежливая пауза (Retry-After, если прислали)
-                try:
-                    wait = int(r.headers.get("Retry-After", 0))
-                except (ValueError, TypeError):
-                    wait = 0
-                time.sleep(max(wait, 15))
-                continue
-            return "unavailable", None
-        if r.status_code != 200:
-            return "unavailable", None
-        data = r.json()
-        if not data:
-            return "notfound", None
-        d = data[0]
-        return "ok", {
-            "lat": float(d["lat"]), "lon": float(d["lon"]),
-            "display": d["display_name"],
-            "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
-            "geojson": d.get("geojson"),                   # граница города или None
-        }
-    return "unavailable", None
+    """Nominatim: ОДИН запрос (после throttle), без ретраев — при 429
+    сразу "unavailable", вызывающий код уходит на резерв/фолбэк.
+    Отдаёт полигон административной границы.
+    -> ("ok", geo) | ("notfound", None) | ("unavailable", None)"""
+    _nominatim_throttle()
+    try:
+        r = requests.get(NOMINATIM_URL, params={
+            "q": city, "format": "json", "limit": 1, "accept-language": "ru",
+            "polygon_geojson": 1,          # полигон административной границы
+            "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
+        }, headers=HEADERS, timeout=30)
+    except requests.RequestException:
+        return "unavailable", None
+    if r.status_code != 200:   # 429 и прочее — не дожимаем сервер
+        return "unavailable", None
+    data = r.json()
+    if not data:
+        return "notfound", None
+    d = data[0]
+    return "ok", {
+        "lat": float(d["lat"]), "lon": float(d["lon"]),
+        "display": d["display_name"],
+        "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
+        "geojson": d.get("geojson"),                   # граница города или None
+    }
 
 
 def _photon_geocode(city: str):
@@ -252,24 +260,32 @@ def _photon_geocode(city: str):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str):
-    """Основной Nominatim; если он ограничил/упал — резервный Photon.
-    Возвращает geo-dict или None, если город нигде не найден."""
-    status, geo = _nominatim_geocode(city)
-    if status == "ok":
-        return geo
-    if status == "notfound":
+    """Photon — ОСНОВНОЙ геокодер города (лимиты мягкие, не банит за
+    чужой траф shared-хостинга). Nominatim дёргаем одним throttled-запросом
+    ради ПОЛИГОНА границы: при 429 молча живём без полигона — сетка
+    построится по bbox (штатный прямоугольный фолбэк). Возвращает geo-dict
+    или None, если город нигде не найден."""
+    status, geo = _photon_geocode(city)
+    if status != "ok":
+        # Photon не нашёл/упал — резервный Nominatim (полный ответ)
+        status2, geo2 = _nominatim_geocode(city)
+        if status2 == "ok":
+            return geo2
+        if status2 == "unavailable":
+            raise RuntimeError(
+                "Геокодеры временно недоступны (Nominatim ограничил запросы с "
+                "этого IP — на shared-хостинге лимит часто срабатывает из-за "
+                "чужого трафика). Подождите 1–2 минуты и нажмите «Построить "
+                "сетку» снова.")
         return None
-    # Nominatim недоступен (429/сеть) — пробуем резервный сервис
-    status2, geo2 = _photon_geocode(city)
-    if status2 == "ok":
-        return geo2
-    if status2 == "unavailable":
-        raise RuntimeError(
-            "Геокодеры временно недоступны: Nominatim ограничил запросы с этого "
-            "IP (лимит ~1 запрос/сек; на shared-хостинге лимит часто срабатывает "
-            "из-за чужого трафика). Подождите 1–2 минуты и нажмите «Построить "
-            "сетку» снова.")
-    return None
+    # обогащаем полигоном границы (1 запрос на город, кэш на сутки;
+    # результат кэшируется целиком — Nominatim больше не трогаем)
+    st_, geo2 = _nominatim_geocode(city)
+    if st_ == "ok" and geo2.get("geojson"):
+        geo["geojson"] = geo2["geojson"]
+        geo["bbox"] = geo2["bbox"]
+        geo["display"] = geo2["display"]   # у Nominatim адрес полнее
+    return geo
 
 # --------------------------------------------------------------------------- #
 #  Геокодинг адреса (улица, дом) — опционально
@@ -287,22 +303,18 @@ def geocode_address(address: str, bbox=None):
         variants.append(v)
 
     for cand in variants:
-        data = []
-        for _attempt in (1, 2):  # один повтор с паузой при 429 (лимит Nominatim)
-            try:
-                r = requests.get(NOMINATIM_URL, params={
-                    "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
-                    "addressdetails": 1,
-                }, headers=HEADERS, timeout=15)
-                if r.status_code == 429:
-                    time.sleep(5)
-                    continue
-                if r.status_code == 200:
-                    data = r.json()
-                break
-            except Exception:  # noqa: BLE001
-                data = []
-                break
+        try:
+            _nominatim_throttle()
+            r = requests.get(NOMINATIM_URL, params={
+                "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
+                "addressdetails": 1,
+            }, headers=HEADERS, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+            else:
+                data = []   # 429 и прочее — без ретраев, throttle выше
+        except Exception:  # noqa: BLE001
+            data = []
         if data:
             d = data[0]
             addr = d.get("address", {})
