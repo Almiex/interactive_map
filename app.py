@@ -23,6 +23,7 @@ import folium
 import streamlit as st
 import geopandas as gpd
 from shapely.geometry import Polygon
+from shapely.ops import unary_union
 from streamlit_folium import st_folium
 from branca.colormap import LinearColormap
 from jinja2 import Template as _Jinja2Template
@@ -726,6 +727,35 @@ def _dist_km(a, b):
     return 6371.0 * 2 * math.asin(math.sqrt(h))
 
 
+def _dissolve_hexes(cells):
+    """Объединение гексов в единую геометрию: общие границы растворяются.
+    Возвращает shapely Polygon/MultiPolygon или None. Смежные H3-гексы
+    делят вершины границ побитово, unary_union сливает их точно."""
+    if not cells:
+        return None
+    polys = []
+    for c in cells:
+        ring = [(lng, lat) for lat, lng in h3.cell_to_boundary(c)]
+        p = Polygon(ring)
+        polys.append(p if p.is_valid else p.buffer(0))
+    return unary_union(polys)
+
+
+def _union_rings_latlng(cells):
+    """Кольца внешних границ объединённых гексов в (lat, lng) — для
+    подсветки на карте. Общие границы растворены; дырки (если цепочка
+    замкнулась вокруг невыбранного гекса) идут отдельными кольцами."""
+    geom = _dissolve_hexes(cells)
+    if geom is None:
+        return []
+    rings = []
+    for p in ([geom] if geom.geom_type == "Polygon" else list(geom.geoms)):
+        rings.append([(lat, lng) for lng, lat in p.exterior.coords])
+        for h in p.interiors:
+            rings.append([(lat, lng) for lng, lat in h.coords])
+    return rings
+
+
 def sums_in_circles(series, center, radii_km=(2.0, 5.0)):
     """Сумма показателей гексов (series), ЦЕНТРЫ которых попадают в радиус.
     Возвращает {радиус_км: (сумма, число гексов)} или None."""
@@ -1204,14 +1234,13 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             folium_obj.options["interactive"] = False
             return folium_obj
 
-        # подсветка выбранных гексов: синяя обводка границ. В режиме
-        # мультивыбора обводятся все гексы цепочки. Живёт в динамическом
-        # слое, чтобы клик не пересобирал всю карту
+        # подсветка выбранных гексов: синий контур ЕДИНОЙ фигуры (общие
+        # границы растворены). Живёт в динамическом слое, чтобы клик не
+        # пересобирал всю карту
         _base_cell = h3.latlng_to_cell(_cc[0], _cc[1], _res)
         _sel_cells = list(dict.fromkeys(
             [_base_cell] + list(st.session_state.get("hex_chain") or [])))
-        for _c in _sel_cells:
-            _ring = [tuple(p) for p in h3.cell_to_boundary(_c)]
+        for _ring in _union_rings_latlng(_sel_cells):
             circles_fg.add_child(_passive(folium.Polygon(
                 locations=_ring, color="#1f6fd6", weight=3, fill=False)))
         # круги — по флажкам сайдбара (оба выкл = только подсветка гекса)
@@ -1720,16 +1749,27 @@ if st.session_state.get("circle_center"):
                   key="export_name")
     _name = st.session_state.get("export_name", "Без названия") or "Без названия"
 
-    def _hex_feature(i, cell):
-        ring = [[lng, lat] for lat, lng in h3.cell_to_boundary(cell)]
-        ring.append(ring[0])  # замыкаем кольцо
-        return {"type": "Feature", "id": i,
-                "geometry": {"type": "Polygon", "coordinates": [ring]}}
+    def _poly_rings_geojson(p):
+        # кольца полигона в порядке GeoJSON: сначала внешнее, затем дырки;
+        # shapely-координаты уже замкнуты (первая = последней)
+        rings = [[[lng, lat] for lng, lat in p.exterior.coords]]
+        rings += [[[lng, lat] for lng, lat in h.coords] for h in p.interiors]
+        return rings
+
+    _geom = _dissolve_hexes(_cells)   # общие границы растворены
+    _features = []
+    if _geom is not None:
+        _polys = ([_geom] if _geom.geom_type == "Polygon"
+                  else list(_geom.geoms))
+        for _fid, _p in enumerate(_polys):
+            _features.append({"type": "Feature", "id": _fid,
+                              "geometry": {"type": "Polygon",
+                                           "coordinates": _poly_rings_geojson(_p)}})
 
     _export_gj = {"type": "FeatureCollection",
                   "metadata": {"name": _name,
                                "creator": "Yandex Map Constructor"},
-                  "features": [_hex_feature(i, c) for i, c in enumerate(_cells)]}
+                  "features": _features}
     st.download_button(
         f"⬇ Скачать GeoJSON выделенных гексов ({len(_cells)})",
         data=json.dumps(_export_gj, ensure_ascii=False),
