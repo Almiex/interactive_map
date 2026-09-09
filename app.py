@@ -202,7 +202,7 @@ def _nominatim_geocode(city: str):
     """Nominatim: ОДИН запрос (после throttle), без ретраев — при 429
     сразу "unavailable", вызывающий код уходит на резерв/фолбэк.
     Отдаёт полигон административной границы.
-    -> ("ok", geo) | ("notfound", None) | ("unavailable", None)"""
+    -> ("ok", geo, "") | ("notfound", None, "") | ("unavailable", None, причина)"""
     _nominatim_throttle()
     try:
         r = requests.get(NOMINATIM_URL, params={
@@ -210,36 +210,36 @@ def _nominatim_geocode(city: str):
             "polygon_geojson": 1,          # полигон административной границы
             "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
         }, headers=HEADERS, timeout=30)
-    except requests.RequestException:
-        return "unavailable", None
+    except requests.RequestException as e:
+        return "unavailable", None, f"{type(e).__name__}: {e}"
     if r.status_code != 200:   # 429 и прочее — не дожимаем сервер
-        return "unavailable", None
+        return "unavailable", None, f"HTTP {r.status_code}"
     data = r.json()
     if not data:
-        return "notfound", None
+        return "notfound", None, ""
     d = data[0]
     return "ok", {
         "lat": float(d["lat"]), "lon": float(d["lon"]),
         "display": d["display_name"],
         "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
         "geojson": d.get("geojson"),                   # граница города или None
-    }
+    }, ""
 
 
 def _photon_geocode(city: str):
     """Резервный геокодер Photon (komoot). Границы не отдаёт — в geo
     кладём bbox из extent либо небольшой квадрат вокруг точки; дальше
     сработает штатный прямоугольный фолбэк сетки.
-    -> ("ok", geo) | ("notfound", None) | ("unavailable", None)"""
+    -> ("ok", geo, "") | ("notfound", None, "") | ("unavailable", None, причина)"""
     try:
         r = requests.get(PHOTON_URL,
                          params={"q": city, "limit": 1, "lang": "ru"},
-                         headers=HEADERS, timeout=30)
+                         headers=HEADERS, timeout=15)  # короткий: при недоступности быстрее уйдём на резерв
         if r.status_code != 200:
-            return "unavailable", None
+            return "unavailable", None, f"HTTP {r.status_code}"
         feats = r.json().get("features", [])
         if not feats:
-            return "notfound", None
+            return "notfound", None, ""
         f0 = feats[0]
         lon, lat = f0["geometry"]["coordinates"]
         p = f0["properties"]
@@ -253,39 +253,78 @@ def _photon_geocode(city: str):
         else:
             bbox = [lat - 0.05, lat + 0.05, lon - 0.05, lon + 0.05]
         return "ok", {"lat": float(lat), "lon": float(lon), "display": display,
-                      "bbox": bbox, "geojson": None}
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        return "unavailable", None
+                      "bbox": bbox, "geojson": None}, ""
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as e:
+        return "unavailable", None, f"{type(e).__name__}: {e}"
+
+
+def _overpass_geocode(city: str):
+    """КРАЙНИЙ резерв: граница города через Overpass — те самые зеркала,
+    через которые приложение уже грузит данные (значит, они ДОСТУПНЫ из
+    этого деплоя, в отличие от внешних геокодеров). Ищем отношение-границу
+    с точным именем; геометрию не тянем — только bbox (сетка умеет жить
+    по прямоугольнику). Nominatim/Photon не нужны.
+    -> ("ok", geo, "") | ("notfound", None, "") | ("unavailable", None, причина)"""
+    try:
+        name_re = "^" + re.escape(city.strip()) + "$"
+        q = f"""[out:json][timeout:60];
+rel["name"~"{name_re}", i]["boundary"="administrative"];
+out tags bb;"""
+        els = _query_overpass(q).get("elements", [])
+        if not els:
+            return "notfound", None, ""
+        # город (admin_level 6/8) предпочтительнее крупных регионов
+        els.sort(key=lambda e: int(e.get("tags", {}).get("admin_level", "99")))
+        b = els[0].get("bounds")
+        if not b:
+            return "notfound", None, ""
+        bbox = [float(b["minlat"]), float(b["maxlat"]),
+                float(b["minlon"]), float(b["maxlon"])]
+        return "ok", {
+            "lat": (bbox[0] + bbox[1]) / 2, "lon": (bbox[2] + bbox[3]) / 2,
+            "display": f"{city} (граница OSM, bbox)",
+            "bbox": bbox, "geojson": None,
+        }, ""
+    except Exception as e:  # noqa: BLE001
+        return "unavailable", None, f"{type(e).__name__}: {e}"
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str):
-    """Photon — ОСНОВНОЙ геокодер города (лимиты мягкие, не банит за
-    чужой траф shared-хостинга). Nominatim дёргаем одним throttled-запросом
-    ради ПОЛИГОНА границы: при 429 молча живём без полигона — сетка
-    построится по bbox (штатный прямоугольный фолбэк). Возвращает geo-dict
-    или None, если город нигде не найден."""
-    status, geo = _photon_geocode(city)
-    if status != "ok":
-        # Photon не нашёл/упал — резервный Nominatim (полный ответ)
-        status2, geo2 = _nominatim_geocode(city)
-        if status2 == "ok":
-            return geo2
-        if status2 == "unavailable":
-            raise RuntimeError(
-                "Геокодеры временно недоступны (Nominatim ограничил запросы с "
-                "этого IP — на shared-хостинге лимит часто срабатывает из-за "
-                "чужого трафика). Подождите 1–2 минуты и нажмите «Построить "
-                "сетку» снова.")
+    """Цепочка геокодеров: Photon (основной, мягкие лимиты) -> Nominatim
+    (полигон границы) -> Overpass (крайний резерв, точно доступен из
+    деплоя). Все причины отказов собираются и показываются в ошибке.
+    Возвращает geo-dict или None, если город нигде не найден."""
+    errors = []
+    status, geo, err = _photon_geocode(city)
+    if status == "ok":
+        # догеокодинг ради ПОЛИГОНА границы: 1 throttled-запрос на город,
+        # результат кэшируется целиком. При 429 молча живём по bbox Photon.
+        st_, geo2, err2 = _nominatim_geocode(city)
+        if st_ == "ok" and geo2.get("geojson"):
+            geo["geojson"] = geo2["geojson"]
+            geo["bbox"] = geo2["bbox"]
+            geo["display"] = geo2["display"]   # у Nominatim адрес полнее
+        return geo
+    errors.append(f"Photon: {err or status}")
+    # Photon не нашёл/упал — полный ответ из Nominatim
+    status2, geo2, err2 = _nominatim_geocode(city)
+    if status2 == "ok":
+        return geo2
+    if status2 == "notfound":
         return None
-    # обогащаем полигоном границы (1 запрос на город, кэш на сутки;
-    # результат кэшируется целиком — Nominatim больше не трогаем)
-    st_, geo2 = _nominatim_geocode(city)
-    if st_ == "ok" and geo2.get("geojson"):
-        geo["geojson"] = geo2["geojson"]
-        geo["bbox"] = geo2["bbox"]
-        geo["display"] = geo2["display"]   # у Nominatim адрес полнее
-    return geo
+    errors.append(f"Nominatim: {err2 or status2}")
+    # внешние геокодеры лежат/банят — геокодим через Overpass
+    status3, geo3, err3 = _overpass_geocode(city)
+    if status3 == "ok":
+        return geo3
+    if status3 == "notfound":
+        return None
+    errors.append(f"Overpass: {err3 or status3}")
+    raise RuntimeError(
+        "Все геокодеры недоступны. Причины: " + "; ".join(errors)
+        + ". Проверьте сетевой доступ деплоя к внешним сервисам "
+          "(photon.komoot.io, nominatim.openstreetmap.org, overpass).")
 
 # --------------------------------------------------------------------------- #
 #  Геокодинг адреса (улица, дом) — опционально
