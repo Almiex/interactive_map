@@ -790,6 +790,20 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
                    prefer_canvas=True)
 
+    # верстка тултипов: таблица без разъездов — подпись и значение слева,
+    # компактные отступы; действует на тултипы и гексов, и точек POI
+    m.get_root().header.add_child(folium.Element("""
+<style>
+.foliumtooltip { background: #fff; color: #222; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.35); padding: 8px 10px; font-size: 13px;
+  line-height: 1.45; }
+.foliumtooltip table { margin: 0; border-collapse: collapse; }
+.foliumtooltip th, .foliumtooltip td { text-align: left !important;
+  padding: 1px 8px 1px 0; vertical-align: top; }
+.foliumtooltip th { color: #666; font-weight: 600; white-space: nowrap; }
+</style>
+"""))
+
     vals = series.reindex(grid).fillna(0.0)
     vmax = float(vals.max()) if len(vals) else 0.0
     if vmax <= 0:
@@ -911,12 +925,27 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     circles_fg = None
     if st.session_state.get("circle_center"):
         _cc = st.session_state["circle_center"]
+        _res = h3.get_resolution(grid[0])
         circles_fg = folium.FeatureGroup(name="circles")
-        for _r, _col in ((2000, "#2ca02c"), (5000, "#d62728")):
-            _c = folium.Circle(location=_cc, radius=_r, color=_col, weight=2.5,
-                               dash_array="8 6", fill=False)
-            _c.options["interactive"] = False
-            circles_fg.add_child(_c)
+
+        def _passive(folium_obj):
+            # не перехватывать мышь: тултипы/клики гексов сквозь объект
+            folium_obj.options["interactive"] = False
+            return folium_obj
+
+        # подсветка выбранного гекса: красная обводка его границы.
+        # Живёт в динамическом слое, чтобы клик не пересобирал всю карту
+        _cell = h3.latlng_to_cell(_cc[0], _cc[1], _res)
+        _ring = [tuple(p) for p in h3.cell_to_boundary(_cell)]
+        circles_fg.add_child(_passive(folium.Polygon(
+            locations=_ring, color="#d62728", weight=3, fill=False)))
+        # круги — по флажкам сайдбара (оба выкл = только подсветка гекса)
+        for _r, _col, _flag in ((2000, "#2ca02c", "show_r2"),
+                                (5000, "#d62728", "show_r5")):
+            if st.session_state.get(_flag, True):
+                circles_fg.add_child(_passive(folium.Circle(
+                    location=_cc, radius=_r, color=_col, weight=2.5,
+                    dash_array="8 6", fill=False)))
 
     if marker:
         folium.Marker(
@@ -1077,12 +1106,6 @@ with st.sidebar:
                             placeholder="пр. Ленина, 1", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
     load_btn = st.button("🔍 Построить сетку", type="primary")
-    if st.button("Сбросить круги", disabled=not st.session_state.get("circle_center"),
-                 help="Убрать пунктирные круги 2/5 км с карты"):
-        st.session_state.pop("circle_center", None)
-    st.caption("💡 Клик по гексу — пунктирные круги 2 км и 5 км + бабл со "
-               "ссылкой «Открыть в Яндекс.Картах». Pan/zoom карты НЕ "
-               "перезагружает приложение.")
 
     st.header("Тип карты (одна на экран)")
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
@@ -1151,6 +1174,13 @@ with st.sidebar:
         st.caption(f"⚠️ Kontur Population рассчитан в res{_max_res} — "
                    f"детализация выше res{_max_res} недоступна. "
                    f"Переключитесь на суррогатный источник для res 9–10.")
+
+    st.header("Радиусы вокруг гекса")
+    st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
+    st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
+    if st.button("Сбросить выбор гекса",
+                 disabled=not st.session_state.get("circle_center")):
+        st.session_state.pop("circle_center", None)
 
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
