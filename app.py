@@ -1270,10 +1270,22 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # streamlit-folium отдаёт last_object_clicked как {"lat", "lng"} —
     # точку клика (feature с properties НЕ возвращается). Берём гекс,
     # содержащий точку клика, в resolution текущей сетки, центр его — центр кругов.
+    clicked = (out or {}).get("last_object_clicked")
+    _click_key = None
+    if isinstance(clicked, dict) and "lat" in clicked and "lng" in clicked:
+        _click_key = (round(clicked["lat"], 7), round(clicked["lng"], 7))
+    # ДЕДУПЛИКАЦИЯ КЛИКА: streamlit-folium хранит last_object_clicked между
+    # rerun'ами. Без этой проверки ЛЮБОЙ следующий rerun (кнопка «Скачать
+    # GeoJSON», «Сбросить», переключение слоя) обработал бы последний
+    # клик ПОВТОРНО — а в мультивыборе повторная обработка = тоггл, то
+    # есть снятие выделения с последнего выбранного гекса.
+    _click_stale = (_click_key is None
+                    or _click_key == st.session_state.get("_last_click_key"))
+    if not _click_stale:
+        st.session_state["_last_click_key"] = _click_key
     if st.session_state.get("_skip_next_click"):
         st.session_state.pop("_skip_next_click", None)  # сброс флага
-    else:
-        clicked = (out or {}).get("last_object_clicked")
+    elif not _click_stale:
         if isinstance(clicked, dict) and "lat" in clicked and "lng" in clicked:
             cell = h3.latlng_to_cell(clicked["lat"], clicked["lng"],
                                      h3.get_resolution(grid[0]))
@@ -1567,10 +1579,10 @@ with st.sidebar:
             st.session_state["res_slider"] = 8
 
     st.radio("Режим выбора",
-             ["Одиночный", "Мультивыбор (в радиусе 2 км)"],
+             ["Одиночный", "Мультивыбор (в радиусе 2км)"],
              key="sel_mode", on_change=_mode_changed,
              help="Одиночный: выбор одного гекса. Мультивыбор: "
-                  "выбор нескольких гексов.")
+                  "выбор нескольких соседних гексов.")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
     if st.button("Сбросить выбор гекса",
