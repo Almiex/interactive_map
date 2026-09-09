@@ -23,7 +23,7 @@ import folium
 import streamlit as st
 import geopandas as gpd
 from shapely.geometry import Polygon
-from shapely.ops import unary_union
+from shapely.ops import unary_union, orient as _shapely_orient
 from streamlit_folium import st_folium
 from branca.colormap import LinearColormap
 from jinja2 import Template as _Jinja2Template
@@ -1779,9 +1779,12 @@ if st.session_state.get("circle_center"):
                         f"(H3 res {_res0}). GeoHex Analytics"),
         "stroke": "#1f6fd6",       # цвет контура
         "stroke-width": 3,         # толщина контура, px
-        "stroke-opacity": 0.6,     # прозрачность контура, 0..1 (60%)
+        # NB: Яндекс кладёт эти числа в поле «Прозрачность» КАК ЕСТЬ —
+        # указываем именно прозрачность: 0.4 -> обводка на 60% непрозрачна,
+        # 0.2 -> заливка на 80% непрозрачна
+        "stroke-opacity": 0.4,
         "fill": "#1f6fd6",         # цвет заливки
-        "fill-opacity": 0.8,       # прозрачность заливки, 0..1 (80%)
+        "fill-opacity": 0.2,
     }
     _geom = _dissolve_hexes(_cells)   # общие границы растворены
     _features = []
@@ -1789,6 +1792,8 @@ if st.session_state.get("circle_center"):
         _polys = ([_geom] if _geom.geom_type == "Polygon"
                   else list(_geom.geoms))
         for _fid, _p in enumerate(_polys):
+            _p = _shapely_orient(_p, sign=1.0)  # внешнее кольцо против
+            # часовой (RFC 7946) — иначе часть рендереров теряет фрагменты
             _features.append({"type": "Feature", "id": _fid,
                               "properties": dict(_style_props),
                               "geometry": {"type": "Polygon",
