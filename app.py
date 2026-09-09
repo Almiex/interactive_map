@@ -571,6 +571,22 @@ def hex_area_km2(res):
     gdf = gpd.GeoDataFrame(geometry=[Polygon(ll)], crs="EPSG:4326")
     return gdf.to_crs(gdf.estimate_utm_crs()).area.iloc[0] / 1e6
 
+
+def sums_in_circles(series, center, radii_km=(2.0, 5.0)):
+    """Сумма показателей гексов (series), ЦЕНТРЫ которых попадают в радиус.
+    Возвращает {радиус_км: (сумма, число гексов)} или None."""
+    if series is None or series.empty or not center:
+        return None
+    ll = np.array([h3.cell_to_latlng(c) for c in series.index])
+    lat1, lon1 = np.radians(center[0]), np.radians(center[1])
+    lat2, lon2 = np.radians(ll[:, 0]), np.radians(ll[:, 1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    dist = 6371.0 * 2 * np.arcsin(np.sqrt(a))      # хаверсайн, км
+    vals = series.values.astype(float)
+    return {r: (float(vals[dist <= r].sum()), int((dist <= r).sum()))
+            for r in radii_km}
+
 # --------------------------------------------------------------------------- #
 #  Контроль карты: ОДНА карта на выбор
 # --------------------------------------------------------------------------- #
@@ -1431,6 +1447,36 @@ elif map_type.startswith("7."):
     extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES
                      if sub_option is None or name in sub_option}
 
+
+# ---- сумма показателей внутри кругов 2/5 км: НЕ по умолчанию, а по кнопке.
+# Работает для всех типов карт и любого resolution. Считается по серии
+# показателей текущей карты; гексы берутся по центрам внутри радиуса.
+_sums_center = st.session_state.get("circle_center")
+if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
+             help="Суммирует показатели гексов текущей карты, центры которых "
+                  "попадают в радиус 2 км и 5 км от выбранного гекса"):
+    _s = sums_in_circles(series, _sums_center)
+    if _s is not None:
+        st.session_state["circle_sums"] = {"sums": _s, "unit": unit,
+                                           "center": _sums_center}
+    else:
+        st.session_state.pop("circle_sums", None)
+        st.warning("Нет данных для суммирования на текущей карте.")
+
+# показываем результат, только пока он относится к ТЕКУЩЕМУ выбранному гексу:
+# перенёс круги — сумма скроется, пока не нажата кнопка снова
+_saved_sums = st.session_state.get("circle_sums")
+if (_saved_sums
+        and _saved_sums.get("center") == st.session_state.get("circle_center")):
+    _s2, _n2 = _saved_sums["sums"][2.0]
+    _s5, _n5 = _saved_sums["sums"][5.0]
+    _sc1, _sc2, _sc3 = st.columns(3)
+    _sc1.metric(f"Σ в радиусе 2 км · {_n2} гексов",
+                f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
+    _sc2.metric(f"Σ в радиусе 5 км · {_n5} гексов",
+                f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
+    _sc3.metric("Выбранный гекс",
+                f"{_saved_sums['center'][0]:.4f}, {_saved_sums['center'][1]:.4f}")
 
 _src = None
 if map_type.startswith("1."):
