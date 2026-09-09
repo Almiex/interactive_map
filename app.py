@@ -1208,7 +1208,7 @@ if len(grid) > MAX_GRID_CELLS:
 
 with st.spinner("Считаю агрегаты по гексам…"):
     series, unit, hex_extra, points = _compute_series_cached(
-        map_type, sub_option, res_eff, stored["ver"],
+        map_type, sub_option, res_eff, stored.get("ver", 0),  # сессия из старой версии кода без "ver"
         kontur_df is not None, m2_per_person)
 
 # суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
