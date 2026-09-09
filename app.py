@@ -826,7 +826,7 @@ class HexTooltip(folium.GeoJsonTooltip):
 
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
-               source=None, yzoom=15, gamma=0.4):
+               source=None, yzoom=15, gamma=0.6):
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
@@ -1288,12 +1288,14 @@ with st.sidebar:
         st.session_state["_skip_next_click"] = True  # блокируем "залипший" клик
 
     st.header("Раскраска шкалы")
-    st.slider("Гамма (меньше → жёлтый раньше)", 0.2, 0.8, 0.4, 0.05,
+    st.slider("Гамма шкалы", 0.2, 1.6, 0.6, 0.05,
               key="gamma_slider",
-              help="Сдвиг тёплых цветов к низу шкалы. Меньше — жёлтый и "
-                   "оранжевый начинаются при меньших значениях, красного "
-                   "становится больше. Больше — красный сужается к самым "
-                   "высоким значениям.")
+              help="< 1 — жёлто-оранжевые начинаются при меньших значениях "
+                   "(много тёплого на карте), но разница между высокими "
+                   "значениями стирается. > 1 — наоборот: низ синий дольше, "
+                   "зато разница между похожими высокими значениями хорошо "
+                   "различима. Для Kontur Population, где основная масса "
+                   "гексов в верхней половине диапазона, обычно лучше 0.8–1.2.")
 
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
@@ -1441,7 +1443,7 @@ render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
            legend=legend, source=_src,
            yzoom={7: 13, 8: 15, 9: 16, 10: 17}.get(res_eff, 15),
-           gamma=st.session_state.get("gamma_slider", 0.4))
+           gamma=st.session_state.get("gamma_slider", 0.6))
 if map_type.startswith("1.") and kontur_df is None:
     st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное "
                "заселение и незавершённое строительство. Для точной численности "
