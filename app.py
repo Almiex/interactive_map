@@ -1762,9 +1762,7 @@ if st.session_state.get("circle_center"):
         [h3.latlng_to_cell(st.session_state["circle_center"][0],
                            st.session_state["circle_center"][1], _res0)]
         + list(st.session_state.get("hex_chain") or [])))
-    st.text_input("Название объекта в GeoJSON", value="Без названия",
-                  key="export_name")
-    _name = st.session_state.get("export_name", "Без названия") or "Без названия"
+    _name = "Без названия"  # имя объекта в GeoJSON (поле ввода убрано — не требовалось)
 
     def _poly_rings_geojson(p):
         # кольца полигона в порядке GeoJSON: сначала внешнее, затем дырки;
@@ -1773,6 +1771,18 @@ if st.session_state.get("circle_center"):
         rings += [[[lng, lat] for lng, lat in h.coords] for h in p.interiors]
         return rings
 
+    # стиль объекта — Яндекс Map Constructor читает эти properties при
+    # импорте (соответствуют полям «Описание / Контур / Прозрачность /
+    # Толщина / Заливка» в редакторе объекта)
+    _style_props = {
+        "description": (f"Выделено {len(_cells)} гексов "
+                        f"(H3 res {_res0}). GeoHex Analytics"),
+        "stroke": "#1f6fd6",       # цвет контура
+        "stroke-width": 3,         # толщина контура, px
+        "stroke-opacity": 0.6,     # прозрачность контура, 0..1 (60%)
+        "fill": "#1f6fd6",         # цвет заливки
+        "fill-opacity": 0.8,       # прозрачность заливки, 0..1 (80%)
+    }
     _geom = _dissolve_hexes(_cells)   # общие границы растворены
     _features = []
     if _geom is not None:
@@ -1780,6 +1790,7 @@ if st.session_state.get("circle_center"):
                   else list(_geom.geoms))
         for _fid, _p in enumerate(_polys):
             _features.append({"type": "Feature", "id": _fid,
+                              "properties": dict(_style_props),
                               "geometry": {"type": "Polygon",
                                            "coordinates": _poly_rings_geojson(_p)}})
 
