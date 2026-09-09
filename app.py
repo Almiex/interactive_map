@@ -11,7 +11,9 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
 """
 
 import re
+import json
 import time
+import math
 import hashlib
 import requests
 import numpy as np
@@ -716,6 +718,14 @@ def hex_area_km2(res):
     return gdf.to_crs(gdf.estimate_utm_crs()).area.iloc[0] / 1e6
 
 
+def _dist_km(a, b):
+    """Хаверсайн между точками (lat, lon) — для проверки «внутри круга»."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 6371.0 * 2 * math.asin(math.sqrt(h))
+
+
 def sums_in_circles(series, center, radii_km=(2.0, 5.0)):
     """Сумма показателей гексов (series), ЦЕНТРЫ которых попадают в радиус.
     Возвращает {радиус_км: (сумма, число гексов)} или None."""
@@ -1194,12 +1204,16 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             folium_obj.options["interactive"] = False
             return folium_obj
 
-        # подсветка выбранного гекса: красная обводка его границы.
-        # Живёт в динамическом слое, чтобы клик не пересобирал всю карту
-        _cell = h3.latlng_to_cell(_cc[0], _cc[1], _res)
-        _ring = [tuple(p) for p in h3.cell_to_boundary(_cell)]
-        circles_fg.add_child(_passive(folium.Polygon(
-            locations=_ring, color="#1f6fd6", weight=3, fill=False)))
+        # подсветка выбранных гексов: синяя обводка границ. В режиме
+        # мультивыбора обводятся все гексы цепочки. Живёт в динамическом
+        # слое, чтобы клик не пересобирал всю карту
+        _base_cell = h3.latlng_to_cell(_cc[0], _cc[1], _res)
+        _sel_cells = list(dict.fromkeys(
+            [_base_cell] + list(st.session_state.get("hex_chain") or [])))
+        for _c in _sel_cells:
+            _ring = [tuple(p) for p in h3.cell_to_boundary(_c)]
+            circles_fg.add_child(_passive(folium.Polygon(
+                locations=_ring, color="#1f6fd6", weight=3, fill=False)))
         # круги — по флажкам сайдбара (оба выкл = только подсветка гекса)
         for _r, _col, _flag in ((2000, "#2ca02c", "show_r2"),
                                 (5000, "#d62728", "show_r5")):
@@ -1232,9 +1246,37 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             cell = h3.latlng_to_cell(clicked["lat"], clicked["lng"],
                                      h3.get_resolution(grid[0]))
             new_center = tuple(h3.cell_to_latlng(cell))
-            if st.session_state.get("circle_center") != new_center:
-                st.session_state["circle_center"] = new_center
-                st.rerun()  # без rerun круги отрисуются только при след. действии
+            _multi = str(st.session_state.get("sel_mode", "")).startswith("Мульти")
+            if not _multi:
+                if st.session_state.get("circle_center") != new_center:
+                    st.session_state["circle_center"] = new_center
+                    st.rerun()  # без rerun круги отрисуются только при след. действии
+            else:
+                # МУЛЬТИВЫБОР: первый клик — центр и круги, дальше клики
+                # добавляют гексы в цепочку (сосед предыдущего + в зелёном круге)
+                if not st.session_state.get("circle_center"):
+                    st.session_state["circle_center"] = new_center
+                    st.session_state["hex_chain"] = [cell]
+                    st.rerun()
+                else:
+                    _chain = list(st.session_state.get("hex_chain") or [])
+                    if cell in _chain:
+                        pass  # уже выбран — игнор
+                    else:
+                        _prev_center = st.session_state["circle_center"]
+                        _ok_adjacent = cell in h3.grid_disk(_chain[-1], 1)
+                        _ok_radius = _dist_km(new_center, _prev_center) <= 2.0
+                        if _ok_adjacent and _ok_radius:
+                            st.session_state["hex_chain"] = _chain + [cell]
+                            st.rerun()
+                        else:
+                            _msg = ("Гекс не добавлен: должен соприкасаться "
+                                    "с предыдущим и лежать в зелёном круге (2 км)")
+                            _toast = getattr(st, "toast", None)
+                            if _toast:
+                                _toast(_msg)
+                            else:
+                                st.warning(_msg)
 
 
 # --------------------------------------------------------------------------- #
@@ -1451,11 +1493,20 @@ with st.sidebar:
                    f"Переключитесь на суррогатный источник для res 9–10.")
 
     st.header("Радиусы вокруг гекса")
+    st.radio("Режим выбора",
+             ["Одиночный", "Мультивыбор (цепочка в зелёном круге)"],
+             key="sel_mode",
+             help="Одиночный: клик переносит круги на гекс. Мультивыбор: "
+                  "первый клик ставит центр и круги, каждый следующий "
+                  "ДОБАВЛЯЕТ гекс в цепочку — он должен соприкасаться с "
+                  "предыдущим и его центр должен лежать в зелёном круге "
+                  "(2 км от центра). Сброс — кнопкой ниже.")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
     if st.button("Сбросить выбор гекса",
                  disabled=not st.session_state.get("circle_center")):
         st.session_state.pop("circle_center", None)
+        st.session_state.pop("hex_chain", None)      # и цепочку мультивыбора
         st.session_state["_skip_next_click"] = True  # блокируем "залипший" клик
 
 
@@ -1464,6 +1515,11 @@ with st.sidebar:
 # старое значение удаляется, на новой карте не покажется
 if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_type):
     st.session_state.pop("circle_sums", None)
+
+# смена режима выбора сбрасывает цепочку мультивыбора
+if st.session_state.get("_sel_mode_prev") != st.session_state.get("sel_mode"):
+    st.session_state["_sel_mode_prev"] = st.session_state.get("sel_mode")
+    st.session_state.pop("hex_chain", None)
 
 if load_btn or st.session_state.pop("build_on_enter", False):
     st.session_state.pop("geocode_trace", None)  # свежая диагностика
@@ -1641,6 +1697,38 @@ if map_type.startswith(("1.", "2.")):
                       f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
             st.metric(f"Σ в радиусе 5 км · {_n5} гексов",
                       f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
+
+# ---- экспорт выделенных гексов в GeoJSON (формат Yandex Map Constructor):
+# FeatureCollection + metadata{name, creator} + features c Polygon-кольцами
+# в порядке [lon, lat], кольцо замкнуто. Работает в обоих режимах: в
+# одиночном экспортируется выбранный гекс, в мультивыборе — вся цепочка.
+if st.session_state.get("circle_center"):
+    _res0 = h3.get_resolution(grid[0])
+    _cells = list(dict.fromkeys(
+        [h3.latlng_to_cell(st.session_state["circle_center"][0],
+                           st.session_state["circle_center"][1], _res0)]
+        + list(st.session_state.get("hex_chain") or [])))
+    st.text_input("Название объекта в GeoJSON", value="Без названия",
+                  key="export_name")
+    _name = st.session_state.get("export_name", "Без названия") or "Без названия"
+
+    def _hex_feature(i, cell):
+        ring = [[lng, lat] for lat, lng in h3.cell_to_boundary(cell)]
+        ring.append(ring[0])  # замыкаем кольцо
+        return {"type": "Feature", "id": i,
+                "geometry": {"type": "Polygon", "coordinates": [ring]}}
+
+    _export_gj = {"type": "FeatureCollection",
+                  "metadata": {"name": _name,
+                               "creator": "Yandex Map Constructor"},
+                  "features": [_hex_feature(i, c) for i, c in enumerate(_cells)]}
+    st.download_button(
+        f"⬇ Скачать GeoJSON выделенных гексов ({len(_cells)})",
+        data=json.dumps(_export_gj, ensure_ascii=False),
+        file_name="hexes.geojson",
+        mime="application/geo+json",
+        help="Импортируется в Яндекс Карты: «Мои карты» → создание карты → "
+             "импорт GeoJSON. Координаты [lon, lat], кольца замкнуты.")
 
 _src = None
 if map_type.startswith("1."):
