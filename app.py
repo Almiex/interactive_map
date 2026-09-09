@@ -854,13 +854,20 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     GAMMA = 0.4
     # легенда сэмплирована с ТЕМ ЖЕ отображением — цвета на шкале совпадают
     # с реальной заливкой (у линейной шкалы они бы расходились)
-    # NB: cm() возвращает строку "rgba(...)", которую новые версии branca
-    # _parse_color НЕ принимает обратно -> берём RGB напрямую из colormap
-    def _hex_at(t):
-        r, g, b = (int(round(255 * c)) for c in cm.rgba_floats(t)[:3])
-        return f"#{r:02x}{g:02x}{b:02x}"
+    # Легенда сэмплируется БЕЗ branca-интерьеров (в новых версиях меняются):
+    # прямое линейное интерполирование между hex-стопами палитры — ровно то,
+    # что делает LinearColormap внутри _style
+    def _palette_at(t):
+        pos = min(max(t, 0.0), 1.0) * (len(COLORS) - 1)
+        i = min(int(pos), len(COLORS) - 2)
+        frac = pos - i
+        out = []
+        for k in (1, 3, 5):
+            a, b = int(COLORS[i][k:k + 2], 16), int(COLORS[i + 1][k:k + 2], 16)
+            out.append(f"{round(a + (b - a) * frac):02x}")
+        return "#" + "".join(out)
 
-    cm_legend = LinearColormap([_hex_at((i / 24) ** GAMMA) for i in range(25)],
+    cm_legend = LinearColormap([_palette_at((i / 24) ** GAMMA) for i in range(25)],
                                vmin=0, vmax=vmax)
     cm_legend.caption = f"{map_type} — {unit}"
 
