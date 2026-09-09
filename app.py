@@ -797,7 +797,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         ring.append(ring[0])
         v = float(vals.get(cell, 0.0))
         rv = round(v, 2) if vmax < 100 else round(v)  # большие числа — целыми
-        props = {"v": rv}
+        props = {"v": rv, "cell": cell}
         if source:
             props["src"] = source
         # киллер-фича: клик по гексу -> ссылка на Яндекс.Карты по центру гекса
@@ -885,13 +885,29 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     lngs = [p[1] for b_ in bounds for p in b_]
     m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
 
+    # круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный)
+    if st.session_state.get("circle_center"):
+        _cc = st.session_state["circle_center"]
+        folium.Circle(location=_cc, radius=2000, color="#2ca02c", weight=2.5,
+                      dash_array="8 6", fill=False,
+                      tooltip="Радиус 2 км").add_to(m)
+        folium.Circle(location=_cc, radius=5000, color="#d62728", weight=2.5,
+                      dash_array="8 6", fill=False,
+                      tooltip="Радиус 5 км").add_to(m)
+
     if marker:
         folium.Marker(
             location=[marker["lat"], marker["lon"]],
             tooltip=marker["display"],
             icon=folium.Icon(color="blue", icon="glyphicon-map-marker"),
         ).add_to(m)
-    st_folium(m, width=1150, height=680, returned_objects=[])
+    out = st_folium(m, width=1150, height=680,
+                    returned_objects=["last_object_clicked"])
+    clicked = (out or {}).get("last_object_clicked")
+    if isinstance(clicked, dict) and clicked.get("properties"):
+        cell = clicked["properties"].get("cell")
+        if cell:
+            st.session_state["circle_center"] = h3.cell_to_latlng(cell)
 
 
 # --------------------------------------------------------------------------- #
@@ -1027,6 +1043,9 @@ with st.sidebar:
                             placeholder="пр. Ленина, 1", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
     load_btn = st.button("🔍 Построить сетку", type="primary")
+    if st.button("Сбросить круги", disabled=not st.session_state.get("circle_center"),
+                 help="Убрать пунктирные круги 2/5 км с карты"):
+        st.session_state.pop("circle_center", None)
 
     st.header("Тип карты (одна на экран)")
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
