@@ -1313,6 +1313,11 @@ with st.sidebar:
 
 
 # ------------------------------- логика ----------------------------------- #
+# суммы в кругах живут только в рамках одного типа карты: переключил слой —
+# старое значение удаляется, на новой карте не покажется
+if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_type):
+    st.session_state.pop("circle_sums", None)
+
 if load_btn:
     with st.spinner("Загружаю данные OpenStreetMap через Overpass API (1–5 минут)…"):
         try:
@@ -1449,34 +1454,35 @@ elif map_type.startswith("7."):
 
 
 # ---- сумма показателей внутри кругов 2/5 км: НЕ по умолчанию, а по кнопке.
-# Работает для всех типов карт и любого resolution. Считается по серии
-# показателей текущей карты; гексы берутся по центрам внутри радиуса.
-_sums_center = st.session_state.get("circle_center")
-if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
-             help="Суммирует показатели гексов текущей карты, центры которых "
-                  "попадают в радиус 2 км и 5 км от выбранного гекса"):
-    _s = sums_in_circles(series, _sums_center)
-    if _s is not None:
-        st.session_state["circle_sums"] = {"sums": _s, "unit": unit,
-                                           "center": _sums_center}
-    else:
-        st.session_state.pop("circle_sums", None)
-        st.warning("Нет данных для суммирования на текущей карте.")
+# Только карты 1–2 (чел. / м² жилья) — на остальных слоях кнопки нет.
+# Считается по серии показателей текущей карты; гексы берутся по центрам
+# внутри радиуса. Привязка результата: тип карты (очистка выше) + гекс.
+if map_type.startswith(("1.", "2.")):
+    _sums_center = st.session_state.get("circle_center")
+    if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
+                 help="Суммирует показатели гексов текущей карты, центры "
+                      "которых попадают в радиус 2 км и 5 км от выбранного гекса"):
+        _s = sums_in_circles(series, _sums_center)
+        if _s is not None:
+            st.session_state["circle_sums"] = {"sums": _s, "unit": unit,
+                                               "center": _sums_center,
+                                               "map_type": map_type}
+        else:
+            st.session_state.pop("circle_sums", None)
+            st.warning("Нет данных для суммирования на текущей карте.")
 
-# показываем результат, только пока он относится к ТЕКУЩЕМУ выбранному гексу:
-# перенёс круги — сумма скроется, пока не нажата кнопка снова
-_saved_sums = st.session_state.get("circle_sums")
-if (_saved_sums
-        and _saved_sums.get("center") == st.session_state.get("circle_center")):
-    _s2, _n2 = _saved_sums["sums"][2.0]
-    _s5, _n5 = _saved_sums["sums"][5.0]
-    _sc1, _sc2, _sc3 = st.columns(3)
-    _sc1.metric(f"Σ в радиусе 2 км · {_n2} гексов",
-                f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
-    _sc2.metric(f"Σ в радиусе 5 км · {_n5} гексов",
-                f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
-    _sc3.metric("Выбранный гекс",
-                f"{_saved_sums['center'][0]:.4f}, {_saved_sums['center'][1]:.4f}")
+    # показываем результат, только пока он относится к ТЕКУЩЕМУ выбранному
+    # гексу: перенёс круги — сумма скроется, пока не нажата кнопка снова
+    _saved_sums = st.session_state.get("circle_sums")
+    if (_saved_sums
+            and _saved_sums.get("center") == st.session_state.get("circle_center")):
+        _s2, _n2 = _saved_sums["sums"][2.0]
+        _s5, _n5 = _saved_sums["sums"][5.0]
+        _sc1, _sc2 = st.columns(2)
+        _sc1.metric(f"Σ в радиусе 2 км · {_n2} гексов",
+                    f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
+        _sc2.metric(f"Σ в радиусе 5 км · {_n5} гексов",
+                    f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
 
 _src = None
 if map_type.startswith("1."):
