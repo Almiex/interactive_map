@@ -1534,11 +1534,24 @@ with st.sidebar:
             st.session_state["res_slider"] = _max_res
 
     st.header("Сетка H3")
+
+    def _res_changed():
+        # в мультивыборе сетка фиксирована на res 8 — откатываем попытку
+        # увести разрешение (колбэк идёт до отрисовки в этом прогоне)
+        if (str(st.session_state.get("sel_mode", "")).startswith("Мульти")
+                and st.session_state.get("res_slider") != 8):
+            st.session_state["res_slider"] = 8
+            _t = getattr(st, "toast", None)
+            if _t:
+                _t("В режиме мультивыбора разрешение фиксировано: res 8")
+
     res = st.select_slider(
         "Размер гекса (resolution)",
         options=[7, 8, 9, 10], value=8, key="res_slider",
+        on_change=_res_changed,
         help="Res 7 ≈ 2,4 км между центрами · Res 8 ≈ 0,92 км · "
-             "Res 9 ≈ 0,35 км · Res 10 ≈ 0,13 км",
+             "Res 9 ≈ 0,35 км · Res 10 ≈ 0,13 км. В режиме мультивыбора "
+             "доступен только res 8.",
     )
     if _max_res < 10:
         st.caption(f"⚠️ Kontur Population рассчитан в res{_max_res} — "
@@ -1546,9 +1559,17 @@ with st.sidebar:
                    f"Переключитесь на суррогатный источник для res 9–10.")
 
     st.header("Радиусы вокруг гекса")
+    def _mode_changed():
+        # мультивыбор работает ТОЛЬКО на res 8: колбэк идёт до отрисовки
+        # слайдера в новом прогоне, поэтому значение менять безопасно.
+        # Карта не «едет»: вид восстановится из localStorage после
+        # пересборки сетки; выборка сбрасывается блоком ниже по логике.
+        if str(st.session_state.get("sel_mode", "")).startswith("Мульти"):
+            st.session_state["res_slider"] = 8
+
     st.radio("Режим выбора",
              ["Одиночный", "Мультивыбор (в зелёном круге)"],
-             key="sel_mode",
+             key="sel_mode", on_change=_mode_changed,
              help="Одиночный: клик переносит круги на гекс. Мультивыбор: "
                   "первый клик ставит центр и круги; клик по невыбранному "
                   "ДОБАВЛЯЕТ гекс — он должен соприкасаться с ЛЮБЫМ уже "
@@ -1556,7 +1577,9 @@ with st.sidebar:
                   "(2 км от базового). Повторный клик по выбранному СНИМАЕТ "
                   "выделение. Центральный гекс повторным кликом НЕ "
                   "сбрасывается — только кнопкой «Сбросить выбор гекса» "
-                  "или сменой режима на одиночный.")
+                  "или сменой режима на одиночный. Мультивыбор доступен "
+                  "ТОЛЬКО на res 8: разрешение переключится автоматически, "
+                  "выборка сбросится, фокус карты сохранится.")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
     if st.button("Сбросить выбор гекса",
@@ -1626,6 +1649,9 @@ if city.strip() and city.strip() != stored["city"]:
 # Kontur идёт в своём resolution: сетку принудительно понижаем под источник,
 # иначе ячейки разных res не совпадут и фильтр заселённости обнулит сетку
 res_eff = res
+if str(st.session_state.get("sel_mode", "")).startswith("Мульти") and res_eff != 8:
+    res_eff = 8  # мультивыбор работает только на res 8 (слайдер ограничен
+    # колбэками, здесь — страховка для старых сессий)
 if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
     src_res = h3.get_resolution(kontur_df["h3"].iloc[0])
     if res > src_res:
