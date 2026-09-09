@@ -814,6 +814,12 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         props = {"v": rv}
         if source:
             props["src"] = source
+        # бабл гекса: ссылка на Яндекс.Карты по его центру. Работает, т.к. при
+        # клике карта больше не пересобирается (круги — отдельный слой)
+        _lat, _lon = h3.cell_to_latlng(cell)
+        props["link"] = (f'<a href="https://yandex.ru/maps/?pt={_lon:.6f},{_lat:.6f}'
+                         f'&z={yzoom}&l=map" target="_blank" rel="noopener">'
+                         f'🗺 Открыть в Яндекс.Картах</a>')
         # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
         for c in extra_cols:
             props[safe_cols[c]] = float(hex_extra.loc[cell, c]) \
@@ -844,6 +850,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             fields=["v"] + [safe_cols[c] for c in extra_cols] + src_fields,
             aliases=aliases, localize=True,
         ),
+        popup=folium.GeoJsonPopup(fields=["link"], aliases=[""], labels=False,
+                                  localize=False, max_width=280),
     ).add_to(m)
 
     cm_legend.add_to(m)
@@ -909,12 +917,6 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                                dash_array="8 6", fill=False)
             _c.options["interactive"] = False
             circles_fg.add_child(_c)
-        # ссылка на Яндекс.Карты — Streamlit-кнопка, а не leaflet-попап:
-        # попап гаснет при пересборке карты, кнопка — нет
-        _la, _lo = _cc
-        st.link_button("🗺 Открыть выбранный гекс в Яндекс.Картах",
-                       f"https://yandex.ru/maps/?pt={_lo:.6f},{_la:.6f}"
-                       f"&z={yzoom}&l=map")
 
     if marker:
         folium.Marker(
@@ -1078,8 +1080,8 @@ with st.sidebar:
     if st.button("Сбросить круги", disabled=not st.session_state.get("circle_center"),
                  help="Убрать пунктирные круги 2/5 км с карты"):
         st.session_state.pop("circle_center", None)
-    st.caption("💡 Клик по гексу — пунктирные круги 2 км и 5 км + кнопка "
-               "«Открыть в Яндекс.Картах» над картой. Pan/zoom карты НЕ "
+    st.caption("💡 Клик по гексу — пунктирные круги 2 км и 5 км + бабл со "
+               "ссылкой «Открыть в Яндекс.Картах». Pan/zoom карты НЕ "
                "перезагружает приложение.")
 
     st.header("Тип карты (одна на экран)")
