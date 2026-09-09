@@ -3,7 +3,7 @@
 GeoHex Analytics — Streamlit-сервис аналитики города по гексагональной сетке Uber H3.
 
 Источники (все бесплатные):
-  * Геокодинг городов        — Nominatim (OSM) + Photon (резерв)
+  * Геокодинг городов        — Nominatim (OSM)
   * Здания / дороги / POI    — Overpass API (OpenStreetMap)
   * Реальная численность     — Kontur Population (локальный файл, https://data.humdata.org)
 
@@ -40,15 +40,26 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 # запросы с нашего IP (на shared-хостинге лимит часто срабатывает из-за
 # чужого трафика). Полигона границы не отдаёт — сетка построится по bbox
 PHOTON_URL = "https://photon.komoot.io/api/"
-ARC_GIS_URL = "https://geocode-api.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
 HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
 
-# Nominatim: публичный сервис с жёсткой политикой ~1 запроса/сек с IP.
-# Держим небольшой запас. Успешные результаты дополнительно кэшируются
-# через st.cache_data, поэтому повторный запрос того же города/адреса
-# обычно вообще не уходит в сеть.
-NOMINATIM_MIN_INTERVAL = 1.2
-_NOMINATIM_LAST_REQUEST = 0.0
+# ── Защита от бана Nominatim ──────────────────────────────────────────────
+# Публичный Nominatim разрешает ~1 запрос/сек с IP; на shared-хостинге IP
+# общий с чужими приложениями — лимит срабатывает «сам». Поэтому:
+# 1) throttle: приложение физически не шлёт запросы чаще интервала;
+# 2) без ретраев при 429: повтор на общем IP почти всегда снова 429,
+#    а агрессивные попытки продлевают блокировку. При 429 уходим на резерв.
+NOMINATIM_MIN_INTERVAL = 1.2    # минимальный интервал между запросами, сек
+_last_nominatim_ts = [0.0]      # изменяемая ячейка: время последнего запроса
+
+
+def _nominatim_throttle():
+    """Гарантирует NOMINATIM_MIN_INTERVAL между запросами к Nominatim
+    по ВСЕМУ приложению (город, адрес, догеокодинг за полигоном)."""
+    now = time.monotonic()
+    gap = now - _last_nominatim_ts[0]
+    if gap < NOMINATIM_MIN_INTERVAL:
+        time.sleep(NOMINATIM_MIN_INTERVAL - gap)
+    _last_nominatim_ts[0] = time.monotonic()
 
 # расстояние между центрами соседних гексов, км (по стандарту Uber H3)
 RES_SPACING_KM = {7: 2.4, 8: 0.92, 9: 0.35, 10: 0.13}
@@ -187,348 +198,223 @@ PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_st
 # --------------------------------------------------------------------------- #
 #  Геокодинг
 # --------------------------------------------------------------------------- #
-def _nominatim_request(params, timeout=30):
-    """Один аккуратно ограниченный запрос к Nominatim.
-
-    Важно: при HTTP 429 НИКАКИХ повторных запросов к Nominatim.
-    Повторный запрос после 429 только продлевает/усиливает блокировку.
-    """
-    global _NOMINATIM_LAST_REQUEST
-
-    now = time.monotonic()
-    wait = NOMINATIM_MIN_INTERVAL - (now - _NOMINATIM_LAST_REQUEST)
-    if wait > 0:
-        time.sleep(wait)
-
-    try:
-        _NOMINATIM_LAST_REQUEST = time.monotonic()
-        return requests.get(
-            NOMINATIM_URL,
-            params=params,
-            headers=HEADERS,
-            timeout=timeout,
-        )
-    except requests.RequestException:
-        return None
-
-
 def _nominatim_geocode(city: str):
-    """Один запрос Nominatim для города.
-
-    Nominatim нужен здесь прежде всего ради административного полигона.
-    При 429/сетевой ошибке сразу возвращаем unavailable — без retry.
-    """
-    r = _nominatim_request({
-        "q": city,
-        "format": "json",
-        "limit": 1,
-        "accept-language": "ru",
-        "polygon_geojson": 1,
-        "polygon_threshold": 0.0005,
-    }, timeout=30)
-
-    if r is None:
-        return "unavailable", None
-
-    if r.status_code == 429:
-        return "unavailable", None
-
-    if r.status_code != 200:
-        return "unavailable", None
-
+    """Nominatim: ОДИН запрос (после throttle), без ретраев — при 429
+    сразу "unavailable", вызывающий код уходит на резерв/фолбэк.
+    Отдаёт полигон административной границы.
+    -> ("ok", geo, "") | ("notfound", None, "") | ("unavailable", None, причина)"""
+    _nominatim_throttle()
     try:
-        data = r.json()
-    except ValueError:
-        return "unavailable", None
-
+        r = requests.get(NOMINATIM_URL, params={
+            "q": city, "format": "json", "limit": 1, "accept-language": "ru",
+            "polygon_geojson": 1,          # полигон административной границы
+            "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
+        }, headers=HEADERS, timeout=30)
+    except requests.RequestException as e:
+        return "unavailable", None, f"{type(e).__name__}: {e}"
+    if r.status_code != 200:   # 429 и прочее — не дожимаем сервер
+        return "unavailable", None, f"HTTP {r.status_code}"
+    data = r.json()
     if not data:
-        return "notfound", None
-
-    try:
-        d = data[0]
-        return "ok", {
-            "lat": float(d["lat"]),
-            "lon": float(d["lon"]),
-            "display": d["display_name"],
-            "bbox": [float(x) for x in d["boundingbox"]],
-            "geojson": d.get("geojson"),
-        }
-    except (KeyError, TypeError, ValueError, IndexError):
-        return "unavailable", None
+        return "notfound", None, ""
+    d = data[0]
+    return "ok", {
+        "lat": float(d["lat"]), "lon": float(d["lon"]),
+        "display": d["display_name"],
+        "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
+        "geojson": d.get("geojson"),                   # граница города или None
+    }, ""
 
 
 def _photon_geocode(city: str):
-    """Резервный геокодер Photon (Komoot).
-
-    Photon не отдаёт полноценную границу города в нужном формате,
-    поэтому при отсутствии extent используем небольшой bbox вокруг точки.
-    """
+    """Резервный геокодер Photon (komoot). Границы не отдаёт — в geo
+    кладём bbox из extent либо небольшой квадрат вокруг точки; дальше
+    сработает штатный прямоугольный фолбэк сетки.
+    -> ("ok", geo, "") | ("notfound", None, "") | ("unavailable", None, причина)"""
     try:
-        r = requests.get(
-            PHOTON_URL,
-            params={"q": city, "limit": 1, "lang": "ru"},
-            headers=HEADERS,
-            timeout=30,
-        )
+        r = requests.get(PHOTON_URL,
+                         params={"q": city, "limit": 1, "lang": "ru"},
+                         headers=HEADERS, timeout=15)  # короткий: при недоступности быстрее уйдём на резерв
         if r.status_code != 200:
-            return "unavailable", None
-
+            return "unavailable", None, f"HTTP {r.status_code}"
         feats = r.json().get("features", [])
         if not feats:
-            return "notfound", None
-
+            return "notfound", None, ""
         f0 = feats[0]
         lon, lat = f0["geometry"]["coordinates"]
         p = f0["properties"]
-
         display = ", ".join(str(x) for x in (
             p.get("name"),
             p.get("city") or p.get("town") or p.get("village") or p.get("state"),
-            p.get("country"),
-        ) if x) or city
-
+            p.get("country")) if x) or city
         ext = p.get("extent")
         if ext and len(ext) == 4:
             bbox = [float(ext[1]), float(ext[3]), float(ext[0]), float(ext[2])]
         else:
             bbox = [lat - 0.05, lat + 0.05, lon - 0.05, lon + 0.05]
-
-        return "ok", {
-            "lat": float(lat),
-            "lon": float(lon),
-            "display": display,
-            "bbox": bbox,
-            "geojson": None,
-        }
-
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        return "unavailable", None
+        return "ok", {"lat": float(lat), "lon": float(lon), "display": display,
+                      "bbox": bbox, "geojson": None}, ""
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as e:
+        return "unavailable", None, f"{type(e).__name__}: {e}"
 
 
-def _arcgis_geocode(city: str):
-    """Третий резервный геокодер без API-ключа.
-    Используется только если Nominatim и Photon не дали результат.
-    """
+def _overpass_geocode(city: str):
+    """КРАЙНИЙ резерв: граница города через Overpass — те самые зеркала,
+    через которые приложение уже грузит данные (значит, они ДОСТУПНЫ из
+    этого деплоя, в отличие от внешних геокодеров). Ищем отношение-границу
+    с точным именем; геометрию не тянем — только bbox (сетка умеет жить
+    по прямоугольнику). Nominatim/Photon не нужны.
+    -> ("ok", geo, "") | ("notfound", None, "") | ("unavailable", None, причина)"""
     try:
-        r = requests.get(
-            ARC_GIS_URL,
-            params={
-                "SingleLine": city,
-                "f": "json",
-                "maxLocations": 1,
-                "outFields": "*",
-                "forStorage": "false",
-            },
-            headers=HEADERS,
-            timeout=30,
-        )
-        if r.status_code != 200:
-            return "unavailable", None
-
-        data = r.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            return "notfound", None
-
-        c = candidates[0]
-        score = float(c.get("score", 0) or 0)
-        if score < 70:
-            return "notfound", None
-
-        loc = c.get("location", {})
-        lat, lon = loc.get("y"), loc.get("x")
-        if lat is None or lon is None:
-            return "unavailable", None
-
-        # ArcGIS возвращает точку, а не полигон.
-        # Берём небольшой bbox; make_grid() умеет работать с ним.
+        name_re = "^" + re.escape(city.strip()) + "$"
+        # ВАЖНО: regex по имени — полный перебор отношений, запрос ТЯЖЁЛЫЙ.
+        # Поэтому timeout=40 и 1 попытка: медленное зеркало быстро пропускаем
+        # (иначе вечная загрузка), пусть цепочка упадёт в понятную ошибку.
+        q = f"""[out:json][timeout:35];
+rel["name"~"{name_re}", i]["boundary"="administrative"];
+out tags bb;"""
+        els = _query_overpass(q, timeout=40, attempts=1).get("elements", [])
+        if not els:
+            return "notfound", None, ""
+        # город (admin_level 6/8) предпочтительнее крупных регионов
+        els.sort(key=lambda e: int(e.get("tags", {}).get("admin_level", "99")))
+        b = els[0].get("bounds")
+        if not b:
+            return "notfound", None, ""
+        bbox = [float(b["minlat"]), float(b["maxlat"]),
+                float(b["minlon"]), float(b["maxlon"])]
         return "ok", {
-            "lat": float(lat),
-            "lon": float(lon),
-            "display": c.get("address") or city,
-            "bbox": [
-                float(lat) - 0.05,
-                float(lat) + 0.05,
-                float(lon) - 0.05,
-                float(lon) + 0.05,
-            ],
-            "geojson": None,
-        }
-
-    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
-        return "unavailable", None
+            "lat": (bbox[0] + bbox[1]) / 2, "lon": (bbox[2] + bbox[3]) / 2,
+            "display": f"{city} (граница OSM, bbox)",
+            "bbox": bbox, "geojson": None,
+        }, ""
+    except Exception as e:  # noqa: BLE001
+        return "unavailable", None, f"{type(e).__name__}: {e}"
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str):
-    """Геокодинг города с тремя резервами.
+    """Цепочка: Photon -> Nominatim -> Overpass. Ход опроса пишется в
+    session_state["geocode_trace"] — при ошибке трассировка показывается
+    в UI, видно КТО и ПОЧЕМУ отказал. None — город реально отсутствует
+    во всех доступных источниках."""
+    trace = []
 
-    1. Nominatim — один запрос.
-    2. Photon.
-    3. ArcGIS World Geocoder — без API-ключа.
+    def _log(name, status, err):
+        trace.append(f"{name}: {status}" + (f" — {err}" if err else ""))
 
-    Ни один fallback не повторяет запрос к Nominatim после 429.
-    """
-    city = re.sub(r"\s+", " ", city.strip())
-    if not city:
-        return None
-
-    # 1. Nominatim
-    status, geo = _nominatim_geocode(city)
+    status, geo, err = _photon_geocode(city)
+    _log("Photon", status, err)
     if status == "ok":
+        # догеокодинг ради ПОЛИГОНА границы: 1 throttled-запрос на город,
+        # результат кэшируется целиком. При 429 молча живём по bbox Photon.
+        st_, geo2, err2 = _nominatim_geocode(city)
+        _log("Nominatim (полигон границы)", st_, err2)
+        if st_ == "ok" and geo2.get("geojson"):
+            geo["geojson"] = geo2["geojson"]
+            geo["bbox"] = geo2["bbox"]
+            geo["display"] = geo2["display"]   # у Nominatim адрес полнее
+        st.session_state["geocode_trace"] = trace
         return geo
-
-    # 2. Photon
-    status2, geo2 = _photon_geocode(city)
+    # Photon не нашёл/упал — полный ответ из Nominatim
+    status2, geo2, err2 = _nominatim_geocode(city)
+    _log("Nominatim", status2, err2)
     if status2 == "ok":
+        st.session_state["geocode_trace"] = trace
         return geo2
-
-    # 3. ArcGIS
-    status3, geo3 = _arcgis_geocode(city)
+    # внешние геокодеры лежат/банят — геокодим через Overpass (bbox границы)
+    status3, geo3, err3 = _overpass_geocode(city)
+    _log("Overpass", status3, err3)
+    st.session_state["geocode_trace"] = trace
     if status3 == "ok":
         return geo3
-
-    if status == "notfound" and status2 == "notfound" and status3 == "notfound":
-        return None
-
-    raise RuntimeError(
-        "Не удалось получить координаты города: Nominatim ограничил/не ответил, "
-        "Photon не дал результат, ArcGIS также недоступен. "
-        "Это проблема внешних геокодеров, а не цикла запросов."
-    )
-
+    if {status, status2, status3} == {"notfound"}:
+        return None   # город реально нигде не найден
+    raise RuntimeError("Все геокодеры отказали. Диагностика: "
+                       + " | ".join(trace))
 
 # --------------------------------------------------------------------------- #
 #  Геокодинг адреса (улица, дом) — опционально
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_address(address: str, bbox=None):
-    """Геокодинг адреса.
+    """Геокодинг адреса: 1) Nominatim (с вариантами написания),
+    2) fallback — поиск по addr-тегам OSM с КОРОТКИМ таймаутом."""
+    # варианты написания: «7к1» -> «7 к1», убрать «1-я» и лишние пробелы
+    variants = [address]
+    v = re.sub(r"(\d)\s*к\s*(\d)", r"\1 к\2", address)
+    v = re.sub(r"\b[1-5]-я\b", "", v)
+    v = re.sub(r"\s+", " ", v).strip(" ,")
+    if v != address:
+        variants.append(v)
 
-    Делается максимум ОДИН запрос к Nominatim на нормализованный адрес.
-    При 429/сбое сразу используется существующий Overpass fallback.
-    """
-    address = re.sub(r"\s+", " ", address.strip())
-    if not address:
-        return None
-
-    # Нормализация частых вариантов написания.
-    cand = re.sub(r"(\d)\s*к\s*(\d)", r"\1 к\2", address)
-    cand = re.sub(r"\b[1-5]-я\b", "", cand)
-    cand = re.sub(r"\s+", " ", cand).strip(" ,")
-
-    data = []
-    r = _nominatim_request({
-        "q": cand,
-        "format": "json",
-        "limit": 1,
-        "accept-language": "ru",
-        "addressdetails": 1,
-    }, timeout=15)
-
-    if r is not None and r.status_code == 200:
+    for cand in variants:
         try:
-            data = r.json()
-        except ValueError:
+            _nominatim_throttle()
+            r = requests.get(NOMINATIM_URL, params={
+                "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
+                "addressdetails": 1,
+            }, headers=HEADERS, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+            else:
+                data = []   # 429 и прочее — без ретраев, throttle выше
+        except Exception:  # noqa: BLE001
             data = []
-
-    if data:
-        try:
+        if data:
             d = data[0]
             addr = d.get("address", {})
-            street = ", ".join(
-                x for x in (addr.get("road"), addr.get("house_number")) if x
-            )
-            city = (
-                addr.get("city")
-                or addr.get("town")
-                or addr.get("village")
-                or addr.get("municipality")
-                or ""
-            )
+            street = ", ".join(x for x in (addr.get("road"),
+                                           addr.get("house_number")) if x)
+            city = (addr.get("city") or addr.get("town") or addr.get("village")
+                    or addr.get("municipality") or "")
             label = ", ".join(x for x in (street, city) if x) or d["display_name"]
+            return {"lat": float(d["lat"]), "lon": float(d["lon"]),
+                    "display": label}
 
-            return {
-                "lat": float(d["lat"]),
-                "lon": float(d["lon"]),
-                "display": label,
-            }
-        except (KeyError, TypeError, ValueError, IndexError):
-            pass
-
-    # fallback: ищем по addr:* в OSM.
-    # Это уже НЕ Nominatim и не влияет на его rate limit.
+    # fallback: ищем по тегам addr:* в OSM — только 2 зеркала, жёсткий таймаут
     if bbox is None:
         return None
-
     m = re.search(r"(\d+)\s*[кk]\s*(\d+)", address)
     plain = re.search(r"(\d+)", address)
     if not (m or plain):
         return None
-
     d1 = m.group(1) if m else plain.group(1)
     d2 = m.group(2) if m else None
-    hvars = (
-        [f"{d1}к{d2}", f"{d1} к{d2}", f"{d1}К{d2}", d1]
-        if d2 else [d1]
-    )
+    hvars = ([f"{d1}к{d2}", f"{d1} к{d2}", f"{d1}К{d2}", d1] if d2 else [d1])
     hre = "^(" + "|".join(re.escape(v2) for v2 in hvars) + ")$"
-
     street = address[: (m.start() if m else plain.start())]
-    street = re.sub(
-        r"\b(улица|ул\.?|переулок|проспект|пр-кт|бульвар|б-р|"
-        r"шоссе|ш\.)\b",
-        "",
-        street,
-        flags=re.IGNORECASE,
-    ).strip(" ,.")
-
+    street = re.sub(r"\b[1-5]-я\b", "", street)
+    street = re.sub(r"\b(улица|ул\.?|переулок|проспект|пр-кт|бульвар|б-р|"
+                    r"шоссе|ш\.)\b", "", street, flags=re.IGNORECASE).strip(" ,.")
     if not street:
         return None
-
     south, north, west, east = bbox
     bb = f"{south - 0.05},{west - 0.05},{north + 0.05},{east + 0.05}"
-
     q = f"""[out:json][timeout:25];(
   way["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
   node["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
 );out center 3;"""
-
     els = []
     for url in OVERPASS_ENDPOINTS[:2]:
         try:
-            r = requests.post(
-                url,
-                data={"data": q},
-                headers=HEADERS,
-                timeout=35,
-            )
+            r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=35)
             if r.status_code == 200:
                 els = r.json().get("elements", [])
                 break
-        except Exception:
+        except Exception:  # noqa: BLE001
             time.sleep(1)
-
     if not els:
         return None
-
     el = els[0]
     lat = el.get("lat") or (el.get("center") or {}).get("lat")
     lon = el.get("lon") or (el.get("center") or {}).get("lon")
     if lat is None or lon is None:
         return None
-
     tags = el.get("tags", {})
-    label = ", ".join(
-        x for x in (tags.get("addr:street"), tags.get("addr:housenumber"))
-        if x
-    ) or address
-
-    return {
-        "lat": float(lat),
-        "lon": float(lon),
-        "display": label,
-    }
+    label = ", ".join(x for x in (tags.get("addr:street"),
+                                  tags.get("addr:housenumber")) if x) or address
+    return {"lat": float(lat), "lon": float(lon), "display": label}
 
 
 # --------------------------------------------------------------------------- #
@@ -585,12 +471,16 @@ def make_grid(geo, res):
     return sorted(h3.polygon_to_cells(poly, res)), False
 
 
-def _query_overpass(q: str) -> dict:
+def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
+    """timeout/attempts: у больших выгрузок данных — щедрые значения (600/2),
+    у маленьких служебных запросов (геокодинг) — малые: мёртвое/тупящее
+    зеркало с timeout=600 иначе вешает приложение на многие минуты."""
     errors = []
     for url in OVERPASS_ENDPOINTS:
-        for attempt in range(2):  # два захода на зеркало с нарастающей паузой
+        for attempt in range(attempts):  # заходы на зеркало с нарастающей паузой
             try:
-                r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=600)
+                r = requests.post(url, data={"data": q}, headers=HEADERS,
+                                  timeout=timeout)
                 if r.status_code == 200:
                     return r.json()
                 errors.append(f"{url}: HTTP {r.status_code}")
@@ -1576,23 +1466,24 @@ if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_typ
     st.session_state.pop("circle_sums", None)
 
 if load_btn or st.session_state.pop("build_on_enter", False):
-    with st.spinner("Загружаю данные OpenStreetMap через Overpass API (1–5 минут)…"):
+    st.session_state.pop("geocode_trace", None)  # свежая диагностика
+    with st.spinner("Загружаю данные OpenStreetMap через Overpass API "
+                    "(обычно 1–5 минут; города-миллионники — до 10–15)…"):
         try:
             geo, nodes_df, ways_df = fetch_city_data(city)
         except Exception as e:  # noqa: BLE001 — любая сетевая/парсер-ошибка
-            st.error(
-                f"Не удалось загрузить данные для «{city}»: {e}"
-            )
-            st.caption(
-                "Nominatim используется не чаще ~1 запроса в 1,2 секунды; "
-                "при HTTP 429 повторных запросов к нему приложение не делает."
-            )
+            st.error(f"Не удалось загрузить данные для «{city}»: {e}")
+            _trace = st.session_state.get("geocode_trace")
+            if _trace:
+                with st.expander("Диагностика геокодеров (для поддержки)"):
+                    st.code("\n".join(_trace))
             st.stop()
     if geo is None:
-        st.error(
-            f"Город «{city.strip()}» не найден ни одним из доступных геокодеров. "
-            "Проверьте написание."
-        )
+        st.error("Город не найден. Уточните название.")
+        _trace = st.session_state.get("geocode_trace")
+        if _trace:
+            with st.expander("Диагностика геокодеров (для поддержки)"):
+                st.code("\n".join(_trace))
         st.stop()
     # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
