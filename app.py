@@ -1124,8 +1124,11 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             fields=["v"] + [safe_cols[c] for c in extra_cols] + src_fields,
             aliases=aliases, localize=True,
         ),
-        popup=folium.GeoJsonPopup(fields=["link"], aliases=[""], labels=False,
-                                  localize=False, max_width=280),
+        # бабл со ссылкой на Яндекс.Карты: только в одиночном режиме —
+        # в мультивыборе он мешает серии кликов по гексам
+        popup=(None if str(st.session_state.get("sel_mode", "")).startswith("Мульти")
+               else folium.GeoJsonPopup(fields=["link"], aliases=[""], labels=False,
+                                        localize=False, max_width=280)),
     ).add_to(m)
 
     cm_legend.add_to(m)
