@@ -790,17 +790,18 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
                    prefer_canvas=True)
 
-    # верстка тултипов: таблица без разъездов — подпись и значение слева,
-    # компактные отступы; действует на тултипы и гексов, и точек POI
+    # верстка тултипов: таблица сжата по содержимому (width:auto),
+    # подпись и значение идут плотно, без разъезда на разные края
     m.get_root().header.add_child(folium.Element("""
 <style>
 .foliumtooltip { background: #fff; color: #222; border-radius: 4px;
   box-shadow: 0 1px 4px rgba(0,0,0,.35); padding: 8px 10px; font-size: 13px;
   line-height: 1.45; }
-.foliumtooltip table { margin: 0; border-collapse: collapse; }
+.foliumtooltip table { margin: 0 !important; width: auto !important;
+  border-collapse: collapse; }
 .foliumtooltip th, .foliumtooltip td { text-align: left !important;
-  padding: 1px 8px 1px 0; vertical-align: top; }
-.foliumtooltip th { color: #666; font-weight: 600; white-space: nowrap; }
+  padding: 1px 10px 1px 0 !important; vertical-align: top; }
+.foliumtooltip th { color: #555; font-weight: 600; white-space: nowrap; }
 </style>
 """))
 
@@ -938,7 +939,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         _cell = h3.latlng_to_cell(_cc[0], _cc[1], _res)
         _ring = [tuple(p) for p in h3.cell_to_boundary(_cell)]
         circles_fg.add_child(_passive(folium.Polygon(
-            locations=_ring, color="#d62728", weight=3, fill=False)))
+            locations=_ring, color="#1f6fd6", weight=3, fill=False)))
         # круги — по флажкам сайдбара (оба выкл = только подсветка гекса)
         for _r, _col, _flag in ((2000, "#2ca02c", "show_r2"),
                                 (5000, "#d62728", "show_r5")):
@@ -963,14 +964,17 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # streamlit-folium отдаёт last_object_clicked как {"lat", "lng"} —
     # точку клика (feature с properties НЕ возвращается). Берём гекс,
     # содержащий точку клика, в resolution текущей сетки, центр его — центр кругов.
-    clicked = (out or {}).get("last_object_clicked")
-    if isinstance(clicked, dict) and "lat" in clicked and "lng" in clicked:
-        cell = h3.latlng_to_cell(clicked["lat"], clicked["lng"],
-                                 h3.get_resolution(grid[0]))
-        new_center = tuple(h3.cell_to_latlng(cell))
-        if st.session_state.get("circle_center") != new_center:
-            st.session_state["circle_center"] = new_center
-            st.rerun()  # без rerun круги отрисуются только при след. действии
+    if st.session_state.get("_skip_next_click"):
+        st.session_state.pop("_skip_next_click", None)  # сброс флага
+    else:
+        clicked = (out or {}).get("last_object_clicked")
+        if isinstance(clicked, dict) and "lat" in clicked and "lng" in clicked:
+            cell = h3.latlng_to_cell(clicked["lat"], clicked["lng"],
+                                     h3.get_resolution(grid[0]))
+            new_center = tuple(h3.cell_to_latlng(cell))
+            if st.session_state.get("circle_center") != new_center:
+                st.session_state["circle_center"] = new_center
+                st.rerun()  # без rerun круги отрисуются только при след. действии
 
 
 # --------------------------------------------------------------------------- #
@@ -1181,6 +1185,7 @@ with st.sidebar:
     if st.button("Сбросить выбор гекса",
                  disabled=not st.session_state.get("circle_center")):
         st.session_state.pop("circle_center", None)
+        st.session_state["_skip_next_click"] = True  # блокируем "залипший" клик
 
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
