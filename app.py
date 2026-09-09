@@ -22,6 +22,7 @@ import geopandas as gpd
 from shapely.geometry import Polygon
 from streamlit_folium import st_folium
 from branca.colormap import LinearColormap
+from jinja2 import Template as _Jinja2Template
 
 # --------------------------------------------------------------------------- #
 #  Константы
@@ -782,6 +783,39 @@ def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
 # --------------------------------------------------------------------------- #
 COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
 
+
+class HexTooltip(folium.GeoJsonTooltip):
+    """Тултип БЕЗ табличной вёрстки folium: каждая строка — 'подпись: значение'
+    инлайном. Штатный шаблон рисует <table>, где колонка подписей шириной
+    с самую длинную подпись — после коротких подписей получаются дыры."""
+    base_template = """
+    function(layer){
+    let div = L.DomUtil.create('div');
+    let fields = {{ this.fields | tojson | safe }};
+    let aliases = {{ this.aliases | tojson | safe }};
+    let props = layer.feature.properties;
+    div.innerHTML = fields.map((v, i) => {
+        let val = props[v];
+        if (val === null || val === undefined) { val = ''; }
+        else if (typeof val === 'object') { val = JSON.stringify(val); }
+        {% if this.localize %}
+        else if (typeof val === 'number') { val = val.toLocaleString(); }
+        {% endif %}
+        return '<div style="margin:1px 0;"><span style="color:#555;font-weight:600;">'
+            + aliases[i] + '</span>&nbsp;&nbsp;' + val + '</div>';
+    }).join('');
+    return div
+    }
+    """
+    _template = _Jinja2Template(
+        """
+    {% macro script(this, kwargs) %}
+    {{ this._parent.get_name() }}.bindTooltip("""
+        + base_template + """,{{ this.tooltip_options | tojavascript }});
+                     {% endmacro %}
+                     """
+    )
+
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
                source=None, yzoom=15):
@@ -811,7 +845,13 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         st.warning("Нет данных для выбранного слоя в этом городе.")
         vmax = 1.0
     cm = LinearColormap(COLORS, vmin=0, vmax=1)  # цвет по доле максимума
-    cm_legend = LinearColormap(COLORS, vmin=0, vmax=vmax)  # легенда — в реальных единицах
+    # гамма < 1 сжимает низ шкалы: жёлтый начинается заметно раньше,
+    # сине-зелёная часть не растягивается на треть диапазона
+    GAMMA = 0.4
+    # легенда сэмплирована с ТЕМ ЖЕ отображением — цвета на шкале совпадают
+    # с реальной заливкой (у линейной шкалы они бы расходились)
+    cm_legend = LinearColormap([cm((i / 24) ** GAMMA) for i in range(25)],
+                               vmin=0, vmax=vmax)
     cm_legend.caption = f"{map_type} — {unit}"
 
     extra_cols = list(hex_extra.columns) if hex_extra is not None else []
@@ -848,8 +888,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 
     def _style(f):
         v = f["properties"]["v"]
-        # квадратичное раскрытие: жёлтое начинается раньше, низ не сливается в синее
-        t = (v / vmax) ** 0.5 if vmax > 0 else 0.0
+        # гамма-раскрытие (см. GAMMA выше): жёлтое начинается раньше
+        t = (v / vmax) ** GAMMA if vmax > 0 else 0.0
         opacity = 0.03 if v <= 0 else 0.20 + 0.40 * t
         return {"fillColor": cm(t), "color": "#555555", "weight": 0.6,
                 "fillOpacity": opacity}
@@ -861,7 +901,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     folium.GeoJson(
         gj,
         style_function=_style,
-        tooltip=folium.GeoJsonTooltip(
+        tooltip=HexTooltip(
             fields=["v"] + [safe_cols[c] for c in extra_cols] + src_fields,
             aliases=aliases, localize=True,
         ),
