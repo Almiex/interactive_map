@@ -1239,18 +1239,23 @@ with st.sidebar:
     kontur_df = None
     if map_type.startswith("1."):
         src = st.radio("Источник численности",
-                       ["Суррогатная оценка (OSM-здания)", "Kontur Population (файл)"])
+                       ["Суррогатная оценка (OSM-здания)", "Kontur Population (файл)"],
+                       key="pop_src")  # явный ключ — состояние переживает
+        # переключение на другой тип карты (виджет тогда уничтожается)
         if src.startswith("Суррогат"):
             m2_per_person = st.slider("Норма м² жилья на человека", 15, 60, 30)
         else:
             f = st.file_uploader("Файл Kontur Population (.gpkg / .geojson / .parquet)",
-                                 type=["gpkg", "geojson", "json", "parquet"])
+                                 type=["gpkg", "geojson", "json", "parquet"],
+                                 key="kontur_file")
+            # Распарсенные данные живут в session_state и ПЕРЕЖИВАЮТ уход
+            # с карты 1: виджет uploader при возврате может быть пустым
+            # (Streamlit теряет файл при уничтожении виджета), но повторно
+            # парсить мегабайты не нужно — подхватываем из кэша.
+            kontur_df = st.session_state.get("_kontur")
             if f is not None:
                 _kkey = (f.name, f.size)
-                if (st.session_state.get("_kontur_key") == _kkey
-                        and st.session_state.get("_kontur") is not None):
-                    kontur_df = st.session_state["_kontur"]  # уже разобран
-                else:
+                if st.session_state.get("_kontur_key") != _kkey or kontur_df is None:
                     with st.spinner("Загружаю Kontur Population…"):
                         _prev = (st.session_state.get("data") or {}).get("geo")
                         kontur_df = load_kontur(f, 8,
@@ -1258,6 +1263,9 @@ with st.sidebar:
                     if kontur_df is not None:
                         st.session_state["_kontur"] = kontur_df
                         st.session_state["_kontur_key"] = _kkey
+            elif kontur_df is not None:
+                st.caption("Kontur Population загружен ранее — файл можно "
+                           "не перезагружать.")
 
     # слайдер — в конце сайдбара: если выбран Kontur, его res ограничивает максимум
     _max_res = 10
