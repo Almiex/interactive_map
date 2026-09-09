@@ -1298,17 +1298,27 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                             st.session_state["circle_center"][1],
                             h3.get_resolution(grid[0]))]
                     if cell in _chain:
-                        pass  # уже выбран — игнор
+                        # повторный клик — СНЯТЬ выделение.
+                        # Базовый гекс — якорь кругов: его снятие = полный сброс
+                        if cell == _chain[0]:
+                            st.session_state.pop("circle_center", None)
+                            st.session_state.pop("hex_chain", None)
+                            st.session_state["_skip_next_click"] = True
+                        else:
+                            st.session_state["hex_chain"] =                                 [c for c in _chain if c != cell]
+                        st.rerun()
                     else:
                         _prev_center = st.session_state["circle_center"]
-                        _ok_adjacent = cell in h3.grid_disk(_chain[-1], 1)
+                        _ok_adjacent = any(cell in h3.grid_disk(c, 1)
+                                           for c in _chain)
                         _ok_radius = _dist_km(new_center, _prev_center) <= 2.0
                         if _ok_adjacent and _ok_radius:
                             st.session_state["hex_chain"] = _chain + [cell]
                             st.rerun()
                         else:
                             _msg = ("Гекс не добавлен: должен соприкасаться "
-                                    "с предыдущим и лежать в зелёном круге (2 км)")
+                                    "с любым выбранным и лежать в зелёном "
+                                    "круге (2 км)")
                             _toast = getattr(st, "toast", None)
                             if _toast:
                                 _toast(_msg)
@@ -1531,13 +1541,14 @@ with st.sidebar:
 
     st.header("Радиусы вокруг гекса")
     st.radio("Режим выбора",
-             ["Одиночный", "Мультивыбор (цепочка в зелёном круге)"],
+             ["Одиночный", "Мультивыбор (в зелёном круге)"],
              key="sel_mode",
              help="Одиночный: клик переносит круги на гекс. Мультивыбор: "
-                  "первый клик ставит центр и круги, каждый следующий "
-                  "ДОБАВЛЯЕТ гекс в цепочку — он должен соприкасаться с "
-                  "предыдущим и его центр должен лежать в зелёном круге "
-                  "(2 км от центра). Сброс — кнопкой ниже.")
+                  "первый клик ставит центр и круги; клик по невыбранному "
+                  "ДОБАВЛЯЕТ гекс — он должен соприкасаться с ЛЮБЫМ уже "
+                  "выбранным и его центр должен лежать в зелёном круге "
+                  "(2 км от базового). Повторный клик по выбранному СНИМАЕТ "
+                  "выделение; клик по базовому сбрасывает выбор целиком.")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
     if st.button("Сбросить выбор гекса",
