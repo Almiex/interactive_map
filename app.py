@@ -1260,6 +1260,14 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                     st.rerun()
                 else:
                     _chain = list(st.session_state.get("hex_chain") or [])
+                    if not _chain:
+                        # центр есть, а цепочки нет (переключение режимов,
+                        # сессия до появления мультивыбора) — начинаем
+                        # цепочку от базового гекса
+                        _chain = [h3.latlng_to_cell(
+                            st.session_state["circle_center"][0],
+                            st.session_state["circle_center"][1],
+                            h3.get_resolution(grid[0]))]
                     if cell in _chain:
                         pass  # уже выбран — игнор
                     else:
