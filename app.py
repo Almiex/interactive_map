@@ -36,6 +36,10 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.maps.mail.ru/api/interpreter",
 ]
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# резервный геокодер (komoot) — подхватывает город, пока Nominatim режет
+# запросы с нашего IP (на shared-хостинге лимит часто срабатывает из-за
+# чужого трафика). Полигона границы не отдаёт — сетка построится по bbox
+PHOTON_URL = "https://photon.komoot.io/api/"
 HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
 
 # расстояние между центрами соседних гексов, км (по стандарту Uber H3)
@@ -175,50 +179,97 @@ PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_st
 # --------------------------------------------------------------------------- #
 #  Геокодинг
 # --------------------------------------------------------------------------- #
-@st.cache_data(ttl=86400, show_spinner=False)
-def geocode_city(city: str):
-    """Геокодинг с повторами: публичный Nominatim режет частые запросы
-    ответом 429 (лимит ~1 запрос/сек с IP) — ждём и пробуем ещё,
-    до 4 попыток с нарастающей паузой."""
-    last_status = None
-    for attempt in range(4):
+def _nominatim_geocode(city: str):
+    """Основной геокодер OSM (отдаёт полигон административной границы).
+    -> ("ok", geo) | ("notfound", None) | ("unavailable", None).
+    Повторов мало и пауза одна: Nominatim банит IP за частые попытки —
+    агрессивный ретрай делает блокировку длиннее, а не короче."""
+    for attempt in (1, 2):
         try:
             r = requests.get(NOMINATIM_URL, params={
                 "q": city, "format": "json", "limit": 1, "accept-language": "ru",
                 "polygon_geojson": 1,          # полигон административной границы
                 "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
             }, headers=HEADERS, timeout=30)
-        except requests.RequestException as e:
-            last_status = f"{type(e).__name__}: {e}"
-            time.sleep(2 + 2 * attempt)
-            continue
+        except requests.RequestException:
+            return "unavailable", None
         if r.status_code == 429:
-            # лимит запросов: пауза; Nominatim может подсказать её в Retry-After
-            try:
-                wait = int(r.headers.get("Retry-After", 0))
-            except (ValueError, TypeError):
-                wait = 0
-            time.sleep(max(wait, 5 * (attempt + 1)))
-            continue
+            if attempt == 1:
+                # лимит: ОДНА вежливая пауза (Retry-After, если прислали)
+                try:
+                    wait = int(r.headers.get("Retry-After", 0))
+                except (ValueError, TypeError):
+                    wait = 0
+                time.sleep(max(wait, 15))
+                continue
+            return "unavailable", None
         if r.status_code != 200:
-            last_status = f"HTTP {r.status_code}"
-            time.sleep(2 + 2 * attempt)
-            continue
+            return "unavailable", None
         data = r.json()
         if not data:
-            return None
+            return "notfound", None
         d = data[0]
-        return {
+        return "ok", {
             "lat": float(d["lat"]), "lon": float(d["lon"]),
             "display": d["display_name"],
             "bbox": [float(x) for x in d["boundingbox"]],  # [south, north, west, east]
             "geojson": d.get("geojson"),                   # граница города или None
         }
-    raise RuntimeError(
-        "Nominatim (геокодер OSM) временно ограничил запросы с этого IP "
-        "(лимит ~1 запрос/сек). Подождите 1–2 минуты и нажмите "
-        "«Построить сетку» снова."
-        + (f" Последний ответ: {last_status}." if last_status else ""))
+    return "unavailable", None
+
+
+def _photon_geocode(city: str):
+    """Резервный геокодер Photon (komoot). Границы не отдаёт — в geo
+    кладём bbox из extent либо небольшой квадрат вокруг точки; дальше
+    сработает штатный прямоугольный фолбэк сетки.
+    -> ("ok", geo) | ("notfound", None) | ("unavailable", None)"""
+    try:
+        r = requests.get(PHOTON_URL,
+                         params={"q": city, "limit": 1, "lang": "ru"},
+                         headers=HEADERS, timeout=30)
+        if r.status_code != 200:
+            return "unavailable", None
+        feats = r.json().get("features", [])
+        if not feats:
+            return "notfound", None
+        f0 = feats[0]
+        lon, lat = f0["geometry"]["coordinates"]
+        p = f0["properties"]
+        display = ", ".join(str(x) for x in (
+            p.get("name"),
+            p.get("city") or p.get("town") or p.get("village") or p.get("state"),
+            p.get("country")) if x) or city
+        ext = p.get("extent")
+        if ext and len(ext) == 4:
+            bbox = [float(ext[1]), float(ext[3]), float(ext[0]), float(ext[2])]
+        else:
+            bbox = [lat - 0.05, lat + 0.05, lon - 0.05, lon + 0.05]
+        return "ok", {"lat": float(lat), "lon": float(lon), "display": display,
+                      "bbox": bbox, "geojson": None}
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        return "unavailable", None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_city(city: str):
+    """Основной Nominatim; если он ограничил/упал — резервный Photon.
+    Возвращает geo-dict или None, если город нигде не найден."""
+    status, geo = _nominatim_geocode(city)
+    if status == "ok":
+        return geo
+    if status == "notfound":
+        return None
+    # Nominatim недоступен (429/сеть) — пробуем резервный сервис
+    status2, geo2 = _photon_geocode(city)
+    if status2 == "ok":
+        return geo2
+    if status2 == "unavailable":
+        raise RuntimeError(
+            "Геокодеры временно недоступны: Nominatim ограничил запросы с этого "
+            "IP (лимит ~1 запрос/сек; на shared-хостинге лимит часто срабатывает "
+            "из-за чужого трафика). Подождите 1–2 минуты и нажмите «Построить "
+            "сетку» снова.")
+    return None
 
 # --------------------------------------------------------------------------- #
 #  Геокодинг адреса (улица, дом) — опционально
