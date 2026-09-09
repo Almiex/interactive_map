@@ -773,8 +773,16 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                source=None, yzoom=15):
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
-    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
-                   prefer_canvas=True)
+    # streamlit-folium пересобирает карту при КАЖДОМ rerun -> fit_bounds снова
+    # отдалял бы карту. Поэтому после первого рендера вид храним в session_state
+    saved_view = st.session_state.get("map_view")
+    if saved_view:
+        m = folium.Map(location=[saved_view["lat"], saved_view["lng"]],
+                       zoom_start=saved_view["zoom"], tiles="OpenStreetMap",
+                       control_scale=True, prefer_canvas=True)
+    else:
+        m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
+                       prefer_canvas=True)
 
     vals = series.reindex(grid).fillna(0.0)
     vmax = float(vals.max()) if len(vals) else 0.0
@@ -800,11 +808,6 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         props = {"v": rv}
         if source:
             props["src"] = source
-        # киллер-фича: клик по гексу -> ссылка на Яндекс.Карты по центру гекса
-        _lat, _lon = h3.cell_to_latlng(cell)
-        props["link"] = (f'<a href="https://yandex.ru/maps/?pt={_lon:.6f},{_lat:.6f}'
-                         f'&z={yzoom}&l=map" target="_blank" rel="noopener">'
-                         f'🗺 Открыть в Яндекс.Картах</a>')
         # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
         for c in extra_cols:
             props[safe_cols[c]] = float(hex_extra.loc[cell, c]) \
@@ -835,8 +838,6 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             fields=["v"] + [safe_cols[c] for c in extra_cols] + src_fields,
             aliases=aliases, localize=True,
         ),
-        popup=folium.GeoJsonPopup(fields=["link"], aliases=[""], labels=False,
-                                  localize=False, max_width=280),
     ).add_to(m)
 
     cm_legend.add_to(m)
@@ -880,20 +881,27 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                                           localize=False),
         ).add_to(m)
 
-    bounds = [h3.cell_to_boundary(c) for c in grid]
-    lats = [p[0] for b_ in bounds for p in b_]
-    lngs = [p[1] for b_ in bounds for p in b_]
-    m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
+    if not saved_view:  # иначе rerun сбросил бы вид пользователя
+        bounds = [h3.cell_to_boundary(c) for c in grid]
+        lats = [p[0] for b_ in bounds for p in b_]
+        lngs = [p[1] for b_ in bounds for p in b_]
+        m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
 
-    # круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный)
+    # круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
+    # interactive=False: круги не ловят события мыши — тултипы гексов под ними
+    # работают, клик по линии круга попадает в гекс под ним
     if st.session_state.get("circle_center"):
         _cc = st.session_state["circle_center"]
         folium.Circle(location=_cc, radius=2000, color="#2ca02c", weight=2.5,
-                      dash_array="8 6", fill=False,
-                      tooltip="Радиус 2 км").add_to(m)
+                      dash_array="8 6", fill=False, interactive=False).add_to(m)
         folium.Circle(location=_cc, radius=5000, color="#d62728", weight=2.5,
-                      dash_array="8 6", fill=False,
-                      tooltip="Радиус 5 км").add_to(m)
+                      dash_array="8 6", fill=False, interactive=False).add_to(m)
+        # ссылка на Яндекс.Карты — Streamlit-кнопка, а не leaflet-попап:
+        # попап гаснет при каждом rerun (карта пересобирается), кнопка — нет
+        _la, _lo = _cc
+        st.link_button("🗺 Открыть выбранный гекс в Яндекс.Картах",
+                       f"https://yandex.ru/maps/?pt={_lo:.6f},{_la:.6f}"
+                       f"&z={yzoom}&l=map")
 
     if marker:
         folium.Marker(
@@ -902,7 +910,12 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             icon=folium.Icon(color="blue", icon="glyphicon-map-marker"),
         ).add_to(m)
     out = st_folium(m, width=1150, height=680,
-                    returned_objects=["last_object_clicked"])
+                    returned_objects=["last_object_clicked", "center", "zoom"])
+    # запоминаем вид, чтобы при следующих rerun карта не отлетала на fit_bounds
+    if out and out.get("center") and out.get("zoom") is not None:
+        st.session_state["map_view"] = {
+            "lat": out["center"]["lat"], "lng": out["center"]["lng"],
+            "zoom": out["zoom"]}
     # streamlit-folium отдаёт last_object_clicked как {"lat", "lng"} —
     # точку клика (feature с properties НЕ возвращается). Берём гекс,
     # содержащий точку клика, в resolution текущей сетки, центр его — центр кругов.
@@ -1052,8 +1065,9 @@ with st.sidebar:
     if st.button("Сбросить круги", disabled=not st.session_state.get("circle_center"),
                  help="Убрать пунктирные круги 2/5 км с карты"):
         st.session_state.pop("circle_center", None)
-    st.caption("💡 Клик по любому гексу на карте — пунктирные круги 2 км (зелёный) "
-               "и 5 км (красный) с центром в нём.")
+    st.caption("💡 Клик по гексу — круги 2 км (зелёный) и 5 км (красный) с центром "
+               "в нём + кнопка «Открыть в Яндекс.Картах» над картой. Вид карты "
+               "при этом сохраняется.")
 
     st.header("Тип карты (одна на экран)")
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
@@ -1137,6 +1151,7 @@ if load_btn:
     # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
                                 "nodes": nodes_df, "ways": ways_df}
+    st.session_state.pop("map_view", None)  # вид старого города не переносим
 
 stored = st.session_state.get("data")
 # миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
