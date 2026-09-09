@@ -904,10 +904,13 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     out = st_folium(m, width=1150, height=680,
                     returned_objects=["last_object_clicked"])
     clicked = (out or {}).get("last_object_clicked")
-    if isinstance(clicked, dict) and clicked.get("properties"):
-        cell = clicked["properties"].get("cell")
+    if isinstance(clicked, dict):
+        cell = (clicked.get("properties") or {}).get("cell")
         if cell:
-            st.session_state["circle_center"] = h3.cell_to_latlng(cell)
+            new_center = tuple(h3.cell_to_latlng(cell))
+            if st.session_state.get("circle_center") != new_center:
+                st.session_state["circle_center"] = new_center
+                st.rerun()  # без rerun круги отрисуются только при след. действии
 
 
 # --------------------------------------------------------------------------- #
@@ -1046,6 +1049,8 @@ with st.sidebar:
     if st.button("Сбросить круги", disabled=not st.session_state.get("circle_center"),
                  help="Убрать пунктирные круги 2/5 км с карты"):
         st.session_state.pop("circle_center", None)
+    st.caption("💡 Клик по любому гексу на карте — пунктирные круги 2 км (зелёный) "
+               "и 5 км (красный) с центром в нём.")
 
     st.header("Тип карты (одна на экран)")
     map_type = st.radio("Что показываем", MAP_TYPES, index=0)
