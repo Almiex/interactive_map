@@ -1298,15 +1298,17 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                             st.session_state["circle_center"][1],
                             h3.get_resolution(grid[0]))]
                     if cell in _chain:
-                        # повторный клик — СНЯТЬ выделение.
-                        # Базовый гекс — якорь кругов: его снятие = полный сброс
-                        if cell == _chain[0]:
-                            st.session_state.pop("circle_center", None)
-                            st.session_state.pop("hex_chain", None)
+                        # повторный клик: обычный гекс — снять выделение;
+                        # базовый — ИГНОР (не сбрасывается кликом: только
+                        # кнопкой «Сбросить» или сменой режима)
+                        if cell != _chain[0]:
+                            st.session_state["hex_chain"] = [
+                                c for c in _chain if c != cell]
+                            # _skip_next_click обязателен: иначе rerun
+                            # обработает тот же «залипший» клик и тоггл
+                            # откатит изменение — бесконечное мелькание
                             st.session_state["_skip_next_click"] = True
-                        else:
-                            st.session_state["hex_chain"] =                                 [c for c in _chain if c != cell]
-                        st.rerun()
+                            st.rerun()
                     else:
                         _prev_center = st.session_state["circle_center"]
                         _ok_adjacent = any(cell in h3.grid_disk(c, 1)
@@ -1314,6 +1316,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                         _ok_radius = _dist_km(new_center, _prev_center) <= 2.0
                         if _ok_adjacent and _ok_radius:
                             st.session_state["hex_chain"] = _chain + [cell]
+                            st.session_state["_skip_next_click"] = True
                             st.rerun()
                         else:
                             _msg = ("Гекс не добавлен: должен соприкасаться "
@@ -1548,7 +1551,9 @@ with st.sidebar:
                   "ДОБАВЛЯЕТ гекс — он должен соприкасаться с ЛЮБЫМ уже "
                   "выбранным и его центр должен лежать в зелёном круге "
                   "(2 км от базового). Повторный клик по выбранному СНИМАЕТ "
-                  "выделение; клик по базовому сбрасывает выбор целиком.")
+                  "выделение. Центральный гекс повторным кликом НЕ "
+                  "сбрасывается — только кнопкой «Сбросить выбор гекса» "
+                  "или сменой режима на одиночный.")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
     if st.button("Сбросить выбор гекса",
@@ -1564,10 +1569,11 @@ with st.sidebar:
 if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_type):
     st.session_state.pop("circle_sums", None)
 
-# смена режима выбора сбрасывает цепочку мультивыбора
+# смена режима выбора = полный сброс выборки (как кнопка «Сбросить»)
 if st.session_state.get("_sel_mode_prev") != st.session_state.get("sel_mode"):
     st.session_state["_sel_mode_prev"] = st.session_state.get("sel_mode")
     st.session_state.pop("hex_chain", None)
+    st.session_state.pop("circle_center", None)
 
 if load_btn or st.session_state.pop("build_on_enter", False):
     st.session_state.pop("geocode_trace", None)  # свежая диагностика
