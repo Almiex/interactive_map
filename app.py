@@ -12,6 +12,7 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
 
 import re
 import time
+import hashlib
 import requests
 import numpy as np
 import pandas as pd
@@ -971,6 +972,32 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     lats = [p[0] for b_ in bounds for p in b_]
     lngs = [p[1] for b_ in bounds for p in b_]
     m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
+
+    # Вид карты (центр/зум) запоминаем в localStorage и восстанавливаем
+    # после каждой пересборки — смена слоя/resolution не отдаляет карту.
+    # Клиентский механизм: pan/zoom НЕ вызывают rerun Streamlit (в отличие
+    # от returned_objects=["center","zoom"]). Ключ привязан к городу — для
+    # нового города сработает обычный fit_bounds выше. Скрипт добавляем в
+    # конец figure.script, чтобы выполнился ПОСЛЕ fit_bounds и перебил его.
+    _city_tag = hashlib.md5(geo["display"].encode("utf-8")).hexdigest()[:10]
+    m.get_root().script.add_child(folium.Element(f"""
+<script>
+(function() {{
+  var KEY = "geohex_view_{_city_tag}";
+  var m = {m.get_name()};
+  m.on("moveend", function() {{
+    try {{
+      localStorage.setItem(KEY, JSON.stringify({{
+        c: [m.getCenter().lat, m.getCenter().lng], z: m.getZoom()}}));
+    }} catch (e) {{}}
+  }});
+  try {{
+    var v = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (v && v.c && v.z != null) m.setView(v.c, v.z);
+  }} catch (e) {{}}
+}})();
+</script>
+"""))
 
     # Круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
     # Ключевое: они живут в ОТДЕЛЬНОМ FeatureGroup и передаются через
