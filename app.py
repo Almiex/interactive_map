@@ -1478,11 +1478,12 @@ if map_type.startswith(("1.", "2.")):
             and _saved_sums.get("center") == st.session_state.get("circle_center")):
         _s2, _n2 = _saved_sums["sums"][2.0]
         _s5, _n5 = _saved_sums["sums"][5.0]
-        _sc1, _sc2 = st.columns(2)
-        _sc1.metric(f"Σ в радиусе 2 км · {_n2} гексов",
-                    f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
-        _sc2.metric(f"Σ в радиусе 5 км · {_n5} гексов",
-                    f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
+        _sum_col, _ = st.columns([1, 2])  # узкая колонка слева, метрики в столбик
+        with _sum_col:
+            st.metric(f"Σ в радиусе 2 км · {_n2} гексов",
+                      f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
+            st.metric(f"Σ в радиусе 5 км · {_n5} гексов",
+                      f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
 
 _src = None
 if map_type.startswith("1."):
