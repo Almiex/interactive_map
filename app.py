@@ -782,7 +782,10 @@ def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
 # --------------------------------------------------------------------------- #
 #  Отрисовка ОДНОЙ карты
 # --------------------------------------------------------------------------- #
-COLORS = ["#2c7fb8", "#41b6c4", "#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
+# палитра с "растянутой" жёлто-оранжевой серединой: 11 стопов вместо 7,
+# красные сдвинуты к самому верху шкалы (глубокий красный — лишь ~от 75% макс.)
+COLORS = ["#2c7fb8", "#41b6c4", "#7fcdbb", "#ffffb2", "#ffeda0",
+          "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#f03b20", "#bd0026"]
 
 
 class HexTooltip(folium.GeoJsonTooltip):
@@ -823,7 +826,7 @@ class HexTooltip(folium.GeoJsonTooltip):
 
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
-               source=None, yzoom=15):
+               source=None, yzoom=15, gamma=0.4):
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
@@ -850,14 +853,12 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         st.warning("Нет данных для выбранного слоя в этом городе.")
         vmax = 1.0
     cm = LinearColormap(COLORS, vmin=0, vmax=1)  # цвет по доле максимума
-    # гамма < 1 сжимает низ шкалы: жёлтый начинается заметно раньше,
-    # сине-зелёная часть не растягивается на треть диапазона
-    GAMMA = 0.4
-    # легенда сэмплирована с ТЕМ ЖЕ отображением — цвета на шкале совпадают
-    # с реальной заливкой (у линейной шкалы они бы расходились)
-    # Легенда сэмплируется БЕЗ branca-интерьеров (в новых версиях меняются):
-    # прямое линейное интерполирование между hex-стопами палитры — ровно то,
-    # что делает LinearColormap внутри _style
+    # гамма < 1 сжимает низ шкалы: жёлтый начинается заметно раньше.
+    # Значение gamma — из слайдера сайдбара, подбирается на вкус.
+    # Легенда сэмплирована с ТЕМ ЖЕ отображением — цвета на шкале совпадают
+    # с реальной заливкой; сэмплируем БЕЗ branca-интерьеров (между версиями
+    # меняются): прямое линейное интерполирование между hex-стопами палитры —
+    # ровно то, что делает LinearColormap внутри _style
     def _palette_at(t):
         pos = min(max(t, 0.0), 1.0) * (len(COLORS) - 1)
         i = min(int(pos), len(COLORS) - 2)
@@ -868,7 +869,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             out.append(f"{round(a + (b - a) * frac):02x}")
         return "#" + "".join(out)
 
-    cm_legend = LinearColormap([_palette_at((i / 24) ** GAMMA) for i in range(25)],
+    cm_legend = LinearColormap([_palette_at((i / 24) ** gamma) for i in range(25)],
                                vmin=0, vmax=vmax)
     cm_legend.caption = f"{map_type} — {unit}"
 
@@ -906,8 +907,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 
     def _style(f):
         v = f["properties"]["v"]
-        # гамма-раскрытие (см. GAMMA выше): жёлтое начинается раньше
-        t = (v / vmax) ** GAMMA if vmax > 0 else 0.0
+        # гамма-раскрытие: жёлтое начинается раньше, красный уходит к вершине
+        t = (v / vmax) ** gamma if vmax > 0 else 0.0
         opacity = 0.03 if v <= 0 else 0.20 + 0.40 * t
         return {"fillColor": cm(t), "color": "#555555", "weight": 0.6,
                 "fillOpacity": opacity}
@@ -1286,6 +1287,14 @@ with st.sidebar:
         st.session_state.pop("circle_center", None)
         st.session_state["_skip_next_click"] = True  # блокируем "залипший" клик
 
+    st.header("Раскраска шкалы")
+    st.slider("Гамма (меньше → жёлтый раньше)", 0.2, 0.8, 0.4, 0.05,
+              key="gamma_slider",
+              help="Сдвиг тёплых цветов к низу шкалы. Меньше — жёлтый и "
+                   "оранжевый начинаются при меньших значениях, красного "
+                   "становится больше. Больше — красный сужается к самым "
+                   "высоким значениям.")
+
 # ------------------------------- логика ----------------------------------- #
 if load_btn:
     with st.spinner("Загружаю данные OpenStreetMap через Overpass API (1–5 минут)…"):
@@ -1431,7 +1440,8 @@ if map_type.startswith("1."):
 render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
            legend=legend, source=_src,
-           yzoom={7: 13, 8: 15, 9: 16, 10: 17}.get(res_eff, 15))
+           yzoom={7: 13, 8: 15, 9: 16, 10: 17}.get(res_eff, 15),
+           gamma=st.session_state.get("gamma_slider", 0.4))
 if map_type.startswith("1.") and kontur_df is None:
     st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное "
                "заселение и незавершённое строительство. Для точной численности "
