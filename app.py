@@ -756,7 +756,7 @@ def _union_rings_latlng(cells):
     return rings
 
 
-def sums_in_circles(series, center, radii_km=(2.0, 5.0)):
+def sums_in_circles(series, center, radii_km=(1.0, 2.0, 5.0)):
     """Сумма показателей гексов (series), ЦЕНТРЫ которых попадают в радиус.
     Возвращает {радиус_км: (сумма, число гексов)} или None."""
     if series is None or series.empty or not center:
@@ -1247,7 +1247,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             circles_fg.add_child(_passive(folium.Polygon(
                 locations=_ring, color="#1f6fd6", weight=3, fill=False)))
         # круги — по флажкам сайдбара (оба выкл = только подсветка гекса)
-        for _r, _col, _flag in ((2000, "#2ca02c", "show_r2"),
+        for _r, _col, _flag in ((1000, "#56b4e9", "show_r1"),
+                                (2000, "#2ca02c", "show_r2"),
                                 (5000, "#d62728", "show_r5")):
             if st.session_state.get(_flag, True):
                 circles_fg.add_child(_passive(folium.Circle(
@@ -1579,10 +1580,10 @@ with st.sidebar:
             st.session_state["res_slider"] = 8
 
     st.radio("Режим выбора",
-             ["Одиночный", "Мультивыбор (в радиусе 2км)"],
+             ["Одиночный", "Мультивыбор (в радиусе до 2 км)"],
              key="sel_mode", on_change=_mode_changed,
-             help="Одиночный: выбор одного гекса. Мультивыбор: "
-                  "выбор нескольких соседних гексов.")
+             help="Одиночный: выбор одного гекса. Мультивыбор: выбор нескольких соседних гексов в радиусе 2 км.")
+    st.checkbox("Показывать радиус 1 км", value=True, key="show_r1")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
     if st.button("Сбросить выбор гекса",
@@ -1775,10 +1776,13 @@ if map_type.startswith(("1.", "2.")):
     _saved_sums = st.session_state.get("circle_sums")
     if (_saved_sums
             and _saved_sums.get("center") == st.session_state.get("circle_center")):
+        _s1, _n1 = _saved_sums["sums"][1.0]
         _s2, _n2 = _saved_sums["sums"][2.0]
         _s5, _n5 = _saved_sums["sums"][5.0]
         _sum_col, _ = st.columns([1, 2])  # узкая колонка слева, метрики в столбик
         with _sum_col:
+            st.metric(f"Σ в радиусе 1 км · {_n1} гексов",
+                      f"{_s1:,.0f} {_saved_sums['unit']}".rstrip())
             st.metric(f"Σ в радиусе 2 км · {_n2} гексов",
                       f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
             st.metric(f"Σ в радиусе 5 км · {_n5} гексов",
