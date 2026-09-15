@@ -1011,6 +1011,21 @@ class HexTooltip(folium.GeoJsonTooltip):
     return div
     }
     """
+    def render(self, **kwargs):
+        """Стиль тултипа (как у штатного GeoJsonTooltip) + рендер БЕЗ
+        assert'ов GeoJsonDetail.render: штатный рендер падает с
+        AssertionError, если хотя бы одно поле fields отсутствует в
+        properties хотя бы одной фичи. Наш шаблон безопасно показывает
+        пустое значение для отсутствующего поля — красть всю карту
+        из-за проверки недопустимо."""
+        from branca.element import Element as _El
+        if getattr(self, "style", None):
+            self._parent.get_root().header.add_child(
+                _El(f"<style>.{self.class_name}{{{self.style}}}</style>"),
+                name=f"tooltip_style_{self.get_name()}",
+            )
+        _El.render(self, **kwargs)
+
     # NB: ТОЛЬКО встроенные фильтры jinja2 (tojson/safe). Кастомный фильтр
     # folium "tojavascript" живёт в его собственном окружении — в сыром
     # jinja2.Template его нет и компиляция падает с TemplateAssertionError.
