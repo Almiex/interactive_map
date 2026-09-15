@@ -1018,6 +1018,9 @@ def build_all_maps_summary(center, res_eff, stored, kontur_df, m2_per_person):
         ("Город", stored["geo"]["display"]),
         ("Центр кругов", f"{center[0]:.6f}, {center[1]:.6f}"),
         ("Resolution", f"res {res_eff}"),
+        ("Размер гекса",
+         f"≈{hex_area_km2(res_eff):.3f} км² площадь, "
+         f"≈{RES_SPACING_KM[res_eff]} км между центрами"),
         ("Источник численности (карта 1)",
          "Kontur (2023)" if kontur_df is not None
          else f"OSM: суррогат, {m2_per_person} м²/чел"),
@@ -1092,6 +1095,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
                source=None, yzoom=15, gamma=0.6,
                circ_center=None, center_is_marker=False):
+    if not grid:  # пустая сетка ловится выше по потоку; тут — страховка
+        st.warning("Нет данных для отображения: сетка пуста.")
+        return
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
@@ -1774,6 +1780,10 @@ with st.spinner("Считаю агрегаты по гексам…"):
 # суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
 if map_type.startswith(("1.", "2.")):
     grid = populated_with_ring(grid, series)
+if not grid:
+    # populated_with_ring обнуляет сетку, если у слоя нет данных в городе
+    st.warning("Нет данных для выбранного слоя в этом городе — показать нечего.")
+    st.stop()
 
 # лимита на точки нет: они рисуются одним GeoJSON-слоем и браузер это выдерживает
 
