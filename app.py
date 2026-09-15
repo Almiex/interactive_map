@@ -10,6 +10,7 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
 Запуск:  streamlit run app.py
 """
 
+import io
 import re
 import json
 import time
@@ -979,6 +980,54 @@ def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
                           kontur_df=_kontur, m2_per_person=m2_per_person)
 
 
+def build_all_maps_summary(center, res_eff, stored, kontur_df, m2_per_person):
+    """Сводная таблица по ВСЕМ картам для центра кругов (метка/гекс):
+    агрегаты показателей в радиусах 1/2/5 км. Фильтры — полные (все
+    категории). Внутри — тот же кэшированный вычислитель, что и для карт,
+    поэтому повторные формирования мгновенные. Возвращает (сводка, параметры)."""
+    plans = [
+        (MAP_TYPES[0], None, "sum"),               # плотность
+        (MAP_TYPES[1], None, "sum"),               # жилфонд
+        (MAP_TYPES[2], None, "avg"),               # индекс спроса
+        (MAP_TYPES[3], None, "sum"),               # POI
+        (MAP_TYPES[4], None, "sum"),               # социнфра
+        (MAP_TYPES[5], TRAFFIC_MODES[0], "avg"),   # трафик пеший
+        (MAP_TYPES[5], TRAFFIC_MODES[1], "avg"),   # трафик авто
+        (MAP_TYPES[6], None, "sum"),               # мед. объекты
+    ]
+    names = {
+        (MAP_TYPES[5], TRAFFIC_MODES[0]): "6. Трафик — пешеходный",
+        (MAP_TYPES[5], TRAFFIC_MODES[1]): "6. Трафик — автомобильный",
+    }
+    rows = []
+    for mt, sub, agg in plans:
+        series, unit, _hx, _pt = _compute_series_cached(
+            mt, sub, res_eff, stored.get("ver", 0),
+            kontur_df is not None, m2_per_person)
+        sums = sums_in_circles(series, center) or {}
+        row = {"Карта": names.get((mt, sub), mt),
+               "Показатель": unit,
+               "Агрегация": "среднее" if agg == "avg" else "сумма"}
+        for r in (1.0, 2.0, 5.0):
+            s, n = sums.get(r, (0.0, 0))
+            row[f"{r:.0f} км"] = round(s / n, 1) if (agg == "avg" and n) else round(s)
+            row[f"{r:.0f} км · гексов"] = n
+        rows.append(row)
+    summary = pd.DataFrame(rows)
+    params = pd.DataFrame([
+        ("Город", stored["geo"]["display"]),
+        ("Центр кругов", f"{center[0]:.6f}, {center[1]:.6f}"),
+        ("Resolution", f"res {res_eff}"),
+        ("Источник численности (карта 1)",
+         "Kontur (2023)" if kontur_df is not None
+         else f"OSM: суррогат, {m2_per_person} м²/чел"),
+        ("Фильтры", "все категории (полные)"),
+        ("Метод", "гексы, центры которых внутри радиуса; для индексных карт — среднее"),
+        ("Сформировано", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")),
+    ], columns=["Параметр", "Значение"])
+    return summary, params
+
+
 # --------------------------------------------------------------------------- #
 #  Отрисовка ОДНОЙ карты
 # --------------------------------------------------------------------------- #
@@ -1861,6 +1910,47 @@ if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
     if map_type.startswith(("4.", "5.", "7.")):
         st.caption("💡 Сумма считается по ТЕКУЩИМ фильтрам. Изменили "
                    "категории — нажмите кнопку ещё раз, чтобы пересчитать.")
+
+# ---- сводка по ВСЕМ картам в Excel: одна кнопка вместо обхода 7 карт.
+# Считает все показатели с ПОЛНЫМИ фильтрами для текущего центра кругов
+# (метка или гекс) и радиусов 1/2/5 км.
+if _circ_center:
+    if st.button("📊 Сформировать сводку по всем картам (Excel)",
+                 help="Считает показатели всех 7 карт (трафик — пеший и "
+                      "авто отдельными строками) с полными фильтрами для "
+                      "текущего центра кругов и радиусов 1/2/5 км. Первый "
+                      "запуск 10–30 секунд, дальше — из кэша."):
+        with st.spinner("Считаю все 7 карт для сводки (первый раз 10–30 сек)…"):
+            try:
+                _sum_df, _par_df = build_all_maps_summary(
+                    _circ_center, res_eff, stored, kontur_df, m2_per_person)
+                _buf = io.BytesIO()
+                _fmt = "xlsx"
+                try:
+                    with pd.ExcelWriter(_buf, engine="openpyxl") as _w:
+                        _par_df.to_excel(_w, sheet_name="Параметры", index=False)
+                        _sum_df.to_excel(_w, sheet_name="Сводка", index=False)
+                    _mime = ("application/vnd.openxmlformats-officedocument."
+                             "spreadsheetml.sheet")
+                except ImportError:
+                    # openpyxl нет в requirements — отдаём CSV вместо xlsx
+                    _buf = io.BytesIO(_sum_df.to_csv(index=False)
+                                      .encode("utf-8-sig"))
+                    _fmt, _mime = "csv", "text/csv"
+                    st.warning("⚠️ openpyxl не установлен — отдаю CSV. "
+                               "Для xlsx добавьте openpyxl>=3.1 в requirements.txt")
+                st.session_state["allmaps_export"] = {
+                    "data": _buf.getvalue(), "ext": _fmt, "mime": _mime,
+                    "center": _circ_center}
+            except Exception as e:  # noqa: BLE001 — любая ошибка расчёта
+                st.session_state.pop("allmaps_export", None)
+                st.error(f"Не удалось сформировать сводку: {e}")
+    _exp = st.session_state.get("allmaps_export")
+    if _exp and _exp.get("center") == _circ_center:
+        st.download_button(f"⬇ Скачать сводку по всем картам ({_exp['ext']})",
+                           data=_exp["data"],
+                           file_name=f"geohex_svodka.{_exp['ext']}",
+                           mime=_exp["mime"])
 
 # ---- экспорт выделенных гексов в GeoJSON (формат Yandex Map Constructor):
 # FeatureCollection + metadata{name, creator} + features c Polygon-кольцами
