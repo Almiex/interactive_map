@@ -1041,7 +1041,8 @@ class HexTooltip(folium.GeoJsonTooltip):
 
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
-               source=None, yzoom=15, gamma=0.6):
+               source=None, yzoom=15, gamma=0.6,
+               circ_center=None, center_is_marker=False):
     center = [geo["lat"], geo["lon"]]
     # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
     m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
@@ -1243,8 +1244,10 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # до Leaflet и круги не будут перехватывать мышь (тултипы гексов под
     # кругами работают, клик по линии круга попадает в гекс под ней).
     circles_fg = None
-    if st.session_state.get("circle_center"):
-        _cc = st.session_state["circle_center"]
+    # эффективный центр кругов: метка адреса (если выбрана) или гекс
+    _cc = circ_center if circ_center is not None else \
+        st.session_state.get("circle_center")
+    if _cc:
         _res = h3.get_resolution(grid[0])
         circles_fg = folium.FeatureGroup(name="circles")
 
@@ -1309,7 +1312,10 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             new_center = tuple(h3.cell_to_latlng(cell))
             _multi = str(st.session_state.get("sel_mode", "")).startswith("Мульти")
             if not _multi:
-                if st.session_state.get("circle_center") != new_center:
+                if center_is_marker:
+                    pass  # центр кругов — метка: клики по гексам
+                          # круги не переносят (снимите флажок)
+                elif st.session_state.get("circle_center") != new_center:
                     st.session_state["circle_center"] = new_center
                     st.rerun()  # без rerun круги отрисуются только при след. действии
             else:
@@ -1342,7 +1348,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                             st.session_state["_skip_next_click"] = True
                             st.rerun()
                     else:
-                        _prev_center = st.session_state["circle_center"]
+                        _prev_center = _cc  # эффективный центр (метка/гекс)
                         _ok_adjacent = any(cell in h3.grid_disk(c, 1)
                                            for c in _chain)
                         _ok_radius = _dist_km(new_center, _prev_center) <= 2.0
@@ -1605,6 +1611,18 @@ with st.sidebar:
     st.checkbox("Показывать радиус 1 км", value=True, key="show_r1")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
+    # центр кругов: метка адреса или выбранный гекс. Флажок — только
+    # когда адрес введён для ТЕКУЩЕГО города (иначе адрес игнорируется)
+    _addr_city = (st.session_state.get("data") or {}).get("city")
+    if address.strip() and _addr_city and city.strip() == _addr_city:
+        st.checkbox("Центр кругов — метка адреса", key="center_on_marker",
+                    help="Включите, чтобы круги 1/2/5 км строились от "
+                         "найденного адреса, а не от выбранного гекса. "
+                         "Подсветка — на гексе, содержащем метку. В "
+                         "одиночном режиме клики по гексам круги не "
+                         "переносят (снимите флажок). В мультивыборе "
+                         "цепочка по-прежнему собирается кликами по "
+                         "гексам внутри зелёного круга.")
     if st.button("Сбросить выбор гекса",
                  disabled=not st.session_state.get("circle_center")):
         st.session_state.pop("circle_center", None)
@@ -1724,6 +1742,15 @@ if address.strip() and city.strip() == stored["city"]:
         st.info(f"📌 Метка: {marker['display']} "
                 f"({marker['lat']:.5f}, {marker['lon']:.5f})")
 
+# ЭФФЕКТИВНЫЙ ЦЕНТР КРУГОВ: метка адреса (если выбран флажок и метка
+# найдена), иначе центр выбранного гекса. От него строятся круги,
+# подсветка, проверка радиуса в мультивыборе и суммы в кругах.
+if not address.strip():
+    st.session_state.pop("center_on_marker", None)  # адреса нет — флаг неактуален
+_use_marker = bool(st.session_state.get("center_on_marker")) and marker is not None
+_circ_center = ((marker["lat"], marker["lon"]) if _use_marker
+                else st.session_state.get("circle_center"))
+
 if map_type.startswith("3."):
     st.info("**Из чего складывается индекс спроса.** Каждая строка тултипа — "
             "отдельный показатель, нормированный в индекс 0–100 относительно "
@@ -1786,7 +1813,7 @@ elif map_type.startswith("7."):
 # центрам внутри радиуса. Привязка результата: тип карты (очистка выше)
 # + гекс + отпечаток фильтров (при смене фильтров сумма скрывается).
 if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
-    _sums_center = st.session_state.get("circle_center")
+    _sums_center = _circ_center
     # отпечаток текущих фильтров/настроек, влияющих на серию показателей
     _fkey = f"{sub_option}|{'K' if kontur_df is not None else ''}|{m2_per_person}"
     if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
@@ -1808,7 +1835,7 @@ if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
     # гексу: перенёс круги — сумма скроется, пока не нажата кнопка снова
     _saved_sums = st.session_state.get("circle_sums")
     if (_saved_sums
-            and _saved_sums.get("center") == st.session_state.get("circle_center")
+            and _saved_sums.get("center") == _circ_center
             and _saved_sums.get("fkey") == _fkey):  # фильтры не менялись
         _s1, _n1 = _saved_sums["sums"][1.0]
         _s2, _n2 = _saved_sums["sums"][2.0]
@@ -1916,7 +1943,8 @@ render_map(grid, series, unit, geo, map_type, marker=marker,
            # Подбирается на глаз под конкретный датасет. Слайдер убран из UI —
            # менять значение только здесь. Легенда под шкалой всегда считается
            # с той же гаммой, расхождения шкалы и заливки не будет.
-           gamma=0.75)
+           gamma=0.75,
+           circ_center=_circ_center, center_is_marker=_use_marker)
 if map_type.startswith("1.") and kontur_df is None:
     st.caption("⚠️ Оценки по OSM-зданиям — суррогатные: не учитывают реальное "
                "заселение и незавершённое строительство. Для точной численности "
