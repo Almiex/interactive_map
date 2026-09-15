@@ -1787,9 +1787,9 @@ elif map_type.startswith("7."):
 if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.")):
     _sums_center = st.session_state.get("circle_center")
     if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
-                 help="Суммирует показатели гексов текущей карты (с учётом "
-                      "выбранных фильтров), центры которых попадают в радиус "
-                      "1, 2 и 5 км от выбранного гекса"):
+                 help="По гексам текущей карты (с учётом фильтров), центры "
+                      "которых попадают в радиус 1, 2 и 5 км: сумма для "
+                      "карт 1, 2, 4, 5 и СРЕДНЕЕ для индексных карт 3 и 6."):
         _s = sums_in_circles(series, _sums_center)
         if _s is not None:
             st.session_state["circle_sums"] = {"sums": _s, "unit": unit,
@@ -1807,14 +1807,24 @@ if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.")):
         _s1, _n1 = _saved_sums["sums"][1.0]
         _s2, _n2 = _saved_sums["sums"][2.0]
         _s5, _n5 = _saved_sums["sums"][5.0]
+        # для индексных карт (3 — спрос, 6 — трафик) показываем СРЕДНЕЕ
+        # по гексам радиуса: сумма индексов не имеет смысла
+        _avg = map_type.startswith(("3.", "6."))
         _sum_col, _ = st.columns([1, 2])  # узкая колонка слева, метрики в столбик
+
+        def _r_metric(_r_label, _s, _n):
+            if _avg:
+                _v = _s / _n if _n else 0.0
+                st.metric(f"Среднее в радиусе {_r_label} · {_n} гексов",
+                          f"{_v:,.1f} {_saved_sums['unit']}".rstrip())
+            else:
+                st.metric(f"Σ в радиусе {_r_label} · {_n} гексов",
+                          f"{_s:,.0f} {_saved_sums['unit']}".rstrip())
+
         with _sum_col:
-            st.metric(f"Σ в радиусе 1 км · {_n1} гексов",
-                      f"{_s1:,.0f} {_saved_sums['unit']}".rstrip())
-            st.metric(f"Σ в радиусе 2 км · {_n2} гексов",
-                      f"{_s2:,.0f} {_saved_sums['unit']}".rstrip())
-            st.metric(f"Σ в радиусе 5 км · {_n5} гексов",
-                      f"{_s5:,.0f} {_saved_sums['unit']}".rstrip())
+            _r_metric("1 км", _s1, _n1)
+            _r_metric("2 км", _s2, _n2)
+            _r_metric("5 км", _s5, _n5)
 
 # ---- экспорт выделенных гексов в GeoJSON (формат Yandex Map Constructor):
 # FeatureCollection + metadata{name, creator} + features c Polygon-кольцами
