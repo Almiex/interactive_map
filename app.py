@@ -1780,21 +1780,26 @@ elif map_type.startswith("7."):
 
 
 # ---- сумма показателей внутри кругов: НЕ по умолчанию, а по кнопке.
-# Карты 1–6: население / жилфонд / индекс спроса / объекты (с учётом
-# фильтров) / объекты социнфраструктуры / индекс трафика. Серия показателей
-# уже отражает текущие фильтры и режим. Гексы берутся по центрам внутри
-# радиуса. Привязка результата: тип карты (очистка выше) + гекс.
-if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.")):
+# Карты 1–7: население / жилфонд / индекс спроса / объекты (с учётом
+# фильтров) / социнфраструктура / индекс трафика / мед. объекты. Серия
+# показателей уже отражает текущие фильтры и режим. Гексы берутся по
+# центрам внутри радиуса. Привязка результата: тип карты (очистка выше)
+# + гекс + отпечаток фильтров (при смене фильтров сумма скрывается).
+if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
     _sums_center = st.session_state.get("circle_center")
+    # отпечаток текущих фильтров/настроек, влияющих на серию показателей
+    _fkey = f"{sub_option}|{'K' if kontur_df is not None else ''}|{m2_per_person}"
     if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
                  help="По гексам текущей карты (с учётом фильтров), центры "
                       "которых попадают в радиус 1, 2 и 5 км: сумма для "
-                      "карт 1, 2, 4, 5 и СРЕДНЕЕ для индексных карт 3 и 6."):
+                      "карт 1, 2, 4, 5, 7 и СРЕДНЕЕ для индексных карт 3 и 6. "
+                      "После смены фильтров нажмите кнопку ещё раз."):
         _s = sums_in_circles(series, _sums_center)
         if _s is not None:
             st.session_state["circle_sums"] = {"sums": _s, "unit": unit,
                                                "center": _sums_center,
-                                               "map_type": map_type}
+                                               "map_type": map_type,
+                                               "fkey": _fkey}
         else:
             st.session_state.pop("circle_sums", None)
             st.warning("Нет данных для суммирования на текущей карте.")
@@ -1803,7 +1808,8 @@ if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.")):
     # гексу: перенёс круги — сумма скроется, пока не нажата кнопка снова
     _saved_sums = st.session_state.get("circle_sums")
     if (_saved_sums
-            and _saved_sums.get("center") == st.session_state.get("circle_center")):
+            and _saved_sums.get("center") == st.session_state.get("circle_center")
+            and _saved_sums.get("fkey") == _fkey):  # фильтры не менялись
         _s1, _n1 = _saved_sums["sums"][1.0]
         _s2, _n2 = _saved_sums["sums"][2.0]
         _s5, _n5 = _saved_sums["sums"][5.0]
@@ -1825,6 +1831,9 @@ if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.")):
             _r_metric("1 км", _s1, _n1)
             _r_metric("2 км", _s2, _n2)
             _r_metric("5 км", _s5, _n5)
+    if map_type.startswith(("4.", "5.", "7.")):
+        st.caption("💡 Сумма считается по ТЕКУЩИМ фильтрам. Изменили "
+                   "категории — нажмите кнопку ещё раз, чтобы пересчитать.")
 
 # ---- экспорт выделенных гексов в GeoJSON (формат Yandex Map Constructor):
 # FeatureCollection + metadata{name, creator} + features c Polygon-кольцами
