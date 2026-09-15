@@ -1916,37 +1916,59 @@ if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
 # (метка или гекс) и радиусов 1/2/5 км.
 if _circ_center:
     if st.button("📊 Сформировать сводку по всем картам (Excel)",
-                 help="Считает показатели всех 7 карт (трафик — пеший и "
-                      "авто отдельными строками) с полными фильтрами для "
-                      "текущего центра кругов и радиусов 1/2/5 км. Первый "
-                      "запуск 10–30 секунд, дальше — из кэша."):
+                 help="Считает показатели всех 7 карт (трафик — пеший и авто "
+                      "отдельными строками) с полными фильтрами для текущего "
+                      "центра кругов и радиусов 1/2/5 км. Всегда включает "
+                      "комплект для res 8; если выбрано другое разрешение — "
+                      "добавит второй комплект листов для него. Первый запуск "
+                      "10–30 сек, дальше — из кэша."):
         with st.spinner("Считаю все 7 карт для сводки (первый раз 10–30 сек)…"):
             try:
-                _sum_df, _par_df = build_all_maps_summary(
-                    _circ_center, res_eff, stored, kontur_df, m2_per_person)
+                # два комплекта: res 8 (эталон для сравнения) + выбранный res
+                _res_list = list(dict.fromkeys([8, res_eff]))
+                _results = {_r: build_all_maps_summary(
+                    _circ_center, _r, stored, kontur_df, m2_per_person)
+                    for _r in _res_list}
                 _buf = io.BytesIO()
                 _fmt = "xlsx"
                 try:
                     with pd.ExcelWriter(_buf, engine="openpyxl") as _w:
-                        _par_df.to_excel(_w, sheet_name="Параметры", index=False)
-                        _sum_df.to_excel(_w, sheet_name="Сводка", index=False)
+                        if len(_res_list) == 1:
+                            _sum_df, _par_df = _results[_res_list[0]]
+                            _par_df.to_excel(_w, sheet_name="Параметры", index=False)
+                            _sum_df.to_excel(_w, sheet_name="Сводка", index=False)
+                        else:
+                            for _r in _res_list:
+                                _sum_df, _par_df = _results[_r]
+                                _par_df.to_excel(_w,
+                                                 sheet_name=f"Параметры res {_r}",
+                                                 index=False)
+                                _sum_df.to_excel(_w,
+                                                 sheet_name=f"Сводка res {_r}",
+                                                 index=False)
                     _mime = ("application/vnd.openxmlformats-officedocument."
                              "spreadsheetml.sheet")
                 except ImportError:
-                    # openpyxl нет в requirements — отдаём CSV вместо xlsx
-                    _buf = io.BytesIO(_sum_df.to_csv(index=False)
+                    # openpyxl нет — один CSV с колонкой Resolution
+                    _frames = []
+                    for _r in _res_list:
+                        _s = _results[_r][0].copy()
+                        _s.insert(0, "Resolution", f"res {_r}")
+                        _frames.append(_s)
+                    _buf = io.BytesIO(pd.concat(_frames).to_csv(index=False)
                                       .encode("utf-8-sig"))
                     _fmt, _mime = "csv", "text/csv"
                     st.warning("⚠️ openpyxl не установлен — отдаю CSV. "
                                "Для xlsx добавьте openpyxl>=3.1 в requirements.txt")
                 st.session_state["allmaps_export"] = {
                     "data": _buf.getvalue(), "ext": _fmt, "mime": _mime,
-                    "center": _circ_center}
+                    "center": _circ_center, "res_list": _res_list}
             except Exception as e:  # noqa: BLE001 — любая ошибка расчёта
                 st.session_state.pop("allmaps_export", None)
                 st.error(f"Не удалось сформировать сводку: {e}")
     _exp = st.session_state.get("allmaps_export")
-    if _exp and _exp.get("center") == _circ_center:
+    if (_exp and _exp.get("center") == _circ_center
+            and _exp.get("res_list") == list(dict.fromkeys([8, res_eff]))):
         st.download_button(f"⬇ Скачать сводку по всем картам ({_exp['ext']})",
                            data=_exp["data"],
                            file_name=f"geohex_svodka.{_exp['ext']}",
