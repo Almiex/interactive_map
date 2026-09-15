@@ -1172,10 +1172,11 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                                           localize=False),
         ).add_to(m)
 
-    bounds = [h3.cell_to_boundary(c) for c in grid]
-    lats = [p[0] for b_ in bounds for p in b_]
-    lngs = [p[1] for b_ in bounds for p in b_]
-    m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
+    if grid:  # пустая сетка ловится выше по потоку; тут — страховка
+        bounds = [h3.cell_to_boundary(c) for c in grid]
+        lats = [p[0] for b_ in bounds for p in b_]
+        lngs = [p[1] for b_ in bounds for p in b_]
+        m.fit_bounds([[min(lats), min(lngs)], [max(lats), max(lngs)]])
 
     # Вид карты (центр/зум) запоминаем в localStorage и восстанавливаем после
     # каждой пересборки — смена слоя/resolution не отдаляет карту. Клиентский
@@ -1563,7 +1564,8 @@ with st.sidebar:
         options=[7, 8, 9, 10], value=8, key="res_slider",
         on_change=_res_changed,
         help="Res 7 ≈ 2,4 км между центрами · Res 8 ≈ 0,92 км · "
-             "Res 9 ≈ 0,35 км · Res 10 ≈ 0,13 км.",
+             "Res 9 ≈ 0,35 км · Res 10 ≈ 0,13 км. В режиме мультивыбора "
+             "доступен только res 8.",
     )
     if _max_res < 10:
         st.caption(f"⚠️ Kontur Population рассчитан в res{_max_res} — "
@@ -1582,7 +1584,8 @@ with st.sidebar:
     st.radio("Режим выбора",
              ["Одиночный", "Мультивыбор (в радиусе до 2 км)"],
              key="sel_mode", on_change=_mode_changed,
-             help="Одиночный: выбор одного гекса. Мультивыбор: выбор нескольких соседних гексов в радиусе 2 км.")
+             help="Одиночный: выбор одного гекса. Мультивыбор: выбор "
+                  "нескольких соседних гексов в радиусе 2 км.")
     st.checkbox("Показывать радиус 1 км", value=True, key="show_r1")
     st.checkbox("Показывать радиус 2 км", value=True, key="show_r2")
     st.checkbox("Показывать радиус 5 км", value=True, key="show_r5")
@@ -1665,6 +1668,13 @@ if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
                 f"с суррогатным источником.")
 
 grid, in_boundary = make_grid(geo, res_eff)
+if not grid:
+    st.error("Сетка H3 получилась пустой. Обычно это следствие ручной "
+             "правки кода (блок make_grid/resolution) или вырожденного "
+             "bbox от геокодера. Проверьте последние изменения app.py, "
+             "попробуйте другое название города или перезагрузите "
+             "приложение (Ctrl+F5).")
+    st.stop()
 if not in_boundary:
     st.info("Граница города не получена от Nominatim (лимит 0,5 МБ) — сетка построена "
             "по прямоугольной области. Уточните название города или повторите попытку.")
