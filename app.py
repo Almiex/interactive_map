@@ -197,6 +197,12 @@ COMPETITOR_TYPES = {
 
 AUTO_HIGHWAYS = {"motorway", "motorway_link", "trunk", "trunk_link", "primary",
                  "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
+# жилые здания: НЕ только apartments/residential — во многих городах РФ
+# жильё размечено как house/detached и т.п.; без них выгрузка по городу
+# приходит пустой (Воронеж!). Должно совпадать с regex в fetch_city_data.
+RESIDENTIAL_BUILDINGS = {"apartments", "residential", "house", "detached",
+                         "semidetached_house", "terrace", "bungalow",
+                         "dormitory"}
 PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_street"}
 
 # --------------------------------------------------------------------------- #
@@ -475,6 +481,9 @@ def make_grid(geo, res):
     return sorted(h3.polygon_to_cells(poly, res)), False
 
 
+_LAST_OVERPASS_MIRROR = ""   # какое зеркало ответило последним (диагностика)
+
+
 def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
     """timeout/attempts: у больших выгрузок данных — щедрые значения (600/2),
     у маленьких служебных запросов (геокодинг) — малые: мёртвое/тупящее
@@ -486,6 +495,8 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
                 r = requests.post(url, data={"data": q}, headers=HEADERS,
                                   timeout=timeout)
                 if r.status_code == 200:
+                    global _LAST_OVERPASS_MIRROR
+                    _LAST_OVERPASS_MIRROR = url
                     return r.json()
                 errors.append(f"{url}: HTTP {r.status_code}")
             except Exception as e:  # noqa: BLE001
@@ -511,7 +522,7 @@ def fetch_city_data(city: str):
     q_ways = f"""
 [out:json][timeout:300];
 (
-  way["building"~"^(apartments|residential)$"]({bb});
+  way["building"~"^(apartments|residential|house|detached|semidetached_house|terrace|bungalow|dormitory)$"]({bb});
   way["highway"]({bb});
   way["amenity"]({bb});
   way["shop"]({bb});
@@ -540,6 +551,15 @@ out body;"""
 
     ways_raw = _query_overpass(q_ways).get("elements", [])
     nodes_raw = _query_overpass(q_nodes).get("elements", [])
+
+    if not ways_raw and not nodes_raw:
+        # пустой ответ зеркала НЕ кэшируем: иначе «пустой город» сидит
+        # в кэше 30 минут и выглядит как «всё сломалось навсегда»
+        raise RuntimeError(
+            "Overpass вернул пустой набор данных (0 ways и 0 nodes) — "
+            "зеркало отвечает пустым результатом (перегрузка/сбой). "
+            "Подождите минуту и повторите; при устойчивом повторении "
+            "проверьте статус Overpass API.")
 
     ways, nodes = [], []
     for el in ways_raw:
@@ -593,7 +613,7 @@ def buildings_gdf(ways_df):
     """Жилые здания с площадью застройки (м², в метрической проекции) и этажностью."""
     if ways_df.empty:
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
-    mask = ways_df["tags"].apply(lambda t: t.get("building") in ("apartments", "residential"))
+    mask = ways_df["tags"].apply(lambda t: t.get("building") in RESIDENTIAL_BUILDINGS)
     sub = ways_df[mask]
     if sub.empty:
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
@@ -1736,6 +1756,10 @@ if stored is None:
 
 geo, nodes_df, ways_df = stored["geo"], stored["nodes"], stored["ways"]
 st.success(f"📍 {geo['display']}")
+_mirror = (_LAST_OVERPASS_MIRROR.split("/")[2]
+           if _LAST_OVERPASS_MIRROR else "неизвестно")
+st.caption(f"Выгрузка OSM: {len(ways_df):,} ways · {len(nodes_df):,} nodes · "
+           f"зеркало: {_mirror}")
 
 # если в поле уже другой город — честно говорим, что на экране НЕ он
 if city.strip() and city.strip() != stored["city"]:
@@ -1782,7 +1806,13 @@ if map_type.startswith(("1.", "2.")):
     grid = populated_with_ring(grid, series)
 if not grid:
     # populated_with_ring обнуляет сетку, если у слоя нет данных в городе
-    st.warning("Нет данных для выбранного слоя в этом городе — показать нечего.")
+    _hint = ""
+    if map_type.startswith(("1.", "2.")):
+        _hint = (" Для карт 1–2 вероятная причина — слабая разметка жилых "
+                 "зданий в OSM по этому городу; для точной численности "
+                 "загрузите Kontur Population (карта 1).")
+    st.warning("Нет данных для выбранного слоя в этом городе — показать "
+               "нечего." + _hint)
     st.stop()
 
 # лимита на точки нет: они рисуются одним GeoJSON-слоем и браузер это выдерживает
