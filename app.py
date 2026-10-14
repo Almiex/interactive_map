@@ -15,8 +15,12 @@ import re
 import json
 import time
 import math
+import logging
 import hashlib
 import requests
+import concurrent.futures
+
+logger = logging.getLogger("geohex")  # логи видны в Streamlit Cloud: Manage app → Logs
 import numpy as np
 import pandas as pd
 import h3
@@ -315,6 +319,7 @@ def geocode_city(city: str):
 
     status, geo, err = _photon_geocode(city)
     _log("Photon", status, err)
+    logger.info("geocode %s: photon=%s %s", city, status, err)
     if status == "ok":
         # догеокодинг ради ПОЛИГОНА границы: 1 throttled-запрос на город,
         # результат кэшируется целиком. При 429 молча живём по bbox Photon.
@@ -484,6 +489,28 @@ def make_grid(geo, res):
 _LAST_OVERPASS_MIRROR = ""   # какое зеркало ответило последним (диагностика)
 
 
+def _tiled_bboxes(south, west, north, east):
+    """Нарезка bbox города на тайлы: Overpass отдаёт МНОГО маленьких
+    выборок в разы быстрее и надёжнее, чем одну гигантскую (которая
+    висит минутами и обрывается/режется). Дубликаты на стыках вычищаем
+    по (type, id) после слияния."""
+    span = max(north - south, east - west)
+    if span > 0.30:
+        n = 3      # миллионники: 9 тайлов
+    elif span > 0.12:
+        n = 2      # средние города: 4 тайла
+    else:
+        return [(south, west, north, east)]   # малые: как раньше, один запрос
+    tiles = []
+    for i in range(n):
+        for j in range(n):
+            tiles.append((south + (north - south) * i / n,
+                          west + (east - west) * j / n,
+                          south + (north - south) * (i + 1) / n,
+                          west + (east - west) * (j + 1) / n))
+    return tiles
+
+
 def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
     """timeout/attempts: у больших выгрузок данных — щедрые значения (600/2),
     у маленьких служебных запросов (геокодинг) — малые: мёртвое/тупящее
@@ -492,20 +519,29 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
     for url in OVERPASS_ENDPOINTS:
         for attempt in range(attempts):  # заходы на зеркало с нарастающей паузой
             try:
+                _t0 = time.monotonic()
                 r = requests.post(url, data={"data": q}, headers=HEADERS,
                                   timeout=timeout)
+                _dt = time.monotonic() - _t0
                 if r.status_code == 200:
                     global _LAST_OVERPASS_MIRROR
                     _LAST_OVERPASS_MIRROR = url
+                    logger.info("overpass ok: %s за %.1fs (%d байт)",
+                                url, _dt, len(r.content))
                     return r.json()
                 errors.append(f"{url}: HTTP {r.status_code}")
+                logger.warning("overpass %s attempt %d: HTTP %s",
+                               url, attempt + 1, r.status_code)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{url}: {type(e).__name__}")
+                logger.warning("overpass %s attempt %d: %s: %s",
+                               url, attempt + 1, type(e).__name__, e)
             time.sleep(3 + 3 * attempt)
+    logger.error("overpass: все зеркала отказали: %s", "; ".join(errors[-5:]))
     raise RuntimeError("Overpass недоступен на всех зеркалах: "
                        + "; ".join(errors[-4:]))
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_city_data(city: str):
     """Две выгрузки Overpass: (1) way-объекты, (2) node-объекты. Возвращает DataFrames."""
     geo = geocode_city(city)
@@ -549,9 +585,39 @@ out geom;"""
 );
 out body;"""
 
-    ways_raw = _query_overpass(q_ways).get("elements", [])
-    nodes_raw = _query_overpass(q_nodes).get("elements", [])
+    # выгрузка ТАЙЛАМИ + параллельно: каждый тайл — маленький быстрый
+    # запрос, пул потоков гоняет их через ротацию зеркал одновременно
+    _tiles = _tiled_bboxes(south, west, north, east)
 
+    def _run_tiled(q_tpl):
+        els = []
+        for (s0, w0, n0, e0) in _tiles:
+            q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
+            q_tile = q_tile.replace("({bb})", f"({s0},{w0},{n0},{e0})")
+            els.extend(_query_overpass(q_tile, timeout=240, attempts=2)
+                       .get("elements", []))
+        return els
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
+        _fw = _pool.submit(_run_tiled, q_ways)
+        _fn = _pool.submit(_run_tiled, q_nodes)
+        ways_raw = _fw.result()
+        nodes_raw = _fn.result()
+
+    def _dedupe(els):  # стыки тайлов дублируют объекты — чистим по id
+        _seen, _out = set(), []
+        for _el in els:
+            _k = (_el.get("type"), _el.get("id"))
+            if _k not in _seen:
+                _seen.add(_k)
+                _out.append(_el)
+        return _out
+
+    ways_raw = _dedupe(ways_raw)
+    nodes_raw = _dedupe(nodes_raw)
+
+    logger.info("fetch_city_data %s: %d tiles, %d ways, %d nodes",
+                city, len(_tiles), len(ways_raw), len(nodes_raw))
     if not ways_raw and not nodes_raw:
         # пустой ответ зеркала НЕ кэшируем: иначе «пустой город» сидит
         # в кэше 30 минут и выглядит как «всё сломалось навсегда»
