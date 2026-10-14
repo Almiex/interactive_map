@@ -846,6 +846,9 @@ out body;"""
 
     logger.info("fetch_city_data %s: %d tiles, %d ways, %d nodes",
                 city, len(_tiles), len(ways_raw), len(nodes_raw))
+    _nb = sum(1 for el in ways_raw
+              if (el.get("tags") or {}).get("building"))
+    logger.info("diagnostics: ways с тегом building: %d", _nb)
     if not ways_raw and not nodes_raw:
         # пустой ответ зеркала НЕ кэшируем: иначе «пустой город» сидит
         # в кэше 30 минут и выглядит как «всё сломалось навсегда»
@@ -911,6 +914,8 @@ def buildings_gdf(ways_df):
         lambda t: (t.get("building") in RESIDENTIAL_BUILDINGS
                    and t.get("building") not in NON_RESIDENTIAL))
     sub = ways_df[mask]
+    logger.info("diagnostics: buildings_gdf: всего ways=%d, под маску=%d",
+                len(ways_df), len(sub))
     if sub.empty:
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
     recs, geoms = [], []
@@ -923,11 +928,13 @@ def buildings_gdf(ways_df):
                      "lon": float(np.mean([p[0] for p in coords]))})
         geoms.append(geom)
     if not geoms:
+        logger.info("diagnostics: buildings_gdf: геометрии не собрались")
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"],
                                 geometry=[], crs="EPSG:4326")
     gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs="EPSG:4326")
     metric = gdf.to_crs(gdf.estimate_utm_crs())
     gdf["area"] = metric.area.values
+    logger.info("diagnostics: buildings_gdf -> жилых зданий %d", len(gdf))
     return gdf
 
 def roads_gdf(ways_df):
@@ -2096,12 +2103,24 @@ with st.spinner("Считаю агрегаты по гексам…"):
     series, unit, hex_extra, points = _compute_series_cached(
         map_type, sub_option, res_eff, stored.get("ver", 0),  # сессия из старой версии кода без "ver"
         kontur_df is not None, m2_per_person)
+# диагностика рассинхрона серия/сетка (ячейки вне сетки = координаты не туда)
+_overlap = len(set(series.index) & set(grid)) if len(series) else 0
+logger.info("diagnostics: серия: len=%d, max=%.1f, пересечение с сеткой=%d/%d",
+            len(series), float(series.max()) if len(series) else 0.0,
+            _overlap, len(grid))
+if len(series) and _overlap == 0:
+    _c0 = h3.cell_to_latlng(series.index[0])
+    logger.warning("diagnostics: первая ячейка серии в точке %s — "
+                   "проверьте lat/lon на перестановку", [round(x, 4) for x in _c0])
 
 # суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
 if map_type.startswith(("1.", "2.")):
     grid = populated_with_ring(grid, series)
 if not grid:
     # populated_with_ring обнуляет сетку, если у слоя нет данных в городе
+    logger.warning("diagnostics: сетка пуста; серия=%d, res=%s, "
+                   "ячейки серии(примеры)=%s",
+                   len(series), res_eff, list(series.index[:3]))
     _hint = ""
     if map_type.startswith(("1.", "2.")):
         _hint = (" Для карт 1–2 вероятная причина — слабая разметка жилых "
