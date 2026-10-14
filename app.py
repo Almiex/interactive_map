@@ -501,8 +501,21 @@ _LAST_OVERPASS_MIRROR = ""   # какое зеркало ответило пос
 # постоянная) и вставляются сюда. Ключ — название города из поля ввода,
 # нижним регистром. Парсинг — pyrosm, локально: 20–60 сек, без лимитов.
 CUSTOM_PBF = {
-    # "уфа": "https://download.bbbike.org/osm/extract/....osm.pbf",
-    # "воронеж": "...",
+    "волгоград": "https://drive.google.com/uc?export=download&id=18WnoAF8HgMpZZld2ZAbObveGRACmMrkr",
+    "воронеж": "https://drive.google.com/uc?export=download&id=1fZQ1tCu8OEJjnqB5W2PPsiqMKLi1dzFN",
+    "екатеринбург": "https://drive.google.com/uc?export=download&id=1tzoPk7tHNXx0bjXgG4o9FE1NX_4_Wg0h",
+    "казань": "https://drive.google.com/uc?export=download&id=1Hz5s2MJRf5P9R9GtOpgdfgaASuxy96BE",
+    "краснодар": "https://drive.google.com/uc?export=download&id=1-sPrFI7yDAM86daKeBD0b9Dh3hV907_L",
+    "красноярск": "https://drive.google.com/uc?export=download&id=1KMFW5GYMKVXE5MOYM3oR3u8LwgXrRPq_",
+    "нижний_новгород": "https://drive.google.com/uc?export=download&id=1phBGMKmmLUtyEWK49cn41Tl5M85Tg53C",
+    "новосибирск": "https://drive.google.com/uc?export=download&id=1lST80jUS3qXdb3TeHyoeTcM1HmezOwYl",
+    "омск": "https://drive.google.com/uc?export=download&id=1nweqk82HKobMh8SakHR7smE2ZnVw8BcW",
+    "пермь": "https://drive.google.com/uc?export=download&id=1ymH8Gxo7K_PuzrHBreRX3A5XG1gY3s93",
+    "ростов-на-дону": "https://drive.google.com/uc?export=download&id=1RUNLKTc3fYo5DkeBFqBZknIC0Xds1A0J",
+    "самара": "https://drive.google.com/uc?export=download&id=199ONj2wO3gugYhMFH1--gU4A-FXlPUG2",
+    "тверь": "https://drive.google.com/uc?export=download&id=1BY3TGZN1JoiE2W-tI8acH4-Bysdhcfp3",
+    "уфа": "https://drive.google.com/uc?export=download&id=18ZnY-OZE7vk_SBMWiNOvWm1c25IZ2zTB",
+    "челябинск": "https://drive.google.com/uc?export=download&id=1gCYNd-3XWC42Az95PxieUG6Fx2qhz2mn",
 }
 
 # ЛОКАЛЬНЫЕ выгрузки: папка cities/ рядом с app.py в репозитории.
@@ -635,11 +648,13 @@ def _try_pbf_city(city):
         logger.info("pbf: локальный файл %s", _local)
         try:
             if os.path.getsize(_local) < 1_000_000:
-                logger.warning("pbf файл подозрительно мал (<1 МБ) — выгрузка "
-                               "оборвалась при скачивании. Перекачайте файл "
-                               "с BBBike и замените в репозитории.")
-                return None
-            return _frames_from_pbf(_local)
+                # оборванная загрузка (пустышка веб-редактора GitHub и т.п.) —
+                # НЕ заканчиваем попытки: дальше пробуем ссылку из CUSTOM_PBF
+                logger.warning("pbf файл подозрительно мал (<1 МБ) — пропускаем, "
+                               "ищем ссылку")
+                _local = None
+            else:
+                return _frames_from_pbf(_local)
         except Exception as e:  # noqa: BLE001
             logger.warning("парсинг локального pbf не сработал (%s: %s)",
                            type(e).__name__, e)
@@ -651,7 +666,7 @@ def _try_pbf_city(city):
                     "идём в Overpass", os.path.join(PBF_DIR, _names[0]))
         return None
     try:
-        with requests.get(url, stream=True, timeout=120,
+        with requests.get(url, stream=True, timeout=300,
                           headers=HEADERS) as resp:
             resp.raise_for_status()
             size = int(resp.headers.get("content-length", 0) or 0)
