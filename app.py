@@ -366,6 +366,30 @@ def geocode_city(city: str):
     raise RuntimeError("Все геокодеры отказали. Диагностика: "
                        + " | ".join(trace))
 
+# Типы улиц: все сокращения отсекаются при поиске адреса — «пр. Ленина»,
+# «пр-т Ленина», «б-р Мира», «у Пушкина» ищутся так же, как полные
+# «проспект Ленина». Границы слов защищают «Пермь», «Булгакова», «1-я».
+_STREET_WORDS = (
+    r"улица|ул\.?|у"
+    r"|проспект|просп\.?|пр-кт\.?|пр-т\.?|пр-д\.?|проезд|пр\.?"
+    r"|бульвар|бульв\.?|б-р\.?|бул\.?"
+    r"|переулок|пер\.?"
+    r"|набережная|набер\.?|наб\.?"
+    r"|площадь|пл\.?"
+    r"|тупик|туп\.?"
+    r"|аллея|ал\.?"
+    r"|шоссе|ш\.?"
+    r"|тракт|линия|спуск|эстакада|вал"
+)
+STREET_TYPE_RE = re.compile(r"(?<!\w)(" + _STREET_WORDS + r")(?!\w)",
+                            re.IGNORECASE)
+
+
+def _strip_street_types(s: str) -> str:
+    """«пр-т Ленина» -> «Ленина»: вырезает типы улиц (любые сокращения)."""
+    return STREET_TYPE_RE.sub(" ", s)
+
+
 # --------------------------------------------------------------------------- #
 #  Геокодинг адреса (улица, дом) — опционально
 # --------------------------------------------------------------------------- #
@@ -377,6 +401,7 @@ def geocode_address(address: str, bbox=None):
     variants = [address]
     v = re.sub(r"(\d)\s*к\s*(\d)", r"\1 к\2", address)
     v = re.sub(r"\b[1-5]-я\b", "", v)
+    v = _strip_street_types(v)   # «пр. Ленина» == «проспект Ленина» == «Ленина»
     v = re.sub(r"\s+", " ", v).strip(" ,")
     if v != address:
         variants.append(v)
@@ -418,15 +443,15 @@ def geocode_address(address: str, bbox=None):
     hre = "^(" + "|".join(re.escape(v2) for v2 in hvars) + ")$"
     street = address[: (m.start() if m else plain.start())]
     street = re.sub(r"\b[1-5]-я\b", "", street)
-    street = re.sub(r"\b(улица|ул\.?|переулок|проспект|пр-кт|бульвар|б-р|"
-                    r"шоссе|ш\.)\b", "", street, flags=re.IGNORECASE).strip(" ,.")
+    street = _strip_street_types(street).strip(" ,.")  # все сокращения типов
     if not street:
         return None
+    street_re = re.escape(street)  # точки/дефисы в имени не ломают regex
     south, north, west, east = bbox
     bb = f"{south - 0.05},{west - 0.05},{north + 0.05},{east + 0.05}"
     q = f"""[out:json][timeout:25];(
-  way["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]__BBOX__;
-  node["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]__BBOX__;
+  way["addr:housenumber"~"{hre}"]["addr:street"~"{street_re}",i]__BBOX__;
+  node["addr:housenumber"~"{hre}"]["addr:street"~"{street_re}",i]__BBOX__;
 );out center 3;"""
     els = []
     for url in OVERPASS_ENDPOINTS[:2]:
@@ -671,8 +696,11 @@ def _try_pbf_city(city):
             logger.warning("парсинг локального pbf не сработал (%s: %s)",
                            type(e).__name__, e)
             return None
-    # 2) ссылка на выгрузку (кастомная BBBike / готовый каталог)
-    url = CUSTOM_PBF.get(key) or BBBIKE_READY.get(key)
+    # 2) ссылка на выгрузку (кастомная BBBike / готовый каталог).
+    # Ключи сопоставляем КАНОНИЧЕСКИ: «Ростов на Дону» == «ростов-на-дону» ==
+    # «ростов_на_дону» — для людей, вводящих город как привыкли.
+    _cfg = {_canon(k): v for k, v in {**BBBIKE_READY, **CUSTOM_PBF}.items()}
+    url = _cfg.get(_canon(key))
     if url is None:
         logger.info("pbf: нет ни файла %s, ни ссылки в конфиге — "
                     "идём в Overpass", os.path.join(PBF_DIR, _names[0]))
