@@ -207,12 +207,24 @@ COMPETITOR_TYPES = {
 
 AUTO_HIGHWAYS = {"motorway", "motorway_link", "trunk", "trunk_link", "primary",
                  "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
-# жилые здания: НЕ только apartments/residential — во многих городах РФ
-# жильё размечено как house/detached и т.п.; без них выгрузка по городу
-# приходит пустой (Воронеж!). Должно совпадать с regex в fetch_city_data.
+# жилые здания: apartments/residential/house/... + building=yes — в старых
+# импортах (Челябинск и др.) жильё массово тегировано именно yes; явно
+# нежилые теги исключаем отдельным списком. Набор должен совпадать с
+# regex в fetch_city_data.
 RESIDENTIAL_BUILDINGS = {"apartments", "residential", "house", "detached",
                          "semidetached_house", "terrace", "bungalow",
-                         "dormitory"}
+                         "dormitory", "yes"}
+NON_RESIDENTIAL = {"garage", "garages", "industrial", "commercial", "retail",
+                   "warehouse", "shed", "construction", "ruins", "greenhouse",
+                   "hangar", "barn", "stable", "service", "kiosk", "hut",
+                   "cabin", "static_caravan", "farm_auxiliary", "church",
+                   "cathedral", "mosque", "temple", "synagogue", "shrine",
+                   "monastery", "school", "university", "college",
+                   "kindergarten", "hospital", "public", "government",
+                   "office", "stadium", "sports_hall", "pavilion",
+                   "train_station", "transportation", "bridge", "bunker",
+                   "tower", "water_tower", "storage_tank", "silo",
+                   "agricultural", "cowshed", "pigsty", "sty", "toilets"}
 PED_HIGHWAYS = {"footway", "pedestrian", "path", "steps", "cycleway", "living_street"}
 
 # --------------------------------------------------------------------------- #
@@ -766,7 +778,7 @@ def fetch_city_data(city: str):
     q_ways = """
 [out:json][timeout:300];
 (
-  way["building"~"^(apartments|residential|house|detached|semidetached_house|terrace|bungalow|dormitory)$"]__BBOX__;
+  way["building"~"^(apartments|residential|house|detached|semidetached_house|terrace|bungalow|dormitory|yes)$"]__BBOX__;
   way["highway"]__BBOX__;
   way["amenity"]__BBOX__;
   way["shop"]__BBOX__;
@@ -895,7 +907,9 @@ def buildings_gdf(ways_df):
     """Жилые здания с площадью застройки (м², в метрической проекции) и этажностью."""
     if ways_df.empty:
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
-    mask = ways_df["tags"].apply(lambda t: t.get("building") in RESIDENTIAL_BUILDINGS)
+    mask = ways_df["tags"].apply(
+        lambda t: (t.get("building") in RESIDENTIAL_BUILDINGS
+                   and t.get("building") not in NON_RESIDENTIAL))
     sub = ways_df[mask]
     if sub.empty:
         return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
