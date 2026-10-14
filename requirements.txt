@@ -11,3 +11,4 @@ requests>=2.31
 branca>=0.7
 pyarrow>=14.0
 openpyxl>=3.1
+pyrosm
