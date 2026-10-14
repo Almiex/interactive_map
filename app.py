@@ -2041,11 +2041,14 @@ if load_btn or st.session_state.pop("build_on_enter", False):
                 st.code("\n".join(_trace))
         st.stop()
     # город хранится ВМЕСТЕ с данными — экран всегда знает, что показывает
+    # КЛЮЧ КЭША АГРЕГАТОВ: город + метка времени. КРИТИЧНО: раньше версия
+    # была счётчиком в session_state — он сбрасывается в НОВОЙ СЕССИИ
+    # БРАУЗЕРА, версии разных городов совпадали (оба «1») и кэш отдавал
+    # ЧУЖОЙ ГОРОД (Уфе показывало Челябинск). Имя города в ключе делает
+    # коллизию невозможной, время — уникальной в пределах города.
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
                                 "nodes": nodes_df, "ways": ways_df,
-                                # версия данных — ключ кэша агрегатов
-                                "ver": st.session_state.get("_data_ver", 0) + 1}
-    st.session_state["_data_ver"] = st.session_state["data"]["ver"]
+                                "ver": f"{city.strip()}-{time.time():.0f}"}
 
 stored = st.session_state.get("data")
 # миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
