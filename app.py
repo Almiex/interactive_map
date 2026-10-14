@@ -610,9 +610,27 @@ def _try_pbf_city(city):
     key = re.sub(r"\s+", "_", city.strip().lower())
     # 1) локальный файл из репозитория — без сети вообще.
     # Имя файла: либо как город строчными (уфа.osm.pbf), либо из CITY_FILES
-    _names = [f"{key.replace(' ', '_')}.osm.pbf"] + list(CITY_FILES.get(key, []))
-    _local = next((os.path.join(PBF_DIR, n) for n in _names
-                   if os.path.exists(os.path.join(PBF_DIR, n))), None)
+    # каноническая форма: регистр не важен, пробелы/подчёркивания/дефисы
+    # считаются одним разделителем. "Ростов на Дону" == "ростов-на-дону" ==
+    # "ростов_на_дону" == "РОСТОВ-НА-ДОНУ"
+    def _canon(s):
+        return re.sub(r"[\s_\-\u2013\u2014]+", "_", s.lower())
+
+    _local = None
+    if os.path.isdir(PBF_DIR):
+        try:
+            _files = {_canon(n): n for n in os.listdir(PBF_DIR)}
+            _want = _canon(f"{key}.osm.pbf")
+            _hit = _files.get(_want)
+            if _hit is None:  # явное сопоставление из CITY_FILES
+                for _cfg in CITY_FILES.get(key, []):
+                    _hit = _files.get(_canon(_cfg))
+                    if _hit:
+                        break
+            if _hit is not None:
+                _local = os.path.join(PBF_DIR, _hit)
+        except OSError:
+            _local = None
     if _local is not None:
         logger.info("pbf: локальный файл %s", _local)
         try:
@@ -2005,7 +2023,7 @@ st.caption(f"Выгрузка OSM: {len(ways_df):,} ways · {len(nodes_df):,} no
            f"зеркало: {_mirror}")
 
 # если в поле уже другой город — честно говорим, что на экране НЕ он
-if city.strip() and city.strip() != stored["city"]:
+if city.strip() and city.strip().lower() != stored["city"].lower():
     st.warning(f"Сейчас показан город «{stored['city']}», а в поле введён «{city.strip()}». "
                f"Нажмите «Построить сетку» ещё раз, чтобы перестроить карту.")
 
@@ -2061,7 +2079,7 @@ if not grid:
 # лимита на точки нет: они рисуются одним GeoJSON-слоем и браузер это выдерживает
 
 marker = None
-if address.strip() and city.strip() == stored["city"]:
+if address.strip() and city.strip().lower() == stored["city"].lower():
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
         try:
             marker = geocode_address(f"{address.strip()}, {stored['city']}",
