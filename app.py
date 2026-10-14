@@ -40,10 +40,12 @@ from jinja2 import Template as _Jinja2Template
 # --------------------------------------------------------------------------- #
 #  Константы
 # --------------------------------------------------------------------------- #
+# Порядок — по наблюдаемой живучести с нашего деплоя.
+# overpass-api.de УБРАН: со Streamlit Cloud он стабильно отвечает
+# Connection refused (TCP-бан IP), попытки только съедали время.
 OVERPASS_ENDPOINTS = [
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.nchc.org.tw/api/interpreter",
     "https://overpass.maps.mail.ru/api/interpreter",
 ]
@@ -493,6 +495,155 @@ def make_grid(geo, res):
 _LAST_OVERPASS_MIRROR = ""   # какое зеркало ответило последним (диагностика)
 
 
+# ══ ПЛАН Б: выгрузки .osm.pbf без Overpass ═══════════════════════════════
+# Каталог BBBike содержит лишь Москву и СПб; остальные города генерируются
+# вручную ОДИН РАЗ на extract.bbbike.org (~15–30 мин на город, ссылка
+# постоянная) и вставляются сюда. Ключ — название города из поля ввода,
+# нижним регистром. Парсинг — pyrosm, локально: 20–60 сек, без лимитов.
+CUSTOM_PBF = {
+    # "уфа": "https://download.bbbike.org/osm/extract/....osm.pbf",
+    # "воронеж": "...",
+}
+
+# ЛОКАЛЬНЫЕ выгрузки: папка cities/ рядом с app.py в репозитории.
+# Файл называется как город из поля ввода, строчными, пробелы → _:
+#   cities/уфа.osm.pbf, cities/зеленогорск_красноярский.osm.pbf
+# Самый надёжный путь: ни Overpass, ни сети вообще — файл клонируется
+# вместе с приложением.
+PBF_DIR = "cities"
+
+# Опционально: сопоставление «город в приложении» → «файл латиницей»,
+# если не хотите кириллические имена в Git: {"уфа": "ufa.osm.pbf", ...}
+CITY_FILES = {}
+
+BBBIKE_READY = {
+    "москва": "https://download.bbbike.org/osm/bbbike/Moscow/Moscow.osm.pbf",
+    "санкт-петербург": ("https://download.bbbike.org/osm/bbbike/"
+                        "SanktPetersburg/SanktPetersburg.osm.pbf"),
+}
+
+
+def _frames_from_pbf(path):
+    """pyrosm → те же ways_df/nodes_df, что даёт Overpass-путь
+    (контракт: id, coords[(lon,lat)...], tags{} / id, lat, lon, tags{})."""
+    from pyrosm import OSM
+    import gc
+    osm = OSM(path)
+    ways, nodes = [], []
+
+    def _tags(row, cols):
+        return {c: row[c] for c in cols
+                if c not in ("id", "geometry") and pd.notna(row[c])}
+
+    b = osm.get_buildings()          # ВСЕ здания; жилой фильтр — downstream
+    cols = list(b.columns)
+    for _, row in b.iterrows():
+        g = row.geometry
+        if g is None:
+            continue
+        if g.geom_type == "MultiPolygon":
+            g = max(g.geoms, key=lambda x: x.area)
+        if g.geom_type == "Polygon":
+            ways.append({"id": int(row["id"]),
+                         "coords": list(g.exterior.coords),
+                         "tags": _tags(row, cols)})
+    del b
+    gc.collect()
+
+    r = osm.get_network(network_type="all")   # все дороги
+    cols = list(r.columns)
+    for _, row in r.iterrows():
+        g = row.geometry
+        if g is None:
+            continue
+        if g.geom_type == "MultiLineString":
+            g = max(g.geoms, key=lambda x: x.length)
+        if g.geom_type == "LineString":
+            ways.append({"id": int(row["id"]), "coords": list(g.coords),
+                         "tags": _tags(row, cols)})
+    del r
+    gc.collect()
+
+    p = osm.get_data_by_custom_criteria(   # POI: точки и полигоны
+        custom_filter={"amenity": True, "shop": True, "craft": True,
+                       "office": True, "leisure": True, "emergency": True,
+                       "public_transport": True,
+                       "highway": ["bus_stop", "bus_station", "tram_stop",
+                                   "platform", "stop_position"]},
+        filter_type="keep_nodes_and_ways")
+    cols = list(p.columns)
+    for _, row in p.iterrows():
+        g = row.geometry
+        if g is None:
+            continue
+        t = _tags(row, cols)
+        if g.geom_type == "Point":
+            nodes.append({"id": int(row["id"]), "lat": float(g.y),
+                          "lon": float(g.x), "tags": t})
+        elif g.geom_type == "LineString":
+            ways.append({"id": int(row["id"]), "coords": list(g.coords),
+                         "tags": t})
+        elif g.geom_type in ("Polygon", "MultiPolygon"):
+            if g.geom_type == "MultiPolygon":
+                g = max(g.geoms, key=lambda x: x.area)
+            ways.append({"id": int(row["id"]),
+                         "coords": list(g.exterior.coords), "tags": t})
+    del p
+    gc.collect()
+
+    return (pd.DataFrame(ways, columns=["id", "coords", "tags"]),
+            pd.DataFrame(nodes, columns=["id", "lat", "lon", "tags"]))
+
+
+def _try_pbf_city(city):
+    """Скачать готовую/кастомную выгрузку BBBike и распарсить pyrosm.
+    Любая неудача → None (вызывающий код идёт по тайловому Overpass)."""
+    import tempfile
+    import os
+    key = city.strip().lower()
+    # 1) локальный файл из репозитория — без сети вообще.
+    # Имя файла: либо как город строчными (уфа.osm.pbf), либо из CITY_FILES
+    _names = [f"{key.replace(' ', '_')}.osm.pbf"] + list(CITY_FILES.get(key, []))
+    _local = next((os.path.join(PBF_DIR, n) for n in _names
+                   if os.path.exists(os.path.join(PBF_DIR, n))), None)
+    if _local is not None:
+        logger.info("pbf: локальный файл %s", _local)
+        try:
+            return _frames_from_pbf(_local)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("парсинг локального pbf не сработал (%s: %s)",
+                           type(e).__name__, e)
+            return None
+    # 2) ссылка на выгрузку (кастомная BBBike / готовый каталог)
+    url = CUSTOM_PBF.get(key) or BBBIKE_READY.get(key)
+    if url is None:
+        return None
+    try:
+        with requests.get(url, stream=True, timeout=120,
+                          headers=HEADERS) as resp:
+            resp.raise_for_status()
+            size = int(resp.headers.get("content-length", 0) or 0)
+            if size > 600 * 1024 * 1024:
+                logger.warning("pbf слишком большой (%d МБ) — пропуск",
+                               size // 2 ** 20)
+                return None
+            with tempfile.NamedTemporaryFile(suffix=".osm.pbf",
+                                             delete=False) as f:
+                for chunk in resp.iter_content(1 << 20):
+                    f.write(chunk)
+                path = f.name
+        logger.info("pbf скачан: %.1f МБ", os.path.getsize(path) / 2 ** 20)
+        frames = _frames_from_pbf(path)
+        os.unlink(path)
+        logger.info("pbf распарсен: %d ways, %d nodes",
+                    len(frames[0]), len(frames[1]))
+        return frames
+    except Exception as e:  # noqa: BLE001 — любая неудача pbf-пути
+        logger.warning("pbf-путь не сработал (%s: %s) — фолбэк на Overpass",
+                       type(e).__name__, e)
+        return None
+
+
 def _tiled_bboxes(south, west, north, east):
     """Нарезка bbox города на тайлы: Overpass отдаёт МНОГО маленьких
     выборок в разы быстрее и надёжнее, чем одну гигантскую (которая
@@ -500,7 +651,7 @@ def _tiled_bboxes(south, west, north, east):
     по (type, id) после слияния."""
     span = max(north - south, east - west)
     if span > 0.30:
-        n = 3      # миллионники: 9 тайлов
+        n = 4      # миллионники: 16 тайлов (мельче = быстрее на зеркале)
     elif span > 0.12:
         n = 2      # средние города: 4 тайла
     else:
@@ -545,7 +696,7 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
     raise RuntimeError("Overpass недоступен на всех зеркалах: "
                        + "; ".join(errors[-4:]))
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, persist="disk")
 def fetch_city_data(city: str):
     """Две выгрузки Overpass: (1) way-объекты, (2) node-объекты. Возвращает DataFrames."""
     geo = geocode_city(city)
@@ -589,6 +740,13 @@ out geom;"""
 );
 out body;"""
 
+    # ПЛАН Б: если для города есть выгрузка BBBike — парсим её локально
+    # (быстро, без Overpass). Иначе — тайловый Overpass ниже.
+    _pbf = _try_pbf_city(city)
+    if _pbf is not None:
+        logger.info("fetch_city_data %s: данные из PBF (pyrosm)", city)
+        return geo, _pbf[1], _pbf[0]
+
     # выгрузка ТАЙЛАМИ + параллельно: каждый тайл — маленький быстрый
     # запрос, пул потоков гоняет их через ротацию зеркал одновременно
     _tiles = _tiled_bboxes(south, west, north, east)
@@ -602,7 +760,7 @@ out body;"""
                        .get("elements", []))
         return els
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as _pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as _pool:
         _fw = _pool.submit(_run_tiled, q_ways)
         _fn = _pool.submit(_run_tiled, q_nodes)
         ways_raw = _fw.result()
