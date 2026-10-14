@@ -570,7 +570,7 @@ def _frames_from_pbf(path):
                        "public_transport": True,
                        "highway": ["bus_stop", "bus_station", "tram_stop",
                                    "platform", "stop_position"]},
-        filter_type="keep_nodes_and_ways")
+        filter_type="keep")   # в pyrosm 0.20 допустимы только keep/exclude
     cols = list(p.columns)
     for _, row in p.iterrows():
         g = row.geometry
