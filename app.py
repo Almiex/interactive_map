@@ -634,6 +634,11 @@ def _try_pbf_city(city):
     if _local is not None:
         logger.info("pbf: локальный файл %s", _local)
         try:
+            if os.path.getsize(_local) < 1_000_000:
+                logger.warning("pbf файл подозрительно мал (<1 МБ) — выгрузка "
+                               "оборвалась при скачивании. Перекачайте файл "
+                               "с BBBike и замените в репозитории.")
+                return None
             return _frames_from_pbf(_local)
         except Exception as e:  # noqa: BLE001
             logger.warning("парсинг локального pbf не сработал (%s: %s)",
@@ -788,7 +793,8 @@ out body;"""
         els = []
         for (s0, w0, n0, e0) in _tiles:
             q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
-            q_tile = q_tile.replace("__BBOX__", f"{s0},{w0},{n0},{e0}")
+            # ВАЖНО: скобки обязательны — фильтр bbox в Overpass: (s,w,n,e)
+            q_tile = q_tile.replace("__BBOX__", f"({s0},{w0},{n0},{e0})")
             els.extend(_query_overpass(q_tile, timeout=150, attempts=2)
                        .get("elements", []))
         return els
