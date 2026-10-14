@@ -413,8 +413,8 @@ def geocode_address(address: str, bbox=None):
     south, north, west, east = bbox
     bb = f"{south - 0.05},{west - 0.05},{north + 0.05},{east + 0.05}"
     q = f"""[out:json][timeout:25];(
-  way["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
-  node["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]({bb});
+  way["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]__BBOX__;
+  node["addr:housenumber"~"{hre}"]["addr:street"~"{street}",i]__BBOX__;
 );out center 3;"""
     els = []
     for url in OVERPASS_ENDPOINTS[:2]:
@@ -564,32 +564,39 @@ def _frames_from_pbf(path):
     del r
     gc.collect()
 
-    p = osm.get_data_by_custom_criteria(   # POI: точки и полигоны
-        custom_filter={"amenity": True, "shop": True, "craft": True,
-                       "office": True, "leisure": True, "emergency": True,
-                       "public_transport": True,
-                       "highway": ["bus_stop", "bus_station", "tram_stop",
-                                   "platform", "stop_position"]},
-        filter_type="keep")   # в pyrosm 0.20 допустимы только keep/exclude
-    cols = list(p.columns)
-    for _, row in p.iterrows():
-        g = row.geometry
-        if g is None:
-            continue
-        t = _tags(row, cols)
-        if g.geom_type == "Point":
-            nodes.append({"id": int(row["id"]), "lat": float(g.y),
-                          "lon": float(g.x), "tags": t})
-        elif g.geom_type == "LineString":
-            ways.append({"id": int(row["id"]), "coords": list(g.coords),
-                         "tags": t})
-        elif g.geom_type in ("Polygon", "MultiPolygon"):
-            if g.geom_type == "MultiPolygon":
-                g = max(g.geoms, key=lambda x: x.area)
-            ways.append({"id": int(row["id"]),
-                         "coords": list(g.exterior.coords), "tags": t})
-    del p
-    gc.collect()
+    # POI: точки и полигоны. Если критерий не поддержан этой версией
+    # pyrosm — НЕ отказываемся от всего: оставляем здания+дороги (карты
+    # 1,2,3,6 работают), POI-слои будут пусты до разбора причины в логах
+    try:
+        p = osm.get_data_by_custom_criteria(
+            custom_filter={"amenity": True, "shop": True, "craft": True,
+                           "office": True, "leisure": True, "emergency": True,
+                           "public_transport": True,
+                           "highway": ["bus_stop", "bus_station", "tram_stop",
+                                       "platform", "stop_position"]},
+            filter_type="keep")  # pyrosm 0.20: только keep/exclude
+        cols = list(p.columns)
+        for _, row in p.iterrows():
+            g = row.geometry
+            if g is None:
+                continue
+            t = _tags(row, cols)
+            if g.geom_type == "Point":
+                nodes.append({"id": int(row["id"]), "lat": float(g.y),
+                              "lon": float(g.x), "tags": t})
+            elif g.geom_type == "LineString":
+                ways.append({"id": int(row["id"]), "coords": list(g.coords),
+                             "tags": t})
+            elif g.geom_type in ("Polygon", "MultiPolygon"):
+                if g.geom_type == "MultiPolygon":
+                    g = max(g.geoms, key=lambda x: x.area)
+                ways.append({"id": int(row["id"]),
+                             "coords": list(g.exterior.coords), "tags": t})
+        del p
+        gc.collect()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("POI-критерий pyrosm не сработал (%s: %s) — "
+                       "берём здания+дороги без POI", type(e).__name__, e)
 
     return (pd.DataFrame(ways, columns=["id", "coords", "tags"]),
             pd.DataFrame(nodes, columns=["id", "lat", "lon", "tags"]))
@@ -600,7 +607,7 @@ def _try_pbf_city(city):
     Любая неудача → None (вызывающий код идёт по тайловому Overpass)."""
     import tempfile
     import os
-    key = city.strip().lower()
+    key = re.sub(r"\s+", "_", city.strip().lower())
     # 1) локальный файл из репозитория — без сети вообще.
     # Имя файла: либо как город строчными (уфа.osm.pbf), либо из CITY_FILES
     _names = [f"{key.replace(' ', '_')}.osm.pbf"] + list(CITY_FILES.get(key, []))
@@ -617,6 +624,8 @@ def _try_pbf_city(city):
     # 2) ссылка на выгрузку (кастомная BBBike / готовый каталог)
     url = CUSTOM_PBF.get(key) or BBBIKE_READY.get(key)
     if url is None:
+        logger.info("pbf: нет ни файла %s, ни ссылки в конфиге — "
+                    "идём в Overpass", os.path.join(PBF_DIR, _names[0]))
         return None
     try:
         with requests.get(url, stream=True, timeout=120,
@@ -637,6 +646,9 @@ def _try_pbf_city(city):
         os.unlink(path)
         logger.info("pbf распарсен: %d ways, %d nodes",
                     len(frames[0]), len(frames[1]))
+        if frames[0].empty and frames[1].empty:
+            logger.warning("pbf пуст после парсинга — фолбэк на Overpass")
+            return None
         return frames
     except Exception as e:  # noqa: BLE001 — любая неудача pbf-пути
         logger.warning("pbf-путь не сработал (%s: %s) — фолбэк на Overpass",
@@ -710,33 +722,36 @@ def fetch_city_data(city: str):
     south, north, west, east = south - 0.02, north + 0.02, west - 0.02, east + 0.02
     bb = f"{south},{west},{north},{east}"
 
-    q_ways = f"""
+    # ВАЖНО: bbox НЕ подставляется f-строкой — запрос несёт литеральный
+    # токен __BBOX__, который ниже режется на тайлы. (Иначе «тайлы»
+    # молча вырождаются в полный запрос города — каждый по 35 МБ.)
+    q_ways = """
 [out:json][timeout:300];
 (
-  way["building"~"^(apartments|residential|house|detached|semidetached_house|terrace|bungalow|dormitory)$"]({bb});
-  way["highway"]({bb});
-  way["amenity"]({bb});
-  way["shop"]({bb});
-  way["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
-  way["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
-  way["emergency"="trauma_centre"]({bb});
-  way["building"="dormitory"]({bb});
+  way["building"~"^(apartments|residential|house|detached|semidetached_house|terrace|bungalow|dormitory)$"]__BBOX__;
+  way["highway"]__BBOX__;
+  way["amenity"]__BBOX__;
+  way["shop"]__BBOX__;
+  way["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]__BBOX__;
+  way["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]__BBOX__;
+  way["emergency"="trauma_centre"]__BBOX__;
+  way["building"="dormitory"]__BBOX__;
 );
 out geom;"""
 
-    q_nodes = f"""
+    q_nodes = """
 [out:json][timeout:300];
 (
-  node["amenity"]({bb});
-  node["shop"]({bb});
-  node["craft"]({bb});
-  node["office"]({bb});
-  node["leisure"]({bb});
-  node["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
-  node["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]({bb});
-  node["highway"~"^(bus_stop|bus_station|tram_stop)$"]({bb});
-  node["public_transport"~"^(platform|stop_position)$"]({bb});
-  node["emergency"="trauma_centre"]({bb});
+  node["amenity"]__BBOX__;
+  node["shop"]__BBOX__;
+  node["craft"]__BBOX__;
+  node["office"]__BBOX__;
+  node["leisure"]__BBOX__;
+  node["name"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]__BBOX__;
+  node["brand"~"Ozon|Озон|Wildberries|Вайлдберриз|СДЭК|CDEK|Авито|Avito|Яндекс Маркет",i]__BBOX__;
+  node["highway"~"^(bus_stop|bus_station|tram_stop)$"]__BBOX__;
+  node["public_transport"~"^(platform|stop_position)$"]__BBOX__;
+  node["emergency"="trauma_centre"]__BBOX__;
 );
 out body;"""
 
@@ -755,7 +770,7 @@ out body;"""
         els = []
         for (s0, w0, n0, e0) in _tiles:
             q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
-            q_tile = q_tile.replace("({bb})", f"({s0},{w0},{n0},{e0})")
+            q_tile = q_tile.replace("__BBOX__", f"{s0},{w0},{n0},{e0}")
             els.extend(_query_overpass(q_tile, timeout=150, attempts=2)
                        .get("elements", []))
         return els
