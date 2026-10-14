@@ -21,6 +21,10 @@ import requests
 import concurrent.futures
 
 logger = logging.getLogger("geohex")  # логи видны в Streamlit Cloud: Manage app → Logs
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    force=True)
 import numpy as np
 import pandas as pd
 import h3
@@ -594,11 +598,11 @@ out body;"""
         for (s0, w0, n0, e0) in _tiles:
             q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
             q_tile = q_tile.replace("({bb})", f"({s0},{w0},{n0},{e0})")
-            els.extend(_query_overpass(q_tile, timeout=240, attempts=2)
+            els.extend(_query_overpass(q_tile, timeout=150, attempts=2)
                        .get("elements", []))
         return els
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as _pool:
         _fw = _pool.submit(_run_tiled, q_ways)
         _fn = _pool.submit(_run_tiled, q_nodes)
         ways_raw = _fw.result()
