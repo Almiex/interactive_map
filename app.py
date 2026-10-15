@@ -1590,6 +1590,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 
     vals = series.reindex(grid).fillna(0.0)
     vmax = float(vals.max()) if len(vals) else 0.0
+    if not math.isfinite(vmax):   # NaN-пик от битых полигонов и т.п.
+        vmax = 0.0
     if vmax <= 0:
         st.warning("Нет данных для выбранного слоя в этом городе.")
         vmax = 1.0
@@ -1625,6 +1627,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         ring = [[lng, lat] for lat, lng in boundary]
         ring.append(ring[0])
         v = float(vals.get(cell, 0.0))
+        if not math.isfinite(v):   # NaN/Inf в JSON = смерть всей карты
+            v = 0.0
         rv = round(v, 2) if vmax < 100 else round(v)  # большие числа — целыми
         props = {"v": rv}
         if source:
@@ -1637,8 +1641,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                          f'🗺 Открыть в Яндекс.Картах</a>')
         # доп. поля обязаны быть у КАЖДОГО гекса, иначе folium падает на тултипе
         for c in extra_cols:
-            props[safe_cols[c]] = float(hex_extra.loc[cell, c]) \
-                if cell in hex_extra.index else 0
+            _ev = float(hex_extra.loc[cell, c]) \
+                if cell in hex_extra.index else 0.0
+            props[safe_cols[c]] = _ev if math.isfinite(_ev) else 0.0
         feats.append({
             "type": "Feature",
             "properties": props,
@@ -1693,6 +1698,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # точки объектов поверх гексов — ОДИН GeoJSON-слой (на тысячах точек
     # отдельные CircleMarker с тултипами ломают/тормозят карту)
     if points:
+        # точки с NaN/Inf-координатами убивают JSON карты — отбрасываем
+        points = [p for p in points
+                  if math.isfinite(p["lat"]) and math.isfinite(p["lon"])]
         def _clean(s):
             return re.sub(r'["\'<>\n\r\\]', " ", str(s))[:120]
 
