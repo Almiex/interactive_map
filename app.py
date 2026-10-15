@@ -776,6 +776,52 @@ def _try_pbf_city(city):
         return None
 
 
+def _pbf_fallback_bbox(ways_df):
+    """Граница города из самой выгрузки (без геокодеров): res-7 ячейки
+    по жилым зданиям -> плотные (>= 12% от максимума) -> НАИБОЛЬШАЯ СВЯЗНАЯ
+    компонента -> bbox по её зданиям. Агломерация не отсекается фильтром
+    заселённости (сплошная застройка), а порог плотности отбрасывает
+    пригорода; связность — отдельные города (Усть-Лабинск и т.п.)."""
+    _blats, _blons, _bcells = [], [], []
+    for _c, _t in zip(ways_df["coords"].values, ways_df["tags"].values):
+        if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
+            _a = float(_c[:, 1].mean())
+            _o = float(_c[:, 0].mean())
+            _blats.append(_a)
+            _blons.append(_o)
+            _bcells.append(h3.latlng_to_cell(_a, _o, 7))
+    if len(_blats) < 50:
+        return None
+    _cnt = pd.Series(_bcells).value_counts()
+    _thr = max(100.0, float(_cnt.max()) * 0.12)
+    _good = set(_cnt[_cnt >= _thr].index)
+    if not _good:
+        return None
+    # наибольшая связная компонента по соседству res-7
+    _best, _seen = set(), set()
+    for _start in list(_good):
+        if _start in _seen:
+            continue
+        _comp, _stack = set(), [_start]
+        while _stack:
+            _c = _stack.pop()
+            if _c in _seen or _c not in _good:
+                continue
+            _seen.add(_c)
+            _comp.add(_c)
+            _stack.extend(h3.grid_disk(_c, 1))
+        if len(_comp) > len(_best):
+            _best = _comp
+    _keep = pd.Series(_bcells).isin(_best).values
+    _ba = np.asarray(_blats)[_keep]
+    _bo = np.asarray(_blons)[_keep]
+    if len(_ba) < 50:
+        return None
+    _s, _n = float(np.percentile(_ba, 1)), float(np.percentile(_ba, 99))
+    _w, _e = float(np.percentile(_bo, 1)), float(np.percentile(_bo, 99))
+    return _s, _n, _w, _e
+
+
 def _tiled_bboxes(south, west, north, east):
     """Нарезка bbox города на тайлы: Overpass отдаёт МНОГО маленьких
     выборок в разы быстрее и надёжнее, чем одну гигантскую (которая
@@ -868,17 +914,24 @@ def _fetch_city_data_locked(city: str):
             logger.info("fetch_city_data %s: данные из PBF, граница от "
                         "геокодера", city)
             return geo, _nodes_df, _ways_df
-        # fallback: перцентили 2/98 по жилым зданиям + отступ 3%
-        _blats, _blons = [], []
-        for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
-            if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
-                _blats.append(float(_c[:, 1].mean()))
-                _blons.append(float(_c[:, 0].mean()))
-        if len(_blats) >= 50:
-            _ba, _bo = np.asarray(_blats), np.asarray(_blons)
-            _s, _n = float(np.percentile(_ba, 2)), float(np.percentile(_ba, 98))
-            _w, _e = float(np.percentile(_bo, 2)), float(np.percentile(_bo, 98))
-            if (_n - _s) > 0.01 and (_e - _w) > 0.01:
+        # fallback: граница из зданий (плотное ядро + связность), запас —
+        # перцентили 2/98 по всем жилым зданиям
+        _bb = _pbf_fallback_bbox(_ways_df)
+        if _bb is not None:
+            _s, _n, _w, _e = _bb
+        else:
+            _blats, _blons = [], []
+            for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
+                if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
+                    _blats.append(float(_c[:, 1].mean()))
+                    _blons.append(float(_c[:, 0].mean()))
+            if len(_blats) >= 50:
+                _ba, _bo = np.asarray(_blats), np.asarray(_blons)
+                _s = float(np.percentile(_ba, 2)); _n = float(np.percentile(_ba, 98))
+                _w = float(np.percentile(_bo, 2)); _e = float(np.percentile(_bo, 98))
+            else:
+                _s = _n = _w = _e = None
+        if _s is not None and (_n - _s) > 0.01 and (_e - _w) > 0.01:
                 _mw = (_e - _w) * 0.03 or 0.01
                 _mh = (_n - _s) * 0.03 or 0.01
                 geo = {"lat": (_s + _n) / 2, "lon": (_w + _e) / 2,
@@ -2310,9 +2363,11 @@ if len(series) and _overlap == 0:
     logger.warning("diagnostics: первая ячейка серии в точке %s — "
                    "проверьте lat/lon на перестановку", [round(x, 4) for x in _c0])
 
-# суррогатные карты: не рисуем гексы с 0, кроме кольца вокруг заселённых
-if map_type.startswith(("1.", "2.")):
-    grid = populated_with_ring(grid, series)
+# ВСЕ карты: гексы без данных + кольцо (k=1) вокруг заселённых. На
+# картах 3–7 раньше рисовался весь прямоугольник границы — при большой
+# фолбэк-обрезке это тысячи пустых ячеек. Кольцо сохраняет контекст вокруг
+# заселённых районов, но убирает пустоту
+grid = populated_with_ring(grid, series)
 if not grid:
     # populated_with_ring обнуляет сетку, если у слоя нет данных в городе
     logger.warning("diagnostics: сетка пуста; серия=%d, res=%s, "
