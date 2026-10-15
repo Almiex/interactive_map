@@ -2237,8 +2237,11 @@ marker = None
 if address.strip() and city.strip().lower() == stored["city"].lower():
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
         try:
-            marker = geocode_address(f"{address.strip()}, {stored['city']}",
-                                     stored["geo"]["bbox"])
+            # NB: НЕ добавляем имя города к запросу — с bounded=1 оно
+            # провоцирует Nominatim отдать САМ ГОРОД (полигон внутри
+            # viewbox): метка вставала в центр города вместо дома.
+            # Ограничение viewbox и так держит поиск в пределах города.
+            marker = geocode_address(address.strip(), stored["geo"]["bbox"])
         except Exception:  # noqa: BLE001
             marker = None
     if marker is None:
