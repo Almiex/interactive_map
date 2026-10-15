@@ -595,7 +595,8 @@ def _frames_from_pbf(path):
             g = max(g.geoms, key=lambda x: x.area)
         if g.geom_type == "Polygon":
             ways.append({"id": int(row["id"]),
-                         "coords": list(g.exterior.coords),
+                         "coords": np.asarray(g.exterior.coords,
+                                              dtype=np.float32),
                          "tags": _tags(row, cols)})
     del b
     gc.collect()
@@ -635,13 +636,16 @@ def _frames_from_pbf(path):
                 nodes.append({"id": int(row["id"]), "lat": float(g.y),
                               "lon": float(g.x), "tags": t})
             elif g.geom_type == "LineString":
-                ways.append({"id": int(row["id"]), "coords": list(g.coords),
+                ways.append({"id": int(row["id"]),
+                             "coords": np.asarray(g.coords, dtype=np.float32),
                              "tags": t})
             elif g.geom_type in ("Polygon", "MultiPolygon"):
                 if g.geom_type == "MultiPolygon":
                     g = max(g.geoms, key=lambda x: x.area)
                 ways.append({"id": int(row["id"]),
-                             "coords": list(g.exterior.coords), "tags": t})
+                             "coords": np.asarray(g.exterior.coords,
+                                                  dtype=np.float32),
+                             "tags": t})
         del p
         gc.collect()
     except Exception as e:  # noqa: BLE001
@@ -787,7 +791,10 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
     raise RuntimeError("Overpass недоступен на всех зеркалах: "
                        + "; ".join(errors[-4:]))
 
-@st.cache_data(ttl=86400, show_spinner=False, persist="disk")
+# БЕЗ persist="disk": с 15 городами дисковый кэш съел бы гигабайты,
+# а при смене города кэш очищаем (см. блок загрузки) — держим в памяти
+# ТОЛЬКО текущий город. Повторный заход к городу = ~1–2 мин по ссылке PBF.
+@st.cache_data(ttl=7200, show_spinner=False)
 def fetch_city_data(city: str):
     """Две выгрузки Overpass: (1) way-объекты, (2) node-объекты. Возвращает DataFrames."""
     geo = geocode_city(city)
@@ -891,9 +898,12 @@ out body;"""
     for el in ways_raw:
         if "geometry" not in el:
             continue
+        # coords как float32-МАССИВ (не список кортежей!) — в ~5 раз
+        # меньше RAM; точность ~1 м достаточна для гексов ~1 км
         ways.append({
             "id": el["id"],
-            "coords": [(p["lon"], p["lat"]) for p in el["geometry"]],
+            "coords": np.asarray([(p["lon"], p["lat"]) for p in el["geometry"]],
+                                 dtype=np.float32),
             "tags": el.get("tags", {}),
         })
     for el in nodes_raw:
@@ -911,8 +921,8 @@ def ways_centroids(ways_df):
     """Центроиды way-объектов (широта/долгота) — для подсчёта POI/остановок-ways."""
     if ways_df.empty:
         return pd.DataFrame(columns=["lat", "lon", "tags"])
-    lat = ways_df["coords"].apply(lambda c: np.mean([p[1] for p in c]))
-    lon = ways_df["coords"].apply(lambda c: np.mean([p[0] for p in c]))
+    lat = ways_df["coords"].apply(lambda c: float(c[:, 1].mean()))
+    lon = ways_df["coords"].apply(lambda c: float(c[:, 0].mean()))
     return pd.DataFrame({"lat": lat, "lon": lon, "tags": ways_df["tags"]})
 
 def _ring_coords(coords, min_pts):
@@ -925,11 +935,11 @@ def _ring_coords(coords, min_pts):
 
 
 def _safe_polygon(coords):
-    pts = _ring_coords(coords, 3)
-    if pts is None:
+    # coords — numpy float32 [(lon,lat)...]; shapely сам закрывает кольцо
+    if len(coords) < 3:
         return None
     try:
-        poly = Polygon(pts)
+        poly = Polygon(coords)
         return poly if poly.is_valid else poly.buffer(0)
     except Exception:  # noqa: BLE001
         return None
@@ -953,8 +963,8 @@ def buildings_gdf(ways_df):
         if geom is None or geom.is_empty:
             continue
         recs.append({"levels": _to_int(tags.get("building:levels"), 1),
-                     "lat": float(np.mean([p[1] for p in coords])),
-                     "lon": float(np.mean([p[0] for p in coords]))})
+                     "lat": float(coords[:, 1].mean()),
+                     "lon": float(coords[:, 0].mean())})
         geoms.append(geom)
     if not geoms:
         logger.info("diagnostics: buildings_gdf: геометрии не собрались")
@@ -977,16 +987,15 @@ def roads_gdf(ways_df):
     from shapely.geometry import LineString
     recs, geoms = [], []
     for coords, tags in zip(sub["coords"], sub["tags"]):
-        pts = _ring_coords(coords, 2)
-        if pts is None:
+        if len(coords) < 2:
             continue
         try:
-            geom = LineString(pts)
+            geom = LineString(coords)
         except Exception:  # noqa: BLE001
             continue
         recs.append({"highway": tags.get("highway", ""),
-                     "lat": float(np.mean([p[1] for p in pts])),
-                     "lon": float(np.mean([p[0] for p in pts]))})
+                     "lat": float(coords[:, 1].mean()),
+                     "lon": float(coords[:, 0].mean())})
         geoms.append(geom)
     if not geoms:
         return gpd.GeoDataFrame(columns=["highway", "len_km", "lat", "lon"],
@@ -1006,8 +1015,8 @@ def dorm_centroids(ways_df):
     if sub.empty:
         return empty
     return pd.DataFrame({
-        "lat": sub["coords"].apply(lambda c: float(np.mean([p[1] for p in c]))),
-        "lon": sub["coords"].apply(lambda c: float(np.mean([p[0] for p in c]))),
+        "lat": sub["coords"].apply(lambda c: float(c[:, 1].mean())),
+        "lon": sub["coords"].apply(lambda c: float(c[:, 0].mean())),
     })
 
 
@@ -1024,8 +1033,8 @@ def parking_gdf(ways_df):
         geom = _safe_polygon(coords)
         if geom is None or geom.is_empty:
             continue
-        recs.append({"lat": float(np.mean([p[1] for p in coords])),
-                     "lon": float(np.mean([p[0] for p in coords]))})
+        recs.append({"lat": float(coords[:, 1].mean()),
+                     "lon": float(coords[:, 0].mean())})
         geoms.append(geom)
     if not geoms:
         return gpd.GeoDataFrame(columns=["area", "lat", "lon"], geometry=[], crs="EPSG:4326")
@@ -1322,7 +1331,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 #  Агрегаты с кэшем: данные города тянем из session по версии, а не хэшируем
 #  многомегабайтные DataFrame при каждом rerun
 # --------------------------------------------------------------------------- #
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=48)
 def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
                            kontur_loaded, m2_per_person):
     stored = st.session_state["data"]
@@ -2055,6 +2064,14 @@ if st.session_state.get("_sel_mode_prev") != st.session_state.get("sel_mode"):
 
 if load_btn or st.session_state.pop("build_on_enter", False):
     st.session_state.pop("geocode_trace", None)  # свежая диагностика
+    # СМЕНА ГОРОДА = чистка кэшей: держим в памяти только текущий город
+    # (бесплатный тариф 1 ГБ). Возврат к прошлому городу = повторная
+    # выгрузка ~1–2 мин по ссылке из CUSTOM_PBF.
+    _prev = (st.session_state.get("data") or {}).get("city")
+    if _prev and _prev.strip().lower() != city.strip().lower():
+        fetch_city_data.clear()
+        _compute_series_cached.clear()
+        logger.info("кэши очищены: смена города %s -> %s", _prev, city)
     with st.spinner("Загружаю данные OpenStreetMap через Overpass API "
                     "(обычно 1–5 минут; города-миллионники — до 10–15)…"):
         try:
