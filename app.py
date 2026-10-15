@@ -1,192 +1,128 @@
-                else st.session_state.get("circle_center"))
+# -*- coding: utf-8 -*-
+"""
+GeoHex Analytics — Streamlit-сервис аналитики города по гексагональной сетке Uber H3.
 
-if map_type.startswith("3."):
-    st.info("**Из чего складывается индекс спроса.** Каждая строка тултипа — "
-            "отдельный показатель, нормированный в индекс 0–100 относительно "
-            "максимума по городу: «Жилой фонд: 25» значит, что объём жилья в этом "
-            "гексе равен 25% от объёма в самом плотном гексе города. "
-            "**Жилой фонд** — м² жилых зданий (площадь × этажность). **Розница/общепит** — "
-            "непродовольственные магазины, кафе и рестораны. **Банки/офисы** — банки, "
-            "обменники, офисы. **Остановки** — остановки ОТ. **Парковки/АЗС** — парковки "
-            "и заправки. Итоговый индекс = 0.40·ЖилойФонд + 0.20·Розница + "
-            "0.15·Банки + 0.15·Остановки + 0.10·Авто.")
+Источники (все бесплатные):
+  * Геокодинг городов        — Nominatim (OSM)
+  * Здания / дороги / POI    — Overpass API (OpenStreetMap)
+  * Реальная численность     — Kontur Population (локальный файл, https://data.humdata.org)
 
-if map_type.startswith("6."):
-    st.info("**Как считается индекс трафика.** Берётся суммарная длина дорог нужного "
-            "класса внутри гекса, делится на площадь гекса (км/км²), затем нормируется "
-            "в индекс 0–100 относительно самого загруженного гекса города. "
-            "**Пешеходный**: footway, pedestrian, path, steps, cycleway, living_street. "
-            "**Автомобильный**: motorway–tertiary и съезды. Тултип каждого гекса показывает "
-            "оба индекса сразу. Это интенсивность сети, а не реальные потоки машин — "
-            "для потоков нужны платные данные (TomTom и т.п.).")
+Запуск:  streamlit run app.py
+"""
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Гексов в сетке", f"{len(grid):,}")
-c2.metric("Resolution", f"res {res_eff} (~{RES_SPACING_KM[res_eff]} км между центрами)")
-c3.metric("Максимум в ячейке", f"{series.max():,.0f} {unit}" if len(series) else "—")
+import io
+import re
+import json
+import time
+import math
+import logging
+import hashlib
+import gc
+import requests
+import concurrent.futures
 
-legend = None
-if map_type.startswith("4."):
-    _sel = [c for c in POI_CATEGORIES if not sub_option or c in sub_option]
-    legend = [(name, color) for name, (color, _) in POI_CATEGORIES.items()
-              if name in _sel]
-elif map_type.startswith("5."):
-    legend = [(name, color) for name, (color, _) in SOCIAL_GROUPS.items()
-              if sub_option is None or name in sub_option]
-elif map_type.startswith("7."):
-    legend = [(name, color) for name, (color, _) in COMPETITOR_TYPES.items()
-              if sub_option is None or name in sub_option]
+logger = logging.getLogger("geohex")  # логи видны в Streamlit Cloud: Manage app → Logs
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    force=True)
+import numpy as np
+import pandas as pd
+import h3
+import folium
+import streamlit as st
+import geopandas as gpd
+from shapely.geometry import Polygon
+from shapely.ops import unary_union, orient as _shapely_orient
+from streamlit_folium import st_folium
+from branca.colormap import LinearColormap
+from jinja2 import Template as _Jinja2Template
 
-extra_aliases = None
-if map_type.startswith("3."):
-    extra_aliases = {"c_people": "Жилой фонд: ", "c_retail": "Розница/общепит: ",
-                     "c_biz": "Банки/офисы: ", "c_transit": "Остановки: ",
-                     "c_auto": "Парковки/АЗС: "}
-elif map_type.startswith("4."):
-    _sel = [c for c in POI_CATEGORIES if not sub_option or c in sub_option]
-    extra_aliases = {name: f"{name}: " for name in POI_CATEGORIES if name in _sel}
-elif map_type.startswith("6."):
-    extra_aliases = {"ped": "Пешеходный трафик: ", "auto": "Автомобильный трафик: "}
-elif map_type.startswith("5."):
-    extra_aliases = {name: f"{name}: " for name in SOCIAL_GROUPS
-                     if sub_option is None or name in sub_option}
-elif map_type.startswith("7."):
-    extra_aliases = {name: f"{name}: " for name in COMPETITOR_TYPES
-                     if sub_option is None or name in sub_option}
+# --------------------------------------------------------------------------- #
+#  Константы
+# --------------------------------------------------------------------------- #
+# Порядок — по наблюдаемой живучести с нашего деплоя.
+# overpass-api.de УБРАН: со Streamlit Cloud он стабильно отвечает
+# Connection refused (TCP-бан IP), попытки только съедали время.
+OVERPASS_ENDPOINTS = [
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
+    "https://overpass.maps.mail.ru/api/interpreter",
+]
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# резервный геокодер (komoot) — подхватывает город, пока Nominatim режет
+# запросы с нашего IP (на shared-хостинге лимит часто срабатывает из-за
+# чужого трафика). Полигона границы не отдаёт — сетка построится по bbox
+PHOTON_URL = "https://photon.komoot.io/api/"
+HEADERS = {"User-Agent": "GeoHexAnalytics/1.0 (educational; OSM data)"}
+
+# ── Защита от бана Nominatim ──────────────────────────────────────────────
+# Публичный Nominatim разрешает ~1 запрос/сек с IP; на shared-хостинге IP
+# общий с чужими приложениями — лимит срабатывает «сам». Поэтому:
+# 1) throttle: приложение физически не шлёт запросы чаще интервала;
+# 2) без ретраев при 429: повтор на общем IP почти всегда снова 429,
+#    а агрессивные попытки продлевают блокировку. При 429 уходим на резерв.
+NOMINATIM_MIN_INTERVAL = 1.2    # минимальный интервал между запросами, сек
+_last_nominatim_ts = [0.0]      # изменяемая ячейка: время последнего запроса
 
 
-# ---- сумма показателей внутри кругов: НЕ по умолчанию, а по кнопке.
-# Карты 1–7: население / жилфонд / индекс спроса / объекты (с учётом
-# фильтров) / социнфраструктура / индекс трафика / мед. объекты. Серия
-# показателей уже отражает текущие фильтры и режим. Гексы берутся по
-# центрам внутри радиуса. Привязка результата: тип карты (очистка выше)
-# + гекс + отпечаток фильтров (при смене фильтров сумма скрывается).
-if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
-    _sums_center = _circ_center
-    # отпечаток текущих фильтров/настроек, влияющих на серию показателей
-    _fkey = f"{sub_option}|{'K' if kontur_df is not None else ''}|{m2_per_person}"
-    if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
-                 help="По гексам текущей карты (с учётом фильтров), центры "
-                      "которых попадают в радиус 1, 2 и 5 км: сумма для "
-                      "карт 1, 2, 4, 5, 7 и СРЕДНЕЕ для индексных карт 3 и 6. "
-                      "После смены фильтров нажмите кнопку ещё раз."):
-        _s = sums_in_circles(series, _sums_center)
-        if _s is not None:
-            st.session_state["circle_sums"] = {"sums": _s, "unit": unit,
-                                               "center": _sums_center,
-                                               "map_type": map_type,
-                                               "fkey": _fkey}
-        else:
-            st.session_state.pop("circle_sums", None)
-            st.warning("Нет данных для суммирования на текущей карте.")
+def _nominatim_throttle():
+    """Гарантирует NOMINATIM_MIN_INTERVAL между запросами к Nominatim
+    по ВСЕМУ приложению (город, адрес, догеокодинг за полигоном)."""
+    now = time.monotonic()
+    gap = now - _last_nominatim_ts[0]
+    if gap < NOMINATIM_MIN_INTERVAL:
+        time.sleep(NOMINATIM_MIN_INTERVAL - gap)
+    _last_nominatim_ts[0] = time.monotonic()
 
-    # показываем результат, только пока он относится к ТЕКУЩЕМУ выбранному
-    # гексу: перенёс круги — сумма скроется, пока не нажата кнопка снова
-    _saved_sums = st.session_state.get("circle_sums")
-    if (_saved_sums
-            and _saved_sums.get("center") == _circ_center
-            and _saved_sums.get("fkey") == _fkey):  # фильтры не менялись
-        _s1, _n1 = _saved_sums["sums"][1.0]
-        _s2, _n2 = _saved_sums["sums"][2.0]
-        _s5, _n5 = _saved_sums["sums"][5.0]
-        # для индексных карт (3 — спрос, 6 — трафик) показываем СРЕДНЕЕ
-        # по гексам радиуса: сумма индексов не имеет смысла
-        _avg = map_type.startswith(("3.", "6."))
-        _sum_col, _ = st.columns([1, 2])  # узкая колонка слева, метрики в столбик
+# расстояние между центрами соседних гексов, км (по стандарту Uber H3)
+RES_SPACING_KM = {7: 2.4, 8: 0.92, 9: 0.35, 10: 0.13}
 
-        def _r_metric(_r_label, _s, _n):
-            if _avg:
-                _v = _s / _n if _n else 0.0
-                st.metric(f"Среднее в радиусе {_r_label} · {_n} гексов",
-                          f"{_v:,.1f} {_saved_sums['unit']}".rstrip())
-            else:
-                st.metric(f"Σ в радиусе {_r_label} · {_n} гексов",
-                          f"{_s:,.0f} {_saved_sums['unit']}".rstrip())
+MAX_GRID_CELLS = 50000  # потолок сетки; canvas-рендер держит десятки тысяч полигонов
 
-        with _sum_col:
-            _r_metric("1 км", _s1, _n1)
-            _r_metric("2 км", _s2, _n2)
-            _r_metric("5 км", _s5, _n5)
-    if map_type.startswith(("4.", "5.", "7.")):
-        st.caption("💡 Сумма считается по ТЕКУЩИМ фильтрам. Изменили "
-                   "категории — нажмите кнопку ещё раз, чтобы пересчитать.")
+MAP_TYPES = [
+    "1. Плотность населения",
+    "2. Объём жилого фонда",
+    "3. Индекс спроса (платёжеспособность)",
+    "4. Инфраструктура и POI",
+    "5. Социальная инфраструктура",
+    "6. Трафик (индекс, пеший/авто)",
+    "7. Мед. учреждения и аптеки",
+]
 
-# ---- сводка по ВСЕМ картам в Excel: одна кнопка вместо обхода 7 карт.
-# Считает все показатели с ПОЛНЫМИ фильтрами для текущего центра кругов
-# (метка или гекс) и радиусов 1/2/5 км.
-if _circ_center:
-    # ОДНА кнопка на фичу: пока сводка не готова для текущего центра и
-    # разрешений — «Сформировать», после расчёта она заменяется «Скачать».
-    # Всегда включает комплект для res 8, плюс выбранный res, если он не 8.
-    _res_list = list(dict.fromkeys([8, res_eff]))
-    _exp = st.session_state.get("allmaps_export")
-    _fresh = (_exp and _exp.get("center") == _circ_center
-              and _exp.get("res_list") == _res_list)
-    if not _fresh:
-        if st.button("📊 Сформировать сводку по всем картам (Excel)",
-                     help="Считает показатели всех 7 карт (трафик — пеший и "
-                          "авто отдельными строками) с полными фильтрами для "
-                          "текущего центра кругов и радиусов 1/2/5 км. Всегда "
-                          "включает комплект для res 8; если выбрано другое "
-                          "разрешение — добавит второй комплект листов. "
-                          "Первый запуск 10–30 сек, дальше — из кэша."):
-            with st.spinner("Считаю все 7 карт для сводки (первый раз 10–30 сек)…"):
-                try:
-                    _results = {_r: build_all_maps_summary(
-                        _circ_center, _r, stored, kontur_df, m2_per_person)
-                        for _r in _res_list}
-                    _buf = io.BytesIO()
-                    _fmt = "xlsx"
-                    try:
-                        with pd.ExcelWriter(_buf, engine="openpyxl") as _w:
-                            if len(_res_list) == 1:
-                                _sum_df, _par_df = _results[_res_list[0]]
-                                _par_df.to_excel(_w, sheet_name="Параметры",
-                                                 index=False)
-                                _sum_df.to_excel(_w, sheet_name="Сводка",
-                                                 index=False)
-                            else:
-                                for _r in _res_list:
-                                    _sum_df, _par_df = _results[_r]
-                                    _par_df.to_excel(
-                                        _w, sheet_name=f"Параметры res {_r}",
-                                        index=False)
-                                    _sum_df.to_excel(
-                                        _w, sheet_name=f"Сводка res {_r}",
-                                        index=False)
-                        _mime = ("application/vnd.openxmlformats-"
-                                 "officedocument.spreadsheetml.sheet")
-                    except ImportError:
-                        # openpyxl нет — один CSV с колонкой Resolution
-                        _frames = []
-                        for _r in _res_list:
-                            _s = _results[_r][0].copy()
-                            _s.insert(0, "Resolution", f"res {_r}")
-                            _frames.append(_s)
-                        _buf = io.BytesIO(pd.concat(_frames).to_csv(index=False)
-                                          .encode("utf-8-sig"))
-                        _fmt, _mime = "csv", "text/csv"
-                        st.warning("⚠️ openpyxl не установлен — отдаю CSV. "
-                                   "Для xlsx добавьте openpyxl>=3.1 в "
-                                   "requirements.txt")
-                    st.session_state["allmaps_export"] = {
-                        "data": _buf.getvalue(), "ext": _fmt, "mime": _mime,
-                        "center": _circ_center, "res_list": _res_list}
-                except Exception as e:  # noqa: BLE001 — любая ошибка расчёта
-                    st.session_state.pop("allmaps_export", None)
-                    st.error(f"Не удалось сформировать сводку: {e}")
-    else:
-        st.download_button(f"⬇ Скачать сводку по всем картам ({_exp['ext']})",
-                           data=_exp["data"],
-                           file_name=f"geohex_svodka.{_exp['ext']}",
-                           mime=_exp["mime"])
+# ПВЗ в OSM не имеют единого тега — находим по названию/бренду
+PVZ_RE = re.compile(
+    r"ozon|озон|wildberries|вайлдберриз|сдэк|cdek|авито|avito|"
+    r"яндекс[ -]?маркет|yandex[ -]?market", re.IGNORECASE)
+PVZ_WB_RE = re.compile(r"(^|[^a-z])wb([^a-z]|$)|(^|\s)вб(\s|$)", re.IGNORECASE)
 
-# ---- экспорт выделенных гексов в GeoJSON (формат Yandex Map Constructor):
-# FeatureCollection + metadata{name, creator} + features c Polygon-кольцами
-# в порядке [lon, lat], кольцо замкнуто. Работает в обоих режимах: в
-# одиночном экспортируется выбранный гекс, в мультивыборе — вся цепочка.
-if st.session_state.get("circle_center"):
-    _res0 = h3.get_resolution(grid[0])
-    _cells = list(dict.fromkeys(
-        [h3.latlng_to_cell(st.session_state["circle_center"][0],
-                           st.session_state["circle_center"][1], _res0)]
+
+def is_pvz(tags: dict) -> bool:
+    text = f"{tags.get('name', '')} {tags.get('brand', '')}"
+    return bool(PVZ_RE.search(text) or PVZ_WB_RE.search(text))
+
+
+def _name_of(tags: dict) -> str:
+    return f"{tags.get('name', '')} {tags.get('brand', '')}".lower()
+
+
+# категория -> (цвет точки, matcher по тегам)
+POI_CATEGORIES = {
+    "Торговые центры": ("#e377c2",
+                        lambda t: t.get("shop") in {"mall", "department_store"}
+                        or re.search(r"торгов(ый|ого) центр|(^|\s)тц(\s|$)|молл", _name_of(t))),
+    "Бизнес-центры и офисы": ("#17becf",
+                              lambda t: "office" in t
+                              or re.search(r"бизнес[ -]?центр|business center|(^|\s)бц(\s|$)",
+                                           _name_of(t))),
+    "ПВЗ маркетплейсов (Ozon, WB, СДЭК, Авито, Яндекс)": ("#d62728", is_pvz),
+    "Продуктовые магазины": ("#2ca02c",
+                             lambda t: t.get("shop") in
+                             {"supermarket", "convenience", "greengrocer", "deli",
+                              "butcher", "bakery", "seafood"}),
+    "Общепит": ("#ff7f0e",
+                lambda t: t.get("amenity") in
+                {"restaurant", "cafe", "fast_food", "bar", "pub",
+                 "food_court", "biergarten"}),
+    "Аптеки": ("#1f6fd6", lambda t: t.get("amenity") == "pharmacy"),
