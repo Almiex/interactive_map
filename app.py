@@ -832,31 +832,43 @@ def fetch_city_data(city: str):
     берём из экстента координат самого файла. Геокодер (Photon → Nominatim
     → Overpass) вызываем ТОЛЬКО когда PBF нет — для границы под тайловый
     Overpass."""
-    # ПЛАН Б: локальный файл или ссылка -> pyrosm, граница из данных
+    # ПЛАН Б: локальный файл или ссылка -> pyrosm, граница из данных.
+    # Город = там, где ЗДАНИЯ: bbox по перцентилям 2/98 координат жилых
+    # домов — экстент BBBike-выгрузки всегда больше города (обводили с
+    # запасом), и сетка по сырому экстенту разливается по хуторам и полям
+    # (тысячи лишних гексов). Хвосты 2% отсекают сельскую окраину, город
+    # остаётся целиком. Геокодеры не нужны.
     _pbf = _try_pbf_city(city)
     if _pbf is not None:
         _ways_df, _nodes_df = _pbf[0], _pbf[1]
-        _lons, _lats = [], []
-        for _c in _ways_df["coords"].values:
-            if len(_c):
-                _lons.extend((_c[:, 0].min(), _c[:, 0].max()))
-                _lats.extend((_c[:, 1].min(), _c[:, 1].max()))
-        if len(_nodes_df):
-            _lons.extend(float(x) for x in _nodes_df["lon"])
-            _lats.extend(float(x) for x in _nodes_df["lat"])
-        if _lons:
-            _w, _e = float(np.min(_lons)), float(np.max(_lons))
-            _s, _n = float(np.min(_lats)), float(np.max(_lats))
-            # отступ 2% — чтобы крайние гексы не обрезались на границе
-            _mw, _mh = (_e - _w) * 0.02 or 0.01, (_n - _s) * 0.02 or 0.01
+        _blats, _blons = [], []
+        for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
+            if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
+                _blats.append(float(_c[:, 1].mean()))
+                _blons.append(float(_c[:, 0].mean()))
+        if len(_blats) >= 200:
+            _ba, _bo = np.asarray(_blats), np.asarray(_blons)
+            _s, _n = float(np.percentile(_ba, 2)), float(np.percentile(_ba, 98))
+            _w, _e = float(np.percentile(_bo, 2)), float(np.percentile(_bo, 98))
+        elif len(_blats):
+            _ba, _bo = np.asarray(_blats), np.asarray(_blons)
+            _s, _n = float(_ba.min()), float(_ba.max())
+            _w, _e = float(_bo.min()), float(_bo.max())
+        else:
+            _s = _n = _w = _e = None
+        if _s is not None and (_n - _s) > 0.01 and (_e - _w) > 0.01:
+            # отступ 4% — крайние гексы не обрезаются, пригород остаётся
+            _mw = (_e - _w) * 0.04 or 0.01
+            _mh = (_n - _s) * 0.04 or 0.01
             geo = {"lat": (_s + _n) / 2, "lon": (_w + _e) / 2,
                    "display": f"{city.strip()} (выгрузка PBF)",
                    "bbox": [_s - _mh, _n + _mh, _w - _mw, _e + _mw],
                    "geojson": None}
             logger.info("fetch_city_data %s: данные из PBF (pyrosm), "
-                        "граница из экстента файла", city)
+                        "граница по плотности зданий: %d жилых, bbox %.3f×%.3f",
+                        city, len(_blats), _n - _s, _e - _w)
             return geo, _nodes_df, _ways_df
-        logger.warning("PBF пуст координатно — идём через геокодер")
+        logger.warning("PBF без зданий — идём через геокодер")
 
     # ПЛАН А: геокодер для границы -> тайловый Overpass
     geo = geocode_city(city)
