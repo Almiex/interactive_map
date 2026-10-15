@@ -827,7 +827,38 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
 # ТОЛЬКО текущий город. Повторный заход к городу = ~1–2 мин по ссылке PBF.
 @st.cache_data(ttl=7200, show_spinner=False)
 def fetch_city_data(city: str):
-    """Две выгрузки Overpass: (1) way-объекты, (2) node-объекты. Возвращает DataFrames."""
+    """Данные города. ПЛАН Б ПЕРВЫМ: если для города есть выгрузка PBF —
+    геокодеры вообще не нужны (они часто лежат/банят IP): границу города
+    берём из экстента координат самого файла. Геокодер (Photon → Nominatim
+    → Overpass) вызываем ТОЛЬКО когда PBF нет — для границы под тайловый
+    Overpass."""
+    # ПЛАН Б: локальный файл или ссылка -> pyrosm, граница из данных
+    _pbf = _try_pbf_city(city)
+    if _pbf is not None:
+        _ways_df, _nodes_df = _pbf[0], _pbf[1]
+        _lons, _lats = [], []
+        for _c in _ways_df["coords"].values:
+            if len(_c):
+                _lons.extend((_c[:, 0].min(), _c[:, 0].max()))
+                _lats.extend((_c[:, 1].min(), _c[:, 1].max()))
+        if len(_nodes_df):
+            _lons.extend(float(x) for x in _nodes_df["lon"])
+            _lats.extend(float(x) for x in _nodes_df["lat"])
+        if _lons:
+            _w, _e = float(np.min(_lons)), float(np.max(_lons))
+            _s, _n = float(np.min(_lats)), float(np.max(_lats))
+            # отступ 2% — чтобы крайние гексы не обрезались на границе
+            _mw, _mh = (_e - _w) * 0.02 or 0.01, (_n - _s) * 0.02 or 0.01
+            geo = {"lat": (_s + _n) / 2, "lon": (_w + _e) / 2,
+                   "display": f"{city.strip()} (выгрузка PBF)",
+                   "bbox": [_s - _mh, _n + _mh, _w - _mw, _e + _mw],
+                   "geojson": None}
+            logger.info("fetch_city_data %s: данные из PBF (pyrosm), "
+                        "граница из экстента файла", city)
+            return geo, _nodes_df, _ways_df
+        logger.warning("PBF пуст координатно — идём через геокодер")
+
+    # ПЛАН А: геокодер для границы -> тайловый Overpass
     geo = geocode_city(city)
     if geo is None:
         return None, None, None
@@ -871,13 +902,6 @@ out geom;"""
   node["emergency"="trauma_centre"]__BBOX__;
 );
 out body;"""
-
-    # ПЛАН Б: если для города есть выгрузка BBBike — парсим её локально
-    # (быстро, без Overpass). Иначе — тайловый Overpass ниже.
-    _pbf = _try_pbf_city(city)
-    if _pbf is not None:
-        logger.info("fetch_city_data %s: данные из PBF (pyrosm)", city)
-        return geo, _pbf[1], _pbf[0]
 
     # выгрузка ТАЙЛАМИ + параллельно: каждый тайл — маленький быстрый
     # запрос, пул потоков гоняет их через ротацию зеркал одновременно
