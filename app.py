@@ -703,7 +703,8 @@ def _try_pbf_city(city):
     url = _cfg.get(_canon(key))
     if url is None:
         logger.info("pbf: нет ни файла %s, ни ссылки в конфиге — "
-                    "идём в Overpass", os.path.join(PBF_DIR, _names[0]))
+                    "идём в Overpass",
+                    os.path.join(PBF_DIR, f"{_canon(key)}.osm.pbf"))
         return None
     try:
         with requests.get(url, stream=True, timeout=300,
@@ -1972,8 +1973,12 @@ with st.sidebar:
     if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
         _max_res = h3.get_resolution(kontur_df["h3"].iloc[0])
         if st.session_state.get("res_slider", 8) > _max_res:
-            # слайдер ещё не отрисован в этом прогоне — менять значение можно
-            st.session_state["res_slider"] = _max_res
+            try:
+                # слайдер мог быть уже отрисован (зависит от ветки) —
+                # модификация после инстанцирования бросает исключение
+                st.session_state["res_slider"] = _max_res
+            except st.errors.StreamlitAPIException:
+                pass  # перестраховка: главный clamp res_eff в логике ниже
 
     st.header("Сетка H3")
 
