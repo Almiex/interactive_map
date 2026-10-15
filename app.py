@@ -684,21 +684,15 @@ def _try_pbf_city(city):
     key = re.sub(r"\s+", "_", city.strip().lower())
     # 1) локальный файл из репозитория — без сети вообще.
     # Имя файла: либо как город строчными (уфа.osm.pbf), либо из CITY_FILES
-    # каноническая форма: регистр не важен, пробелы/подчёркивания/дефисы
-    # считаются одним разделителем. "Ростов на Дону" == "ростов-на-дону" ==
-    # "ростов_на_дону" == "РОСТОВ-НА-ДОНУ"
-    def _canon(s):
-        return re.sub(r"[\s_\-\u2013\u2014]+", "_", s.lower())
-
     _local = None
     if os.path.isdir(PBF_DIR):
         try:
-            _files = {_canon(n): n for n in os.listdir(PBF_DIR)}
-            _want = _canon(f"{key}.osm.pbf")
+            _files = {_canon_key(n): n for n in os.listdir(PBF_DIR)}
+            _want = _canon_key(f"{key}.osm.pbf")
             _hit = _files.get(_want)
             if _hit is None:  # явное сопоставление из CITY_FILES
                 for _cfg in CITY_FILES.get(key, []):
-                    _hit = _files.get(_canon(_cfg))
+                    _hit = _files.get(_canon_key(_cfg))
                     if _hit:
                         break
             if _hit is not None:
@@ -723,12 +717,12 @@ def _try_pbf_city(city):
     # 2) ссылка на выгрузку (кастомная BBBike / готовый каталог).
     # Ключи сопоставляем КАНОНИЧЕСКИ: «Ростов на Дону» == «ростов-на-дону» ==
     # «ростов_на_дону» — для людей, вводящих город как привыкли.
-    _cfg = {_canon(k): v for k, v in {**BBBIKE_READY, **CUSTOM_PBF}.items()}
+    _cfg = {_canon_key(k): v for k, v in {**BBBIKE_READY, **CUSTOM_PBF}.items()}
     url = _cfg.get(_canon(key))
     if url is None:
         logger.info("pbf: нет ни файла %s, ни ссылки в конфиге — "
                     "идём в Overpass",
-                    os.path.join(PBF_DIR, f"{_canon(key)}.osm.pbf"))
+                    os.path.join(PBF_DIR, f"{_canon_key(key)}.osm.pbf"))
         return None
     path = None
     for _attempt in (1, 2):
@@ -914,23 +908,31 @@ def _fetch_city_data_locked(city: str):
             logger.info("fetch_city_data %s: данные из PBF, граница от "
                         "геокодера", city)
             return geo, _nodes_df, _ways_df
-        # fallback: граница из зданий (плотное ядро + связность), запас —
-        # перцентили 2/98 по всем жилым зданиям
-        _bb = _pbf_fallback_bbox(_ways_df)
-        if _bb is not None:
-            _s, _n, _w, _e = _bb
+        # fallback-граница: 1) CUSTOM_BBOX (ручные, точные) ->
+        # 2) эвристика по зданиям (плотное ядро + связность) ->
+        # 3) перцентили 2/98 по всем жилым зданиям
+        _cbbox = {_canon_key(k): v for k, v in CUSTOM_BBOX.items()}.get(
+            _canon_key(city))
+        if _cbbox is not None:
+            _s, _n, _w, _e = [float(x) for x in _cbbox]
+            logger.info("граница из CUSTOM_BBOX: %s", _cbbox)
         else:
-            _blats, _blons = [], []
-            for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
-                if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
-                    _blats.append(float(_c[:, 1].mean()))
-                    _blons.append(float(_c[:, 0].mean()))
-            if len(_blats) >= 50:
-                _ba, _bo = np.asarray(_blats), np.asarray(_blons)
-                _s = float(np.percentile(_ba, 2)); _n = float(np.percentile(_ba, 98))
-                _w = float(np.percentile(_bo, 2)); _e = float(np.percentile(_bo, 98))
+            _bb = _pbf_fallback_bbox(_ways_df)
+            if _bb is not None:
+                _s, _n, _w, _e = _bb
             else:
-                _s = _n = _w = _e = None
+                _blats, _blons = [], []
+                for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
+                    if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
+                        _blats.append(float(_c[:, 1].mean()))
+                        _blons.append(float(_c[:, 0].mean()))
+                if len(_blats) >= 50:
+                    _ba, _bo = np.asarray(_blats), np.asarray(_blons)
+                    _s = float(np.percentile(_ba, 2)); _n = float(np.percentile(_ba, 98))
+                    _w = float(np.percentile(_bo, 2)); _e = float(np.percentile(_bo, 98))
+                else:
+                    _s = _n = _w = _e = None
+
         if _s is not None and (_n - _s) > 0.01 and (_e - _w) > 0.01:
                 _mw = (_e - _w) * 0.03 or 0.01
                 _mh = (_n - _s) * 0.03 or 0.01
@@ -1647,7 +1649,51 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 
     # верстка тултипов: таблица сжата по содержимому (width:auto),
     # подпись и значение идут плотно, без разъезда на разные края
+    # САМОДИАГНОСТИКА КАРТЫ: перехватываем JS-ошибки инициализации и выводим
+    # их красным баннером ПРЯМО ВНУТРИ iframe. Когда у пользователя «белая
+    # карта без ошибок» — этот баннер покажет настоящую причину.
     m.get_root().header.add_child(folium.Element("""
+<script>
+(function() {
+  function geohexShow(msg) {
+    try {
+      var d = document.getElementById('geohex-js-err');
+      if (!d) {
+        d = document.createElement('div');
+        d.id = 'geohex-js-err';
+        d.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:999999;' +
+          'background:#b00020;color:#fff;font:13px/1.45 monospace;padding:10px 14px;' +
+          'white-space:pre-wrap;max-height:45%;overflow:auto;';
+        var host = document.body || document.documentElement;
+        host.appendChild(d);
+      }
+      d.textContent = (d.textContent ? d.textContent + '\n' : '') + msg;
+    } catch (_) {}
+  }
+  window.addEventListener('error', function(e) {
+    geohexShow('JS: ' + e.message + ' @ ' +
+      String(e.filename || '').split('/').pop() + ':' + e.lineno + ':' + e.colno);
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    var r = e.reason;
+    geohexShow('Promise: ' + (r && (r.message || String(r)) || 'unknown'));
+  });
+  // если через 4с контейнера карты нет — карта не создалась вовсе
+  setTimeout(function() {
+    if (!document.querySelector('.leaflet-container')) {
+      var keys = [];
+      try {
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf('geohex_view_') === 0) keys.push(k + '=' + localStorage.getItem(k));
+        }
+      } catch (_) {}
+      geohexShow('КАРТА НЕ СОЗДАЛАСЬ: .leaflet-container не найден. ' +
+                 'localStorage: [' + keys.join(' | ') + ']');
+    }
+  }, 4000);
+})();
+</script>
 <style>
 .foliumtooltip { background: #fff; color: #222; border-radius: 4px;
   box-shadow: 0 1px 4px rgba(0,0,0,.35); padding: 8px 10px; font-size: 13px;
@@ -1820,9 +1866,14 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
   function applySaved() {
     try {
       var v = JSON.parse(localStorage.getItem(KEY) || "null");
-      if (v && v.c && v.z != null) {
+      var ok = v && v.c && isFinite(v.z) && v.z >= 3 && v.z <= 19 &&
+               isFinite(v.c[0]) && isFinite(v.c[1]) &&
+               Math.abs(v.c[0]) <= 90 && Math.abs(v.c[1]) <= 180;
+      if (ok) {
         m.setView(v.c, v.z, {animate: false});
         setTimeout(function() { m.setView(v.c, v.z, {animate: false}); }, 400);
+      } else if (v) {
+        localStorage.removeItem(KEY);  // битое значение — выкидываем
       }
     } catch (e) {}
     m.on("moveend", function() {
