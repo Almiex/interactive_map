@@ -19,6 +19,7 @@ import logging
 import hashlib
 import requests
 import concurrent.futures
+import threading
 
 logger = logging.getLogger("geohex")  # логи видны в Streamlit Cloud: Manage app → Logs
 logging.basicConfig(
@@ -544,6 +545,11 @@ def make_grid(geo, res):
 
 
 _LAST_OVERPASS_MIRROR = ""   # какое зеркало ответило последним (диагностика)
+# одна активная загрузка города за раз: повторные клики/Enter во время
+# загрузки БЛОКИРУЮТСЯ здесь, а после завершения берут результат из кэша —
+# иначе параллельные вызовы качали и парсили один PBF несколько раз
+# (двойной трафик и двойная RAM)
+_FETCH_LOCK = threading.Lock()
 
 
 # ══ ПЛАН Б: выгрузки .osm.pbf без Overpass ═══════════════════════════════
@@ -827,6 +833,11 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
 # ТОЛЬКО текущий город. Повторный заход к городу = ~1–2 мин по ссылке PBF.
 @st.cache_data(ttl=7200, show_spinner=False)
 def fetch_city_data(city: str):
+    with _FETCH_LOCK:   # параллельные загрузки одного города — запрещены
+        return _fetch_city_data_locked(city)
+
+
+def _fetch_city_data_locked(city: str):
     """Данные города. ПЛАН Б ПЕРВЫМ: если для города есть выгрузка PBF —
     геокодеры вообще не нужны (они часто лежат/банят IP): границу города
     берём из экстента координат самого файла. Геокодер (Photon → Nominatim
@@ -837,15 +848,20 @@ def fetch_city_data(city: str):
     # загрузки мгновенные; если геокодеры отказали — приблизительная
     # обрезка по плотности зданий: город без соседних агломераций
     # плотностью не отделить — Усть-Лабинск такой же плотный, как Краснодар).
+    # ГРАНИЦА — СНАЧАЛА: геокодер быстрый (кэш на сутки), а парсинг PBF
+    # идёт минуту — геокодить ПОСЛЕ парсинга значило бы потерять это время
+    # на каждом фолбэке. Геокодеры мертвы -> geo None, границу возьмём из
+    # зданий файла.
+    try:
+        geo = geocode_city(city)
+    except Exception as e:  # noqa: BLE001 — геокодеры не критичны
+        logger.warning("геокодеры отказали (%s) — граница по зданиям", e)
+        geo = None
+
+    # ПЛАН Б: локальный файл или ссылка -> pyrosm (объекты)
     _pbf = _try_pbf_city(city)
     if _pbf is not None:
         _ways_df, _nodes_df = _pbf[0], _pbf[1]
-        try:
-            geo = geocode_city(city)
-        except Exception as e:  # noqa: BLE001 — геокодеры не критичны
-            logger.warning("геокодеры отказали для PBF-города %s (%s) — "
-                           "граница по зданиям из файла", city, e)
-            geo = None
         if geo is not None:
             geo["display"] = f"{city.strip()} (выгрузка PBF)"
             geo["src"] = "pbf"
@@ -872,10 +888,9 @@ def fetch_city_data(city: str):
                 logger.info("fetch_city_data %s: данные из PBF, "
                             "приблизительная граница по зданиям", city)
                 return geo, _nodes_df, _ways_df
-        logger.warning("PBF без зданий — идём через геокодер")
+        logger.warning("PBF без зданий и геокодеров — данных нет")
 
-    # ПЛАН А: геокодер для границы -> тайловый Overpass
-    geo = geocode_city(city)
+    # ПЛАН А: тайловый Overpass по границе от геокодера
     if geo is None:
         return None, None, None
     if geo.get("geojson") and geo["geojson"].get("type") in ("Polygon", "MultiPolygon"):
