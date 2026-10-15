@@ -615,40 +615,27 @@ def _frames_from_pbf(path):
     del b
     gc.collect()
 
-    # дороги — ТЕМ ЖЕ быстрым custom criteria, что и POI: get_network("all")
-    # строит тяжёлые сетевые индексы pyrosm (~1 мин на миллионнике), а
-    # критерий отдаёт сырые way за секунды. highway=True охватывает все
-    # классы дорог; узлы (остановки) уходят в nodes — как в Overpass-пути
-    r = osm.get_data_by_custom_criteria(custom_filter={"highway": True},
-                                        filter_type="keep")
-    cols = list(r.columns)
-    for _, row in r.iterrows():
-        g = row.geometry
-        if g is None:
-            continue
-        t = _tags(row, cols)
-        if g.geom_type == "MultiLineString":
-            g = max(g.geoms, key=lambda x: x.length)
-        if g.geom_type == "LineString":
-            ways.append({"id": int(row["id"]),
-                         "coords": np.asarray(g.coords, dtype=np.float32),
-                         "tags": t})
-        elif g.geom_type == "Point":
-            nodes.append({"id": int(row["id"]), "lat": float(g.y),
-                          "lon": float(g.x), "tags": t})
-    del r
-    gc.collect()
-
-    # POI: точки и полигоны. Если критерий не поддержан этой версией
-    # pyrosm — НЕ отказываемся от всего: оставляем здания+дороги (карты
-    # 1,2,3,6 работают), POI-слои будут пусты до разбора причины в логах
+    # ДОРОГИ + POI — ОДНИМ проходом custom criteria (быстро, ~5–15 с).
+    # NB: {"highway": True} в pyrosm НЕСТАБИЛЕН (иногда None + "no data for
+    # area") — проверенная форма: СПИСОК значений, как в POI-критерии.
+    # Полный список классов дорог; остановки/платформы дают точки в nodes.
+    _ROAD_CLASSES = [
+        "motorway", "motorway_link", "trunk", "trunk_link",
+        "primary", "primary_link", "secondary", "secondary_link",
+        "tertiary", "tertiary_link", "unclassified", "residential",
+        "road", "service", "track", "path", "footway", "pedestrian",
+        "steps", "cycleway", "living_street", "bridleway",
+        "construction", "proposed", "busway", "bus_guideway",
+        "escape", "rest_area", "services", "raceway", "corridor",
+        "platform", "bus_stop", "bus_station", "tram_stop",
+        "stop_position",
+    ]
     try:
         p = osm.get_data_by_custom_criteria(
             custom_filter={"amenity": True, "shop": True, "craft": True,
                            "office": True, "leisure": True, "emergency": True,
                            "public_transport": True,
-                           "highway": ["bus_stop", "bus_station", "tram_stop",
-                                       "platform", "stop_position"]},
+                           "highway": _ROAD_CLASSES},
             filter_type="keep")  # pyrosm 0.20: только keep/exclude
         cols = list(p.columns)
         for _, row in p.iterrows():
@@ -659,22 +646,25 @@ def _frames_from_pbf(path):
             if g.geom_type == "Point":
                 nodes.append({"id": int(row["id"]), "lat": float(g.y),
                               "lon": float(g.x), "tags": t})
-            elif g.geom_type == "LineString":
-                ways.append({"id": int(row["id"]),
-                             "coords": np.asarray(g.coords, dtype=np.float32),
-                             "tags": t})
-            elif g.geom_type in ("Polygon", "MultiPolygon"):
-                if g.geom_type == "MultiPolygon":
-                    g = max(g.geoms, key=lambda x: x.area)
-                ways.append({"id": int(row["id"]),
-                             "coords": np.asarray(g.exterior.coords,
-                                                  dtype=np.float32),
-                             "tags": t})
+            else:
+                if g.geom_type in ("MultiLineString", "MultiPolygon"):
+                    g = max(g.geoms,
+                            key=lambda x: x.length if x.geom_type == "LineString"
+                            else x.area)
+                if g.geom_type == "LineString":
+                    ways.append({"id": int(row["id"]),
+                                 "coords": np.asarray(g.coords, dtype=np.float32),
+                                 "tags": t})
+                elif g.geom_type == "Polygon":
+                    ways.append({"id": int(row["id"]),
+                                 "coords": np.asarray(g.exterior.coords,
+                                                      dtype=np.float32),
+                                 "tags": t})
         del p
         gc.collect()
     except Exception as e:  # noqa: BLE001
-        logger.warning("POI-критерий pyrosm не сработал (%s: %s) — "
-                       "берём здания+дороги без POI", type(e).__name__, e)
+        logger.warning("criteria pyrosm не сработал (%s: %s) — остаются "
+                       "только здания", type(e).__name__, e)
 
     return (pd.DataFrame(ways, columns=["id", "coords", "tags"]),
             pd.DataFrame(nodes, columns=["id", "lat", "lon", "tags"]))
