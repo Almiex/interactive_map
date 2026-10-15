@@ -1672,9 +1672,10 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         st.warning("Нет данных для отображения: сетка пуста.")
         return
     center = [geo["lat"], geo["lon"]]
-    # prefer_canvas: векторы рисуются на canvas — сотни тысяч полигонов без лагов
-    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True,
-                   prefer_canvas=True)
+    # SVG-рендер (без prefer_canvas): на старых ноутбуках/драйверах canvas
+    # даёт чисто БЕЛЫЙ экран без ошибок. Сетки у нас компактные (сотни
+    # гексов), SVG с ними справляется на любом железе — надёжность важнее
+    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
 
     # верстка тултипов: таблица сжата по содержимому (width:auto),
     # подпись и значение идут плотно, без разъезда на разные края
