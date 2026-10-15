@@ -241,7 +241,7 @@ def _nominatim_geocode(city: str):
             "q": city, "format": "json", "limit": 1, "accept-language": "ru",
             "polygon_geojson": 1,          # полигон административной границы
             "polygon_threshold": 0.0005,   # упрощение границы (меньше трафик)
-        }, headers=HEADERS, timeout=30)
+        }, headers=HEADERS, timeout=15)
     except requests.RequestException as e:
         return "unavailable", None, f"{type(e).__name__}: {e}"
     if r.status_code != 200:   # 429 и прочее — не дожимаем сервер
@@ -266,7 +266,8 @@ def _photon_geocode(city: str):
     try:
         r = requests.get(PHOTON_URL,
                          params={"q": city, "limit": 1, "lang": "ru"},
-                         headers=HEADERS, timeout=15)  # короткий: при недоступности быстрее уйдём на резерв
+                         headers=HEADERS, timeout=6)  # короткий: при недоступности
+                         # быстрее уйдём на резерв
         if r.status_code != 200:
             return "unavailable", None, f"HTTP {r.status_code}"
         feats = r.json().get("features", [])
@@ -305,7 +306,7 @@ def _overpass_geocode(city: str):
         q = f"""[out:json][timeout:35];
 rel["name"~"{name_re}", i]["boundary"="administrative"];
 out tags bb;"""
-        els = _query_overpass(q, timeout=40, attempts=1).get("elements", [])
+        els = _query_overpass(q, timeout=15, attempts=1).get("elements", [])
         if not els:
             return "notfound", None, ""
         # город (admin_level 6/8) предпочтительнее крупных регионов
@@ -469,7 +470,7 @@ def geocode_address(address: str, bbox=None):
     els = []
     for url in OVERPASS_ENDPOINTS[:2]:
         try:
-            r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=35)
+            r = requests.post(url, data={"data": q}, headers=HEADERS, timeout=20)
             if r.status_code == 200:
                 els = r.json().get("elements", [])
                 break
@@ -614,18 +615,27 @@ def _frames_from_pbf(path):
     del b
     gc.collect()
 
-    r = osm.get_network(network_type="all")   # все дороги
+    # дороги — ТЕМ ЖЕ быстрым custom criteria, что и POI: get_network("all")
+    # строит тяжёлые сетевые индексы pyrosm (~1 мин на миллионнике), а
+    # критерий отдаёт сырые way за секунды. highway=True охватывает все
+    # классы дорог; узлы (остановки) уходят в nodes — как в Overpass-пути
+    r = osm.get_data_by_custom_criteria(custom_filter={"highway": True},
+                                        filter_type="keep")
     cols = list(r.columns)
     for _, row in r.iterrows():
         g = row.geometry
         if g is None:
             continue
+        t = _tags(row, cols)
         if g.geom_type == "MultiLineString":
             g = max(g.geoms, key=lambda x: x.length)
         if g.geom_type == "LineString":
             ways.append({"id": int(row["id"]),
                          "coords": np.asarray(g.coords, dtype=np.float32),
-                         "tags": _tags(row, cols)})
+                         "tags": t})
+        elif g.geom_type == "Point":
+            nodes.append({"id": int(row["id"]), "lat": float(g.y),
+                          "lon": float(g.x), "tags": t})
     del r
     gc.collect()
 
@@ -817,7 +827,7 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
                 errors.append(f"{url}: {type(e).__name__}")
                 logger.warning("overpass %s attempt %d: %s: %s",
                                url, attempt + 1, type(e).__name__, e)
-            time.sleep(3 + 3 * attempt)
+            time.sleep(1)
     logger.error("overpass: все зеркала отказали: %s", "; ".join(errors[-5:]))
     raise RuntimeError("Overpass недоступен на всех зеркалах: "
                        + "; ".join(errors[-4:]))
@@ -889,7 +899,7 @@ out body;"""
             q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
             # ВАЖНО: скобки обязательны — фильтр bbox в Overpass: (s,w,n,e)
             q_tile = q_tile.replace("__BBOX__", f"({s0},{w0},{n0},{e0})")
-            els.extend(_query_overpass(q_tile, timeout=150, attempts=2)
+            els.extend(_query_overpass(q_tile, timeout=45, attempts=1)
                        .get("elements", []))
         return els
 
