@@ -990,9 +990,14 @@ def _safe_polygon(coords):
 
 
 def buildings_gdf(ways_df):
-    """Жилые здания с площадью застройки (м², в метрической проекции) и этажностью."""
+    """Жилые здания: площадь застройки (м²) и этажность. ПО ЧАСТЯМ и БЕЗ
+    геометрии в результате: полигоны нужны только для площади, а держать
+    300 тыс. shapely-объектов + копию при перепроекции = OOM на тарифе 1 ГБ
+    (именно это убивало сервер). Возвращает ОБЫЧНЫЙ DataFrame."""
+    import gc
+    _EMPTY = pd.DataFrame(columns=["levels", "area", "lat", "lon"])
     if ways_df.empty:
-        return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
+        return _EMPTY
     mask = ways_df["tags"].apply(
         lambda t: (t.get("building") in RESIDENTIAL_BUILDINGS
                    and t.get("building") not in NON_RESIDENTIAL))
@@ -1000,54 +1005,78 @@ def buildings_gdf(ways_df):
     logger.info("diagnostics: buildings_gdf: всего ways=%d, под маску=%d",
                 len(ways_df), len(sub))
     if sub.empty:
-        return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"], geometry=[], crs="EPSG:4326")
-    recs, geoms = [], []
-    for coords, tags in zip(sub["coords"], sub["tags"]):
-        geom = _safe_polygon(coords)
-        if geom is None or geom.is_empty:
+        return _EMPTY.copy()
+    _CH = 40000  # зданий за чанк; пик = чанк (~50 МБ), а не весь город
+    _ca = sub["coords"].values
+    _ta = sub["tags"].values
+    _parts = []
+    for _s in range(0, len(sub), _CH):
+        _recs, _geoms = [], []
+        for _i in range(_s, min(_s + _CH, len(sub))):
+            _coords, _tags = _ca[_i], _ta[_i]
+            _g = _safe_polygon(_coords)
+            if _g is None or _g.is_empty:
+                continue
+            _recs.append({"levels": _to_int(_tags.get("building:levels"), 1),
+                          "lat": float(_coords[:, 1].mean()),
+                          "lon": float(_coords[:, 0].mean())})
+            _geoms.append(_g)
+        if not _geoms:
             continue
-        recs.append({"levels": _to_int(tags.get("building:levels"), 1),
-                     "lat": float(coords[:, 1].mean()),
-                     "lon": float(coords[:, 0].mean())})
-        geoms.append(geom)
-    if not geoms:
+        _gdf = gpd.GeoDataFrame(_recs, geometry=_geoms, crs="EPSG:4326")
+        _metric = _gdf.to_crs(_gdf.estimate_utm_crs())
+        _gdf["area"] = _metric.area.values
+        _parts.append(_gdf.drop(columns="geometry"))  # геометрия не нужна
+        del _gdf, _metric, _geoms
+        gc.collect()
+    if not _parts:
         logger.info("diagnostics: buildings_gdf: геометрии не собрались")
-        return gpd.GeoDataFrame(columns=["levels", "area", "lat", "lon"],
-                                geometry=[], crs="EPSG:4326")
-    gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs="EPSG:4326")
-    metric = gdf.to_crs(gdf.estimate_utm_crs())
-    gdf["area"] = metric.area.values
-    logger.info("diagnostics: buildings_gdf -> жилых зданий %d", len(gdf))
-    return gdf
+        return _EMPTY.copy()
+    out = pd.concat(_parts, ignore_index=True)
+    logger.info("diagnostics: buildings_gdf -> жилых зданий %d", len(out))
+    return out
 
 def roads_gdf(ways_df):
-    """Дороги с длиной (км, в метрической проекции)."""
+    """Дороги с длиной (км). ПО ЧАСТЯМ и без геометрии в результате —
+    как buildings_gdf (пик RAM в разы ниже). Обычный DataFrame."""
+    import gc
+    from shapely.geometry import LineString
+    _EMPTY = pd.DataFrame(columns=["highway", "len_km", "lat", "lon"])
     if ways_df.empty:
-        return gpd.GeoDataFrame(columns=["highway", "len_km", "lat", "lon"], geometry=[], crs="EPSG:4326")
+        return _EMPTY
     mask = ways_df["tags"].apply(lambda t: "highway" in t)
     sub = ways_df[mask]
     if sub.empty:
-        return gpd.GeoDataFrame(columns=["highway", "len_km", "lat", "lon"], geometry=[], crs="EPSG:4326")
-    from shapely.geometry import LineString
-    recs, geoms = [], []
-    for coords, tags in zip(sub["coords"], sub["tags"]):
-        if len(coords) < 2:
+        return _EMPTY.copy()
+    _CH = 60000
+    _ca = sub["coords"].values
+    _ta = sub["tags"].values
+    _parts = []
+    for _s in range(0, len(sub), _CH):
+        _recs, _geoms = [], []
+        for _i in range(_s, min(_s + _CH, len(sub))):
+            _coords, _tags = _ca[_i], _ta[_i]
+            if len(_coords) < 2:
+                continue
+            try:
+                _g = LineString(_coords)
+            except Exception:  # noqa: BLE001
+                continue
+            _recs.append({"highway": _tags.get("highway", ""),
+                          "lat": float(_coords[:, 1].mean()),
+                          "lon": float(_coords[:, 0].mean())})
+            _geoms.append(_g)
+        if not _geoms:
             continue
-        try:
-            geom = LineString(coords)
-        except Exception:  # noqa: BLE001
-            continue
-        recs.append({"highway": tags.get("highway", ""),
-                     "lat": float(coords[:, 1].mean()),
-                     "lon": float(coords[:, 0].mean())})
-        geoms.append(geom)
-    if not geoms:
-        return gpd.GeoDataFrame(columns=["highway", "len_km", "lat", "lon"],
-                                geometry=[], crs="EPSG:4326")
-    gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs="EPSG:4326")
-    metric = gdf.to_crs(gdf.estimate_utm_crs())
-    gdf["len_km"] = metric.length.values / 1000.0
-    return gdf
+        _gdf = gpd.GeoDataFrame(_recs, geometry=_geoms, crs="EPSG:4326")
+        _metric = _gdf.to_crs(_gdf.estimate_utm_crs())
+        _gdf["len_km"] = _metric.length.values / 1000.0
+        _parts.append(_gdf.drop(columns="geometry"))
+        del _gdf, _metric, _geoms
+        gc.collect()
+    if not _parts:
+        return _EMPTY.copy()
+    return pd.concat(_parts, ignore_index=True)
 
 def dorm_centroids(ways_df):
     """Общежития (building=dormitory) — центроиды для точек и подсчёта по гексам."""
