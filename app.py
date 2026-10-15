@@ -408,11 +408,22 @@ def geocode_address(address: str, bbox=None):
 
     for cand in variants:
         try:
-            _nominatim_throttle()
-            r = requests.get(NOMINATIM_URL, params={
+            _params = {
                 "q": cand, "format": "json", "limit": 1, "accept-language": "ru",
                 "addressdetails": 1,
-            }, headers=HEADERS, timeout=15)
+            }
+            if bbox:
+                # СТРОГО в пределах города: без bounded Nominatim ищет
+                # по миру и может найти «Красных Партизан, 59» в другом
+                # регионе (было: метка в Прочноокопской вместо Краснодара)
+                _s, _n, _w, _e = bbox              # [south, north, west, east]
+                _m = 0.2 * max(_n - _s, _e - _w)   # запас 20% за город
+                _params["viewbox"] = (f"{_w - _m:.5f},{_n + _m:.5f},"
+                                      f"{_e + _m:.5f},{_s - _m:.5f}")
+                _params["bounded"] = 1
+            _nominatim_throttle()
+            r = requests.get(NOMINATIM_URL, params=_params,
+                             headers=HEADERS, timeout=15)
             if r.status_code == 200:
                 data = r.json()
             else:
@@ -711,21 +722,38 @@ def _try_pbf_city(city):
                     "идём в Overpass",
                     os.path.join(PBF_DIR, f"{_canon(key)}.osm.pbf"))
         return None
+    path = None
+    for _attempt in (1, 2):
+        try:
+            # timeout=(подключение 30с, ЧТЕНИЕ 120с) — без таймаута чтения
+            # повторное скачивание с Drive могло висеть вечно: спиннер
+            # крутился, карта не строилась (баг «возврат к городу»)
+            with requests.get(url, stream=True, timeout=(30, 120),
+                              headers=HEADERS) as resp:
+                resp.raise_for_status()
+                size = int(resp.headers.get("content-length", 0) or 0)
+                if size > 600 * 1024 * 1024:
+                    logger.warning("pbf слишком большой (%d МБ) — пропуск",
+                                   size // 2 ** 20)
+                    return None
+                with tempfile.NamedTemporaryFile(suffix=".osm.pbf",
+                                                 delete=False) as f:
+                    for chunk in resp.iter_content(1 << 20):
+                        f.write(chunk)
+                    path = f.name
+            if os.path.getsize(path) < 1_000_000:
+                raise ValueError("скачанный файл < 1 МБ — обрыв")
+            break
+        except Exception as e:  # noqa: BLE001
+            if path and os.path.exists(path):
+                os.unlink(path)
+                path = None
+            if _attempt == 2:
+                raise
+            logger.warning("pbf: скачивание не удалось (%s: %s) — повтор",
+                           type(e).__name__, e)
+    logger.info("pbf скачан: %.1f МБ", os.path.getsize(path) / 2 ** 20)
     try:
-        with requests.get(url, stream=True, timeout=300,
-                          headers=HEADERS) as resp:
-            resp.raise_for_status()
-            size = int(resp.headers.get("content-length", 0) or 0)
-            if size > 600 * 1024 * 1024:
-                logger.warning("pbf слишком большой (%d МБ) — пропуск",
-                               size // 2 ** 20)
-                return None
-            with tempfile.NamedTemporaryFile(suffix=".osm.pbf",
-                                             delete=False) as f:
-                for chunk in resp.iter_content(1 << 20):
-                    f.write(chunk)
-                path = f.name
-        logger.info("pbf скачан: %.1f МБ", os.path.getsize(path) / 2 ** 20)
         frames = _frames_from_pbf(path)
         os.unlink(path)
         logger.info("pbf распарсен: %d ways, %d nodes",
