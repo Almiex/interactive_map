@@ -846,7 +846,28 @@ def fetch_city_data(city: str):
             if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
                 _blats.append(float(_c[:, 1].mean()))
                 _blons.append(float(_c[:, 0].mean()))
-        if len(_blats) >= 200:
+        if len(_blats) >= 500:
+            # ПЛОТНОСТНАЯ обрезка: res-7 ячейки по зданиям, ядро = ячейки
+            # с плотностью >= 3% от максимума + 1 кольцо. Перцентили
+            # (2/98) недостаточны: пригорода агломерации с тысячами
+            # зданий остаются внутри них (Краснодар — облако по агломерации)
+            _ba = np.asarray(_blats); _bo = np.asarray(_blons)
+            _cells7 = [h3.latlng_to_cell(float(a), float(o), 7)
+                       for a, o in zip(_ba, _bo)]
+            _cnt = pd.Series(_cells7).value_counts()
+            _thr = max(50.0, float(_cnt.max()) * 0.03)
+            _core = set(_cnt[_cnt >= _thr].index)
+            _keep = set(_core)
+            for _c in list(_core):
+                _keep.update(h3.grid_disk(_c, 1))
+            _m = pd.Series(_cells7).isin(_keep).values
+            logger.info("density crop: %d зданий -> %d в ядре, thr=%.0f",
+                        len(_ba), int(_m.sum()), _thr)
+            if _m.sum() >= 100:
+                _ba, _bo = _ba[_m], _bo[_m]
+            _s, _n = float(np.percentile(_ba, 1)), float(np.percentile(_ba, 99))
+            _w, _e = float(np.percentile(_bo, 1)), float(np.percentile(_bo, 99))
+        elif len(_blats) >= 200:
             _ba, _bo = np.asarray(_blats), np.asarray(_blons)
             _s, _n = float(np.percentile(_ba, 2)), float(np.percentile(_ba, 98))
             _w, _e = float(np.percentile(_bo, 2)), float(np.percentile(_bo, 98))
