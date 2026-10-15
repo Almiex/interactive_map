@@ -610,7 +610,8 @@ def _frames_from_pbf(path):
         if g.geom_type == "MultiLineString":
             g = max(g.geoms, key=lambda x: x.length)
         if g.geom_type == "LineString":
-            ways.append({"id": int(row["id"]), "coords": list(g.coords),
+            ways.append({"id": int(row["id"]),
+                         "coords": np.asarray(g.coords, dtype=np.float32),
                          "tags": _tags(row, cols)})
     del r
     gc.collect()
@@ -921,8 +922,16 @@ def ways_centroids(ways_df):
     """Центроиды way-объектов (широта/долгота) — для подсчёта POI/остановок-ways."""
     if ways_df.empty:
         return pd.DataFrame(columns=["lat", "lon", "tags"])
-    lat = ways_df["coords"].apply(lambda c: float(c[:, 1].mean()))
-    lon = ways_df["coords"].apply(lambda c: float(c[:, 0].mean()))
+    def _clat(c):
+        a = np.asarray(c, dtype=np.float32)
+        return float(a[:, 1].mean()) if a.ndim == 2 and len(a) else float("nan")
+
+    def _clon(c):
+        a = np.asarray(c, dtype=np.float32)
+        return float(a[:, 0].mean()) if a.ndim == 2 and len(a) else float("nan")
+
+    lat = ways_df["coords"].apply(_clat)
+    lon = ways_df["coords"].apply(_clon)
     return pd.DataFrame({"lat": lat, "lon": lon, "tags": ways_df["tags"]})
 
 def _ring_coords(coords, min_pts):
@@ -1015,8 +1024,8 @@ def dorm_centroids(ways_df):
     if sub.empty:
         return empty
     return pd.DataFrame({
-        "lat": sub["coords"].apply(lambda c: float(c[:, 1].mean())),
-        "lon": sub["coords"].apply(lambda c: float(c[:, 0].mean())),
+        "lat": sub["coords"].apply(_clat),
+        "lon": sub["coords"].apply(_clon),
     })
 
 
@@ -2152,10 +2161,14 @@ if len(grid) > MAX_GRID_CELLS:
              f"лимит {MAX_GRID_CELLS}). Понизьте resolution.")
     st.stop()
 
-with st.spinner("Считаю агрегаты по гексам…"):
-    series, unit, hex_extra, points = _compute_series_cached(
-        map_type, sub_option, res_eff, stored.get("ver", 0),  # сессия из старой версии кода без "ver"
-        kontur_df is not None, m2_per_person)
+try:
+    with st.spinner("Считаю агрегаты по гексам…"):
+        series, unit, hex_extra, points = _compute_series_cached(
+            map_type, sub_option, res_eff, stored.get("ver", 0),
+            kontur_df is not None, m2_per_person)
+except Exception:
+    logger.exception("compute_series упал — полный трейсбэк")  # в UI редатится,
+    raise                                                  # в логах — нет
 # диагностика рассинхрона серия/сетка (ячейки вне сетки = координаты не туда)
 _overlap = len(set(series.index) & set(grid)) if len(series) else 0
 logger.info("diagnostics: серия: len=%d, max=%.1f, пересечение с сеткой=%d/%d",
