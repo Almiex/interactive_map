@@ -41,6 +41,11 @@ from jinja2 import Template as _Jinja2Template
 # --------------------------------------------------------------------------- #
 #  Константы
 # --------------------------------------------------------------------------- #
+# ВАЖНО ДЛЯ requirements.txt: зафиксируйте streamlit-folium==0.22.0 —
+# её фронтенд собран под синтаксис ES2017, который выполняют и старые
+# браузеры (Chrome <2021 на Windows 7/8 и т.п.). Версии 0.23+ требуют
+# современный JS, на древних браузерах карта даёт чистый белый экран
+# БЕЗ ошибок в консоли. Для современных браузеров разницы нет.
 # Порядок — по наблюдаемой живучести с нашего деплоя.
 # overpass-api.de УБРАН: со Streamlit Cloud он стабильно отвечает
 # Connection refused (TCP-бан IP), попытки только съедали время.
@@ -1023,16 +1028,31 @@ out body;"""
     _tiles = _tiled_bboxes(south, west, north, east)
 
     def _run_tiled(q_tpl):
-        els = []
-        for (s0, w0, n0, e0) in _tiles:
+        # проход 1: один заход на тайл (быстро). Зеркала Overpass часто
+        # флакают 500-ми на отдельных запросах — упавшие тайлы собираем
+        # во втором проходе с 2 попытками на зеркало
+        els, failed = [], []
+        for (_s0, _w0, _n0, _e0) in _tiles:
             q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
             # ВАЖНО: скобки обязательны — фильтр bbox в Overpass: (s,w,n,e)
-            q_tile = q_tile.replace("__BBOX__", f"({s0},{w0},{n0},{e0})")
-            els.extend(_query_overpass(q_tile, timeout=45, attempts=1)
-                       .get("elements", []))
+            q_tile = q_tile.replace("__BBOX__", f"({_s0},{_w0},{_n0},{_e0})")
+            try:
+                els.extend(_query_overpass(q_tile, timeout=45, attempts=1)
+                           .get("elements", []))
+            except Exception:  # noqa: BLE001 — тайл упал, попробуем позже
+                failed.append((_s0, _w0, _n0, _e0))
+        if failed:
+            logger.info("повторный проход по %d упавшим тайлам", len(failed))
+            for (_s0, _w0, _n0, _e0) in failed:
+                q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
+                q_tile = q_tile.replace("__BBOX__", f"({_s0},{_w0},{_n0},{_e0})")
+                els.extend(_query_overpass(q_tile, timeout=45, attempts=2)
+                           .get("elements", []))
         return els
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as _pool:
+    # 4 потока, не 8: каждый держит свой ответ в памяти — на тарифе 1 ГБ
+    # половина параллелизма = половина пиковой памяти (защита от OOM-перезагрузок)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
         _fw = _pool.submit(_run_tiled, q_ways)
         _fn = _pool.submit(_run_tiled, q_nodes)
         ways_raw = _fw.result()
