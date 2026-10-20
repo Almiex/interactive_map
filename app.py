@@ -1684,6 +1684,104 @@ class HexTooltip(folium.GeoJsonTooltip):
                      """
     )
 
+def render_plotly_compat(grid, series, unit, geo, marker=None, points=None,
+                         circ_center=None):
+    """АВАРИЙНЫЙ РЕЖИМ: те же данные через Plotly — ВСТРОЕННЫЙ компонент
+    Streamlit (его JS грузится как у самого приложения). Если у пользователя
+    iframe Leaflet молча не выполняется (белая карта), этот режим часто
+    работает. Только просмотр: без кликов, выделения гексов и подсветки."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        st.error("Plotly не установлен: добавьте plotly>=5.18 в requirements.txt")
+        return
+
+    vals = series.reindex(grid).fillna(0.0)
+    vmax = float(vals.max()) if len(vals) else 0.0
+    if not math.isfinite(vmax):
+        vmax = 0.0
+    if vmax <= 0:
+        st.warning("Нет данных для выбранного слоя в этом городе.")
+        vmax = 1.0
+
+    def _pal(t):  # та же гамма-раскраска, что у Leaflet
+        pos = min(max(t, 0.0), 1.0) * (len(COLORS) - 1)
+        i = min(int(pos), len(COLORS) - 2)
+        frac = pos - i
+        return "#" + "".join(
+            f"{round(int(COLORS[i][k:k+2], 16) + (int(COLORS[i+1][k:k+2], 16) - int(COLORS[i][k:k+2], 16)) * frac):02x}"
+            for k in (1, 3, 5))
+
+    gamma = 0.75
+    colorscale = [[i / 24, _pal((i / 24) ** gamma)] for i in range(25)]
+
+    feats, zvals, ids, texts = [], [], [], []
+    for cell in grid:
+        v = float(vals.get(cell, 0.0))
+        if not math.isfinite(v):
+            v = 0.0
+        zvals.append(v)
+        ids.append(cell)
+        texts.append(f"{v:,.0f} {unit}")
+        boundary = h3.cell_to_boundary(cell)
+        ring = [[lng, lat] for lat, lng in boundary]
+        ring.append(ring[0])
+        feats.append({"type": "Feature", "id": cell,
+                      "geometry": {"type": "Polygon", "coordinates": [ring]}})
+
+    Chor = getattr(go, "Choroplethmap", None) or go.Choroplethmapbox
+    Scat = getattr(go, "Scattermap", None) or go.Scattermapbox
+    fig = go.Figure(Chor(
+        geojson={"type": "FeatureCollection", "features": feats},
+        locations=ids, z=zvals, featureidkey="id",
+        colorscale=colorscale, zmin=0, zmax=vmax,
+        marker_opacity=0.55, marker_line_width=0.6,
+        marker_line_color="#555555",
+        text=texts, hoverinfo="text",
+    ))
+
+    def _circle_ring(center, r_km, n=72):  # окружность для Plotly
+        lat0, lon0 = center
+        dlat = r_km / 111.32
+        dlon = r_km / (111.32 * (math.cos(math.radians(lat0)) or 1e-9))
+        lats, lons = [], []
+        for i in range(n + 1):
+            a = 2 * math.pi * i / n
+            lats.append(lat0 + dlat * math.cos(a))
+            lons.append(lon0 + dlon * math.sin(a))
+        return lats, lons
+
+    if circ_center:  # те же три радиуса
+        for r, col in ((1, "#56b4e9"), (2, "#2ca02c"), (5, "#d62728")):
+            la, lo = _circle_ring(circ_center, r)
+            fig.add_trace(Scat(lat=la, lon=lo, mode="lines",
+                               line=dict(color=col, width=2, dash="dash"),
+                               hoverinfo="skip"))
+    if marker:
+        fig.add_trace(Scat(lat=[marker["lat"]], lon=[marker["lon"]],
+                           mode="markers",
+                           marker=dict(size=12, color="#1f6fd6"),
+                           text=[marker["display"]], hoverinfo="text"))
+    if points:
+        fig.add_trace(Scat(
+            lat=[p["lat"] for p in points], lon=[p["lon"] for p in points],
+            mode="markers",
+            marker=dict(size=6, color=[p["color"] for p in points]),
+            text=[f'{p["type"]}: {p["label"]}' for p in points],
+            hoverinfo="text"))
+
+    center = dict(lat=geo["lat"], lon=geo["lon"])
+    try:  # новый API plotly 6 (map), fallback на mapbox (plotly 5)
+        fig.update_layout(map=dict(style="open-street-map",
+                                   center=center, zoom=11))
+    except Exception:  # noqa: BLE001
+        fig.update_layout(mapbox=dict(style="open-street-map",
+                                      center=center, zoom=11))
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=680,
+                      showlegend=False)
+    st.plotly_chart(fig, use_container_width=True, key="compat_map")
+
+
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
                source=None, yzoom=15, gamma=0.6,
@@ -1695,18 +1793,16 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # SVG-рендер (без prefer_canvas): на старых ноутбуках/драйверах canvas
     # даёт чисто БЕЛЫЙ экран без ошибок. Сетки у нас компактные (сотни
     # гексов), SVG с ними справляется на любом железе — надёжность важнее
-    # Две независимые подложки: если OSM недоступен у конкретного пользователя,
-    # клиентский JS автоматически переключится на CartoDB Positron. Слои данных
-    # (гексы/точки) остаются на карте независимо от доступности фоновых тайлов.
-    m = folium.Map(location=center, tiles=None, control_scale=True)
-    _osm_tiles = folium.TileLayer(
-        tiles="OpenStreetMap", name="OpenStreetMap", overlay=False,
-        control=False, show=True,
-    ).add_to(m)
-    _backup_tiles = folium.TileLayer(
-        tiles="CartoDB positron", name="Резервная подложка", overlay=False,
-        control=False, show=False,
-    ).add_to(m)
+    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
+
+    # folium по умолчанию тянет jquery/bootstrap с CDN. В регионах, где CDN
+    # режется (ERR_CONNECTION_CLOSED), это ломает карту. Карте они не нужны
+    # (Leaflet живёт в бандле streamlit-folium) — убираем зависимость
+    for _dep in ("jquery", "bootstrap", "awesome_markers"):
+        try:
+            del m.get_root().header._children[_dep]
+        except KeyError:
+            pass
 
     # верстка тултипов: таблица сжата по содержимому (width:auto),
     # подпись и значение идут плотно, без разъезда на разные края
@@ -1791,9 +1887,21 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
             out.append(f"{round(a + (b - a) * frac):02x}")
         return "#" + "".join(out)
 
-    cm_legend = LinearColormap([_palette_at((i / 24) ** gamma) for i in range(25)],
-                               vmin=0, vmax=vmax)
-    cm_legend.caption = f"{map_type} — {unit}"
+    # ЛЕГЕНДА — собственный HTML/CSS-градиент вместо branca LinearColormap.
+    # branca тянет d3.js с CDN, и если CDN недоступен (блокировки CDN в
+    # регионе — ERR_CONNECTION_CLOSED на d3.v4.min.js), падение скрипта
+    # легенды убивало ВСЮ карту (белый экран, без ошибок в консоли родителя)
+    _grad = ", ".join(_palette_at(i / 24) for i in range(25))
+    _legend_html = (
+        '<div style="position: fixed; top: 10px; right: 10px; z-index: 9998;'
+        ' background: rgba(255,255,255,0.92); padding: 8px 10px;'
+        ' border-radius: 6px; border: 1px solid #999; font-size: 12px;">'
+        + f'<div style="margin-bottom:4px;">{map_type} &mdash; {unit}</div>'
+        + f'<div style="width:220px;height:12px;border:1px solid #999;'
+          f'background:linear-gradient(to right,{_grad});"></div>'
+        + '<div style="display:flex;justify-content:space-between;">'
+        + f'<span>0</span><span>{vmax:,.0f}</span></div></div>')
+    m.get_root().html.add_child(folium.Element(_legend_html))
 
     extra_cols = list(hex_extra.columns) if hex_extra is not None else []
     # ключи свойств — машинно-безопасные (x0, x1…): русские ключи с пробелами
@@ -1856,7 +1964,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                                         localize=False, max_width=280)),
     ).add_to(m)
 
-    cm_legend.add_to(m)
+    # (легенда добавлена выше как HTML/CSS — без d3/CDN)
 
     # легенда типов точек — каноничный паттерн MacroElement (стабилен в streamlit-folium)
     if legend:
@@ -1951,93 +2059,6 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 """)
     _view_saver.city_tag = _city_tag
     m.add_child(_view_saver)
-
-    # Диагностика тайлов и автоматический резервный фон. Ошибки загрузки
-    # изображений тайлов обычно НЕ являются JS-ошибками, поэтому старый
-    # window.onerror их не замечает. После нескольких tileerror или таймаута
-    # отключаем OSM и включаем CartoDB. Если недоступны оба источника, выводим
-    # сообщение, но сохраняем векторные гексы/точки поверх пустого фона.
-    _tile_fallback = MacroElement()
-    _tile_fallback._template = Template("""
-{% macro script(this, kwargs) %}
-(function() {
-  var map = {{ this._parent.get_name() }};
-  var osm = {{ this.osm_name }};
-  var backup = {{ this.backup_name }};
-  var osmErrors = 0;
-  var osmLoaded = false;
-  var backupLoaded = false;
-  var switched = false;
-  var backupErrors = 0;
-  var statusId = 'geohex-tile-status';
-
-  function status(message, isError) {
-    try {
-      var el = document.getElementById(statusId);
-      if (!el) {
-        el = document.createElement('div');
-        el.id = statusId;
-        el.style.cssText = 'position:absolute;top:8px;right:8px;z-index:10000;' +
-          'max-width:360px;padding:8px 11px;border-radius:5px;' +
-          'font:12px/1.4 sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25);' +
-          'background:#fff;color:#222;white-space:pre-wrap;';
-        (map.getContainer() || document.body).appendChild(el);
-      }
-      el.style.border = isError ? '1px solid #b00020' : '1px solid #888';
-      el.textContent = message;
-      el.style.display = 'block';
-    } catch (e) {}
-  }
-
-  function useBackup(reason) {
-    if (switched) return;
-    switched = true;
-    try {
-      if (map.hasLayer(osm)) map.removeLayer(osm);
-      backup.addTo(map);
-      status('Подложка OpenStreetMap недоступна. Включена резервная карта. ' +
-             (reason || ''), false);
-    } catch (e) {
-      status('Не удалось включить резервную подложку. Гексы могут оставаться ' +
-             'видимыми без фона карты. ' + (e && e.message ? e.message : ''), true);
-    }
-    // Если резервная подложка тоже не отвечает, сообщаем об этом явно.
-    setTimeout(function() {
-      if (!backupLoaded && backupErrors > 0) {
-        status('Не загружаются ни OpenStreetMap, ни резервная подложка. ' +
-               'Проверьте доступ к картографическим серверам/сетевые фильтры. ' +
-               'Расчётные гексы должны оставаться доступны.', true);
-      } else if (!backupLoaded) {
-        status('Резервная подложка пока не загрузилась. Если фон останется пустым, ' +
-               'проверьте доступ к картографическим серверам. Гексы должны ' +
-               'оставаться доступны.', true);
-      }
-    }, 8000);
-  }
-
-  osm.on('tileload', function() { osmLoaded = true; });
-  osm.on('tileerror', function() {
-    osmErrors += 1;
-    if (osmErrors >= 4) {
-      useBackup('Зафиксированы повторяющиеся ошибки загрузки тайлов.');
-    }
-  });
-  backup.on('tileload', function() { backupLoaded = true; });
-  backup.on('tileerror', function() { backupErrors += 1; });
-
-  // На некоторых сетях запросы не завершаются быстро и tileerror не приходит.
-  setTimeout(function() {
-    if ((!osmLoaded || osmErrors >= 3) && !switched) {
-      useBackup(osmErrors ? 'Тайлы OSM загрузились с ошибками или не загрузились.' :
-                'Тайлы OSM не ответили вовремя.');
-    }
-  }, 6500);
-})();
-{% endmacro %}
-""")
-    _tile_fallback.osm_name = _osm_tiles.get_name()
-    _tile_fallback.backup_name = _backup_tiles.get_name()
-    m.add_child(_tile_fallback)
 
     # Круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
     # Ключевое: они живут в ОТДЕЛЬНОМ FeatureGroup и передаются через
@@ -2401,6 +2422,14 @@ with st.sidebar:
         st.caption(f"⚠️ Kontur Population рассчитан в res{_max_res} — "
                    f"детализация выше res{_max_res} недоступна. "
                    f"Переключитесь на суррогатный источник для res 9–10.")
+
+    st.radio("Отрисовка карты",
+             ["Интерактивная (Leaflet)", "Упрощённая (Plotly)"],
+             key="render_mode",
+             help="Если карта на вашем устройстве чисто белая — переключите "
+                  "в упрощённый режим: те же гексы, круги и точки через "
+                  "встроенный движок Streamlit. Минус: без кликов и "
+                  "выделения гексов, только просмотр.")
 
     st.header("Радиусы вокруг гекса")
     def _mode_changed():
@@ -2854,7 +2883,11 @@ if map_type.startswith("1."):
     _src = ("Kontur (2023)" if kontur_df is not None
             else "OSM: суррогат")
 
-render_map(grid, series, unit, geo, map_type, marker=marker,
+if str(st.session_state.get("render_mode", "")).startswith("Упрощённая"):
+    render_plotly_compat(grid, series, unit, geo, marker=marker,
+                         points=points, circ_center=_circ_center)
+else:
+    render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
            legend=legend, source=_src,
            yzoom={7: 13, 8: 15, 9: 16, 10: 17}.get(res_eff, 15),
