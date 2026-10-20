@@ -7,6 +7,26 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
   * Здания / дороги / POI    — Overpass API (OpenStreetMap)
   * Реальная численность     — Kontur Population (локальный файл, https://data.humdata.org)
 
+ЗАЩИТА ОТ БЕЛОЙ КАРТЫ ПРИ БЛОКИРОВКЕ CDN ПРОВАЙДЕРОМ
+  (симптом: белый фон без ошибок в консоли, «вчера работало — сегодня нет»):
+  1) Легенда шкалы — чистый CSS (_css_legend), БЕЗ branca LinearColormap:
+     тот вставлял <script src="https://d3js.org/d3.v4.min.js"> в <head>;
+     синхронный внешний скрипт стопорил парсинг iframe — карта не создавалась.
+  2) leaflet.js/css инлайнятся из папки static/ (_inline_leaflet) вместо
+     ссылок с unpkg.com. СКАЧАТЬ ОДИН РАЗ и закоммитить в репозиторий рядом
+     с app.py (версию смотрите в ссылке unpkg внутри сгенерированной карты):
+       static/leaflet.js   (https://unpkg.com/leaflet@<ver>/dist/leaflet.js)
+       static/leaflet.css  (https://unpkg.com/leaflet@<ver>/dist/leaflet.css)
+     Файлов нет — остаются внешние ссылки (поведение как раньше).
+  3) Метка адреса — DivIcon с эмодзи: штатный folium.Icon тянул
+     awesome-markers + glyphicons/font-awesome с ещё двух CDN.
+  4) Подложки — цепочка OSM -> CartoDB (явный URL cartocdn, без ключа)
+     -> Wikimedia с авто-переключением при блокировке любого хоста.
+  5) Overpass — CIRCUIT BREAKER: упавшее зеркало уходит в карантин на 5 мин
+     и НЕ перебирается по кругу каждым тайлом; общий бюджет 240 с на
+     тайловую выгрузку. Для городов с выгрузкой PBF Overpass вообще не
+     вызывается — ни за данными, ни ради границы.
+
 Запуск:  streamlit run app.py
 """
 
@@ -20,6 +40,8 @@ import hashlib
 import requests
 import concurrent.futures
 import threading
+import pathlib
+import os
 
 logger = logging.getLogger("geohex")  # логи видны в Streamlit Cloud: Manage app → Logs
 logging.basicConfig(
@@ -710,6 +732,47 @@ def _frames_from_pbf(path):
             pd.DataFrame(nodes, columns=["id", "lat", "lon", "tags"]))
 
 
+def _pbf_configured(city) -> bool:
+    """Есть ли для города сконфигурированная выгрузка PBF: локальный файл
+    в cities/ (включая явное сопоставление CITY_FILES) или ссылка в
+    BBBIKE_READY/CUSTOM_PBF. Ключи сравниваются канонически."""
+    key = re.sub(r"\s+", "_", city.strip().lower())
+    if os.path.isdir(PBF_DIR):
+        try:
+            files = {_canon_key(n) for n in os.listdir(PBF_DIR)}
+            if _canon_key(f"{key}.osm.pbf") in files:
+                return True
+            for cfg in CITY_FILES.get(key, []):
+                if _canon_key(cfg) in files:
+                    return True
+        except OSError:
+            pass
+    cfg = {_canon_key(k): v for k, v in {**BBBIKE_READY, **CUSTOM_PBF}.items()}
+    return _canon_key(key) in cfg
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _geocode_for_pbf(city):
+    """Геокодинг ТОЛЬКО внешними сервисами (Photon -> Nominatim), БЕЗ
+    Overpass: для PBF-городов полигон границы — приятный бонус, а не
+    необходимость (есть CUSTOM_BBOX и обрезка по зданиям файла), а перебор
+    зеркал Overpass ради него — те самые минуты бесполезного стука.
+    None — оба внешних геокодера отказали; границу дадим локально."""
+    status, geo, err = _photon_geocode(city)
+    logger.info("geocode(pbf) %s: photon=%s %s", city, status, err)
+    if status == "ok":
+        st_, geo2, err2 = _nominatim_geocode(city)
+        if st_ == "ok" and geo2.get("geojson"):
+            geo["geojson"] = geo2["geojson"]
+            geo["bbox"] = geo2["bbox"]
+            geo["display"] = geo2["display"]
+        return geo
+    status2, geo2, err2 = _nominatim_geocode(city)
+    if status2 == "ok":
+        return geo2
+    return None
+
+
 def _try_pbf_city(city):
     """Скачать готовую/кастомную выгрузку BBBike и распарсить pyrosm.
     Любая неудача → None (вызывающий код идёт по тайловому Overpass)."""
@@ -872,13 +935,28 @@ def _tiled_bboxes(south, west, north, east):
     return tiles
 
 
+MIRROR_COOLDOWN = 300          # сек «карантина» зеркала после ошибки
+OVERPASS_TILE_BUDGET = 240     # общий бюджет (сек) на тайловую выгрузку города
+_MIRROR_FAIL = {}              # url -> monotonic-момент конца карантина
+
+
 def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
     """timeout/attempts: у больших выгрузок данных — щедрые значения (600/2),
     у маленьких служебных запросов (геокодинг) — малые: мёртвое/тупящее
-    зеркало с timeout=600 иначе вешает приложение на многие минуты."""
+    зеркало с timeout=600 иначе вешает приложение на многие минуты.
+
+    CIRCUIT BREAKER: зеркало, вернувшее таймаут/HTTP-ошибку, уходит в
+    карантин на MIRROR_COOLDOWN секунд. Пока лежит Overpass, КАЖДЫЙ тайл
+    КАЖДОГО запроса иначе перебирал все 4 зеркала подряд — сотни бесполезных
+    попыток и десятки минут впустую (логи: 12+ минут перебора на город без
+    выгрузки). Если все зеркала в карантине — сразу понятная ошибка, без
+    единого сетевого вызова. Успех снимает карантин с зеркала."""
     errors = []
+    now0 = time.monotonic()
     for url in OVERPASS_ENDPOINTS:
-        for attempt in range(attempts):  # заходы на зеркало с нарастающей паузой
+        if time.monotonic() < _MIRROR_FAIL.get(url, 0.0):
+            continue   # зеркало в карантине — не трогаем
+        for attempt in range(attempts):  # заходы на зеркало с паузой
             try:
                 _t0 = time.monotonic()
                 r = requests.post(url, data={"data": q}, headers=HEADERS,
@@ -887,17 +965,28 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
                 if r.status_code == 200:
                     global _LAST_OVERPASS_MIRROR
                     _LAST_OVERPASS_MIRROR = url
+                    _MIRROR_FAIL.pop(url, None)  # зеркало живо — карантин снят
                     logger.info("overpass ok: %s за %.1fs (%d байт)",
                                 url, _dt, len(r.content))
                     return r.json()
                 errors.append(f"{url}: HTTP {r.status_code}")
-                logger.warning("overpass %s attempt %d: HTTP %s",
-                               url, attempt + 1, r.status_code)
+                _MIRROR_FAIL[url] = time.monotonic() + MIRROR_COOLDOWN
+                logger.warning("overpass %s attempt %d: HTTP %s — зеркало в "
+                               "карантине %dс", url, attempt + 1,
+                               r.status_code, MIRROR_COOLDOWN)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{url}: {type(e).__name__}")
-                logger.warning("overpass %s attempt %d: %s: %s",
-                               url, attempt + 1, type(e).__name__, e)
+                _MIRROR_FAIL[url] = time.monotonic() + MIRROR_COOLDOWN
+                logger.warning("overpass %s attempt %d: %s: %s — зеркало в "
+                               "карантине %dс", url, attempt + 1,
+                               type(e).__name__, e, MIRROR_COOLDOWN)
             time.sleep(1)
+    if not errors:
+        # все зеркала молча пропущены — до конца карантина самого долгого
+        left = max(int(max(_MIRROR_FAIL.get(u, 0) for u in OVERPASS_ENDPOINTS)
+                       - now0), 1)
+        raise RuntimeError(f"все зеркала Overpass в карантине после недавних "
+                           f"ошибок — повторите через ~{left} сек")
     logger.error("overpass: все зеркала отказали: %s", "; ".join(errors[-5:]))
     raise RuntimeError("Overpass недоступен на всех зеркалах: "
                        + "; ".join(errors[-4:]))
@@ -912,36 +1001,41 @@ def fetch_city_data(city: str):
 
 
 def _fetch_city_data_locked(city: str):
-    """Данные города. ПЛАН Б ПЕРВЫМ: если для города есть выгрузка PBF —
-    геокодеры вообще не нужны (они часто лежат/банят IP): границу города
-    берём из экстента координат самого файла. Геокодер (Photon → Nominatim
-    → Overpass) вызываем ТОЛЬКО когда PBF нет — для границы под тайловый
-    Overpass."""
-    # ПЛАН Б: локальный файл или ссылка -> pyrosm. Объекты — из файла,
-    # ГРАНИЦУ — от геокодера (результат кэшируется на сутки, повторные
-    # загрузки мгновенные; если геокодеры отказали — приблизительная
-    # обрезка по плотности зданий: город без соседних агломераций
-    # плотностью не отделить — Усть-Лабинск такой же плотный, как Краснодар).
-    # ГРАНИЦА — СНАЧАЛА: геокодер быстрый (кэш на сутки), а парсинг PBF
-    # идёт минуту — геокодить ПОСЛЕ парсинга значило бы потерять это время
-    # на каждом фолбэке. Геокодеры мертвы -> geo None, границу возьмём из
-    # зданий файла.
-    try:
-        geo = geocode_city(city)
-    except Exception as e:  # noqa: BLE001 — геокодеры не критичны
-        logger.warning("геокодеры отказали (%s) — граница по зданиям", e)
-        geo = None
-
-    # ПЛАН Б: локальный файл или ссылка -> pyrosm (объекты)
-    _pbf = _try_pbf_city(city)
-    if _pbf is not None:
-        _ways_df, _nodes_df = _pbf[0], _pbf[1]
-        if geo is not None:
-            geo["display"] = f"{city.strip()} (выгрузка PBF)"
-            geo["src"] = "pbf"
-            logger.info("fetch_city_data %s: данные из PBF, граница от "
-                        "геокодера", city)
-            return geo, _nodes_df, _ways_df
+    """Данные города. ПОРЯДОК ЖЁСТКИЙ, два пути без смешения:
+    1) Город с выгрузкой (_pbf_configured) -> файл качаем/парсим СРАЗУ, без
+       единого вызова геокодеров (photon стабильно 400, nominatim 429 — их
+       опрос лишь добавлял 8–20 с ожидания). Граница: CUSTOM_BBOX (есть у
+       всех 15 из конфига) -> эвристика по зданиям -> перцентили. Внешний
+       геокод (Photon -> Nominatim, БЕЗ Overpass) — лишь бонус ради полигона
+       границы и лишь если CUSTOM_BBOX нет. Overpass здесь не вызывается.
+    2) Выгрузки нет или обрыв -> полный геокод (Photon -> Nominatim ->
+       Overpass) + тайловый Overpass, всё под circuit breaker'ом и общим
+       бюджетом времени: лежачее зеркало в карантин, а не перебор по кругу."""
+    # ── 1) ВЫГРУЗКА СРАЗУ, БЕЗ ОЖИДАНИЯ ГЕОКОДЕРОВ ───────────────────────
+    # Сначала локальный файл/ссылка на Диск — потом всё остальное. Юзера НЕ
+    # заставляем ждать мёртвые геокодеры: photon стабильно HTTP 400, nominatim
+    # 429 (см. логи деплоя) — опрос перед загрузкой давал 8–20 с мёртвого
+    # веса на КАЖДОМ городе. Внешний геокод — ТОЛЬКО после успешного парсинга,
+    # ТОЛЬКО если нет CUSTOM_BBOX (он есть у всех 15 городов из конфига — для
+    # них геокодер вообще не трогаем) и ТОЛЬКО ради полигона границы.
+    # Overpass на этом пути не вызывается НИ РАЗУ.
+    if _pbf_configured(city):
+        _pbf = _try_pbf_city(city)
+        if _pbf is not None:
+            _ways_df, _nodes_df = _pbf[0], _pbf[1]
+            geo = None
+            if _canon_key(city) not in {_canon_key(k) for k in CUSTOM_BBOX}:
+                try:
+                    geo = _geocode_for_pbf(city)
+                except Exception as e:  # noqa: BLE001 — геокодеры не критичны
+                    logger.warning("внешние геокодеры отказали (%s)", e)
+                    geo = None
+            if geo is not None:
+                geo["display"] = f"{city.strip()} (выгрузка PBF)"
+                geo["src"] = "pbf"
+                logger.info("fetch_city_data %s: данные из PBF, граница от "
+                            "внешнего геокодера", city)
+                return geo, _nodes_df, _ways_df
         # fallback-граница: 1) CUSTOM_BBOX (ручные, точные) ->
         # 2) эвристика по зданиям (плотное ядро + связность) ->
         # 3) перцентили 2/98 по всем жилым зданиям
@@ -978,6 +1072,17 @@ def _fetch_city_data_locked(city: str):
                             "приблизительная граница по зданиям", city)
                 return geo, _nodes_df, _ways_df
         logger.warning("PBF без зданий и геокодеров — данных нет")
+
+    # ── 2) ВЫГРУЗКИ НЕТ (или файл оборвался): геокод -> тайлы Overpass ───
+    # Дошли сюда — значит, города нет в конфиге выгрузок либо скачивание
+    # сорвалось: ТЕПЕРЬ разрешаем сеть к геокодерам и Overpass (под circuit
+    # breaker'ом и общим бюджетом — лежачее зеркало мгновенно в карантине,
+    # а не перебирается по кругу полчаса).
+    try:
+        geo = geocode_city(city)
+    except Exception as e:  # noqa: BLE001 — геокодеры не критичны
+        logger.warning("геокодеры отказали (%s) — граница по зданиям", e)
+        geo = None
 
     # ПЛАН А: тайловый Overpass по границе от геокодера
     if geo is None:
@@ -1030,9 +1135,18 @@ out body;"""
     def _run_tiled(q_tpl):
         # проход 1: один заход на тайл (быстро). Зеркала Overpass часто
         # флакают 500-ми на отдельных запросах — упавшие тайлы собираем
-        # во втором проходе с 2 попытками на зеркало
+        # во втором проходе с 2 попытками на зеркало.
+        # БЮДЖЕТ: на всю тайловую выгрузку — OVERPASS_TILE_BUDGET сек: при
+        # лежачем Overpassе честно падаем с понятной ошибкой, а не крутим
+        # перебор зеркал по кругу десятки минут (см. MIRROR_COOLDOWN).
         els, failed = [], []
+        deadline = time.monotonic() + OVERPASS_TILE_BUDGET
         for (_s0, _w0, _n0, _e0) in _tiles:
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"Overpass не отвечает: бюджет {OVERPASS_TILE_BUDGET} с "
+                    f"на выгрузку города исчерпан. Подождите несколько минут "
+                    f"или добавьте выгрузку города в cities/ либо CUSTOM_PBF.")
             q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
             # ВАЖНО: скобки обязательны — фильтр bbox в Overpass: (s,w,n,e)
             q_tile = q_tile.replace("__BBOX__", f"({_s0},{_w0},{_n0},{_e0})")
@@ -1044,6 +1158,10 @@ out body;"""
         if failed:
             logger.info("повторный проход по %d упавшим тайлам", len(failed))
             for (_s0, _w0, _n0, _e0) in failed:
+                if time.monotonic() > deadline:
+                    logger.warning("бюджет времени на повторный проход "
+                                   "исчерпан — %d тайлов пропущено", len(failed))
+                    break
                 q_tile = q_tpl.replace("[timeout:300]", "[timeout:120]")
                 q_tile = q_tile.replace("__BBOX__", f"({_s0},{_w0},{_n0},{_e0})")
                 els.extend(_query_overpass(q_tile, timeout=45, attempts=2)
@@ -1633,6 +1751,85 @@ COLORS = ["#2c7fb8", "#41b6c4", "#7fcdbb", "#ffffb2", "#ffeda0",
           "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#f03b20", "#bd0026"]
 
 
+# --------------------------------------------------------------------------- #
+#  Защита карты от региональной блокировки CDN (белый фон без ошибок)
+# --------------------------------------------------------------------------- #
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+
+
+def _palette_at(t):
+    """Цвет палитры COLORS в позиции t ∈ [0,1] — прямое линейное
+    интерполирование между hex-стопами (то же, что делал LinearColormap
+    внутри style_function). Раньше была локальной в render_map; вынесена
+    на уровень модуля, чтобы ей пользовались и заливка гексов, и
+    CSS-легенда — шкала и раскраска совпадают точно."""
+    pos = min(max(t, 0.0), 1.0) * (len(COLORS) - 1)
+    i = min(int(pos), len(COLORS) - 2)
+    frac = pos - i
+    out = []
+    for k in (1, 3, 5):
+        a, b = int(COLORS[i][k:k + 2], 16), int(COLORS[i + 1][k:k + 2], 16)
+        out.append(f"{round(a + (b - a) * frac):02x}")
+    return "#" + "".join(out)
+
+
+def _css_legend(caption, vmax, gamma=0.75):
+    """Легенда шкалы на чистом CSS вместо branca LinearColormap.
+    branca вставляет в <head> <script src="https://d3js.org/d3.v4.min.js">:
+    при блокировке этого CDN провайдером синхронный внешний скрипт
+    стопорил парсинг iframe — и карта уходила в белый экран без единой
+    ошибки в родительской консоли. Здесь 25 полосок, окрашенных тем же
+    _palette_at((i/24)**gamma), что и заливка гексов, — внешних запросов 0,
+    расхождения шкалы и карты нет. NB: строки с {% ... %} собираются
+    конкатенацией, НЕ f-строкой (f-string не переваривает '{')."""
+    from branca.element import MacroElement, Template
+    vmax_lbl = (f"{vmax:,.0f}" if vmax >= 100
+                else f"{vmax:.2f}".rstrip("0").rstrip("."))
+    stops = "".join(
+        f"<span style='flex:1;background:{_palette_at((i / 24) ** gamma)};'></span>"
+        for i in range(25))
+    macro = MacroElement()
+    macro._template = Template(
+        "{% macro html(this, kwargs) %}"
+        "<div style='position:fixed;bottom:30px;right:60px;z-index:9999;"
+        "background:rgba(255,255,255,0.92);padding:6px 10px;border-radius:6px;"
+        "border:1px solid #999;font-size:12px;line-height:1.3;'>"
+        "<div style='margin-bottom:3px;max-width:220px;'>" + caption + "</div>"
+        "<div style='display:flex;width:200px;height:12px;border:1px solid #888;'>"
+        + stops + "</div>"
+        "<div style='display:flex;justify-content:space-between;width:200px;'>"
+        "<span>0</span><span>" + vmax_lbl + "</span></div></div>"
+        "{% endmacro %}")
+    return macro
+
+
+def _inline_leaflet(fig):
+    """Подмена внешних unpkg-ссылок Leaflet (javascript + css в <head>
+    фигуры) на инлайн-код локальных файлов static/leaflet.js и
+    static/leaflet.css. unpkg — вторая CDN-точка отказа: если он не
+    отвечает, 'L' не определён и карта не создаётся вовсе. Файлы кладутся
+    в репозиторий один раз (рядом с app.py, как cities/). Файлов нет —
+    внешние ссылки сохраняются (поведение как раньше, без регресса).
+    Возвращает True, если обе подмены прошли."""
+    import branca.element as be
+    ok_js = ok_css = False
+    for name, child in list(fig.header._children.items()):
+        url = getattr(child, "url", "") or ""
+        if isinstance(child, be.JavascriptLink) and "leaflet" in url:
+            p = _STATIC_DIR / "leaflet.js"
+            if p.exists():
+                code = p.read_text(encoding="utf-8").replace("</script>", "<" + "\\/" + "script>")
+                fig.header._children[name] = be.Element(f"<script>{code}</script>")
+                ok_js = True
+        elif isinstance(child, be.CssLink) and "leaflet" in url:
+            p = _STATIC_DIR / "leaflet.css"
+            if p.exists():
+                fig.header._children[name] = be.Element(
+                    f"<style>{p.read_text(encoding='utf-8')}</style>")
+                ok_css = True
+    return ok_js and ok_css
+
+
 class HexTooltip(folium.GeoJsonTooltip):
     """Тултип БЕЗ табличной вёрстки folium: каждая строка — 'подпись: значение'
     инлайном. Штатный шаблон рисует <table>, где колонка подписей шириной
@@ -1684,104 +1881,6 @@ class HexTooltip(folium.GeoJsonTooltip):
                      """
     )
 
-def render_plotly_compat(grid, series, unit, geo, marker=None, points=None,
-                         circ_center=None):
-    """АВАРИЙНЫЙ РЕЖИМ: те же данные через Plotly — ВСТРОЕННЫЙ компонент
-    Streamlit (его JS грузится как у самого приложения). Если у пользователя
-    iframe Leaflet молча не выполняется (белая карта), этот режим часто
-    работает. Только просмотр: без кликов, выделения гексов и подсветки."""
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        st.error("Plotly не установлен: добавьте plotly>=5.18 в requirements.txt")
-        return
-
-    vals = series.reindex(grid).fillna(0.0)
-    vmax = float(vals.max()) if len(vals) else 0.0
-    if not math.isfinite(vmax):
-        vmax = 0.0
-    if vmax <= 0:
-        st.warning("Нет данных для выбранного слоя в этом городе.")
-        vmax = 1.0
-
-    def _pal(t):  # та же гамма-раскраска, что у Leaflet
-        pos = min(max(t, 0.0), 1.0) * (len(COLORS) - 1)
-        i = min(int(pos), len(COLORS) - 2)
-        frac = pos - i
-        return "#" + "".join(
-            f"{round(int(COLORS[i][k:k+2], 16) + (int(COLORS[i+1][k:k+2], 16) - int(COLORS[i][k:k+2], 16)) * frac):02x}"
-            for k in (1, 3, 5))
-
-    gamma = 0.75
-    colorscale = [[i / 24, _pal((i / 24) ** gamma)] for i in range(25)]
-
-    feats, zvals, ids, texts = [], [], [], []
-    for cell in grid:
-        v = float(vals.get(cell, 0.0))
-        if not math.isfinite(v):
-            v = 0.0
-        zvals.append(v)
-        ids.append(cell)
-        texts.append(f"{v:,.0f} {unit}")
-        boundary = h3.cell_to_boundary(cell)
-        ring = [[lng, lat] for lat, lng in boundary]
-        ring.append(ring[0])
-        feats.append({"type": "Feature", "id": cell,
-                      "geometry": {"type": "Polygon", "coordinates": [ring]}})
-
-    Chor = getattr(go, "Choroplethmap", None) or go.Choroplethmapbox
-    Scat = getattr(go, "Scattermap", None) or go.Scattermapbox
-    fig = go.Figure(Chor(
-        geojson={"type": "FeatureCollection", "features": feats},
-        locations=ids, z=zvals, featureidkey="id",
-        colorscale=colorscale, zmin=0, zmax=vmax,
-        marker_opacity=0.55, marker_line_width=0.6,
-        marker_line_color="#555555",
-        text=texts, hoverinfo="text",
-    ))
-
-    def _circle_ring(center, r_km, n=72):  # окружность для Plotly
-        lat0, lon0 = center
-        dlat = r_km / 111.32
-        dlon = r_km / (111.32 * (math.cos(math.radians(lat0)) or 1e-9))
-        lats, lons = [], []
-        for i in range(n + 1):
-            a = 2 * math.pi * i / n
-            lats.append(lat0 + dlat * math.cos(a))
-            lons.append(lon0 + dlon * math.sin(a))
-        return lats, lons
-
-    if circ_center:  # те же три радиуса
-        for r, col in ((1, "#56b4e9"), (2, "#2ca02c"), (5, "#d62728")):
-            la, lo = _circle_ring(circ_center, r)
-            fig.add_trace(Scat(lat=la, lon=lo, mode="lines",
-                               line=dict(color=col, width=2, dash="dash"),
-                               hoverinfo="skip"))
-    if marker:
-        fig.add_trace(Scat(lat=[marker["lat"]], lon=[marker["lon"]],
-                           mode="markers",
-                           marker=dict(size=12, color="#1f6fd6"),
-                           text=[marker["display"]], hoverinfo="text"))
-    if points:
-        fig.add_trace(Scat(
-            lat=[p["lat"] for p in points], lon=[p["lon"] for p in points],
-            mode="markers",
-            marker=dict(size=6, color=[p["color"] for p in points]),
-            text=[f'{p["type"]}: {p["label"]}' for p in points],
-            hoverinfo="text"))
-
-    center = dict(lat=geo["lat"], lon=geo["lon"])
-    try:  # новый API plotly 6 (map), fallback на mapbox (plotly 5)
-        fig.update_layout(map=dict(style="open-street-map",
-                                   center=center, zoom=11))
-    except Exception:  # noqa: BLE001
-        fig.update_layout(mapbox=dict(style="open-street-map",
-                                      center=center, zoom=11))
-    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=680,
-                      showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, key="compat_map")
-
-
 def render_map(grid, series, unit, geo, map_type, marker=None,
                points=None, hex_extra=None, extra_aliases=None, legend=None,
                source=None, yzoom=15, gamma=0.6,
@@ -1793,16 +1892,29 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # SVG-рендер (без prefer_canvas): на старых ноутбуках/драйверах canvas
     # даёт чисто БЕЛЫЙ экран без ошибок. Сетки у нас компактные (сотни
     # гексов), SVG с ними справляется на любом железе — надёжность важнее
-    m = folium.Map(location=center, tiles="OpenStreetMap", control_scale=True)
-
-    # folium по умолчанию тянет jquery/bootstrap с CDN. В регионах, где CDN
-    # режется (ERR_CONNECTION_CLOSED), это ломает карту. Карте они не нужны
-    # (Leaflet живёт в бандле streamlit-folium) — убираем зависимость
-    for _dep in ("jquery", "bootstrap", "awesome_markers"):
-        try:
-            del m.get_root().header._children[_dep]
-        except KeyError:
-            pass
+    # Две независимые подложки: если OSM недоступен у конкретного пользователя,
+    # клиентский JS автоматически переключится на CartoDB Positron. Слои данных
+    # (гексы/точки) остаются на карте независимо от доступности фоновых тайлов.
+    m = folium.Map(location=center, tiles=None, control_scale=True)
+    _osm_tiles = folium.TileLayer(
+        tiles="OpenStreetMap", name="OpenStreetMap", overlay=False,
+        control=False, show=True,
+    ).add_to(m)
+    # NB: tiles="CartoDB positron" в folium 0.20 требует API-ключ CARTO и
+    # отдаёт тайлы с водяным знаком «API KEY REQUIRED» (это тот самый
+    # водяной знак на скриншотах) — поэтому явный URL cartocdn, ключ не нужен
+    _backup_tiles = folium.TileLayer(
+        tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        attr="&copy; OpenStreetMap contributors &copy; CARTO",
+        name="Резервная подложка", overlay=False,
+        control=False, show=False,
+    ).add_to(m)
+    # третий резерв в цепочке: если режутся и OSM, и CartoDB
+    _backup2_tiles = folium.TileLayer(
+        tiles="https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png",
+        attr="Wikimedia Maps", name="Резервная подложка 2", overlay=False,
+        control=False, show=False,
+    ).add_to(m)
 
     # верстка тултипов: таблица сжата по содержимому (width:auto),
     # подпись и значение идут плотно, без разъезда на разные края
@@ -1870,38 +1982,10 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     if vmax <= 0:
         st.warning("Нет данных для выбранного слоя в этом городе.")
         vmax = 1.0
-    cm = LinearColormap(COLORS, vmin=0, vmax=1)  # цвет по доле максимума
     # гамма < 1 сжимает низ шкалы: жёлтый начинается заметно раньше.
     # Значение gamma — из слайдера сайдбара, подбирается на вкус.
-    # Легенда сэмплирована с ТЕМ ЖЕ отображением — цвета на шкале совпадают
-    # с реальной заливкой; сэмплируем БЕЗ branca-интерьеров (между версиями
-    # меняются): прямое линейное интерполирование между hex-стопами палитры —
-    # ровно то, что делает LinearColormap внутри _style
-    def _palette_at(t):
-        pos = min(max(t, 0.0), 1.0) * (len(COLORS) - 1)
-        i = min(int(pos), len(COLORS) - 2)
-        frac = pos - i
-        out = []
-        for k in (1, 3, 5):
-            a, b = int(COLORS[i][k:k + 2], 16), int(COLORS[i + 1][k:k + 2], 16)
-            out.append(f"{round(a + (b - a) * frac):02x}")
-        return "#" + "".join(out)
-
-    # ЛЕГЕНДА — собственный HTML/CSS-градиент вместо branca LinearColormap.
-    # branca тянет d3.js с CDN, и если CDN недоступен (блокировки CDN в
-    # регионе — ERR_CONNECTION_CLOSED на d3.v4.min.js), падение скрипта
-    # легенды убивало ВСЮ карту (белый экран, без ошибок в консоли родителя)
-    _grad = ", ".join(_palette_at(i / 24) for i in range(25))
-    _legend_html = (
-        '<div style="position: fixed; top: 10px; right: 10px; z-index: 9998;'
-        ' background: rgba(255,255,255,0.92); padding: 8px 10px;'
-        ' border-radius: 6px; border: 1px solid #999; font-size: 12px;">'
-        + f'<div style="margin-bottom:4px;">{map_type} &mdash; {unit}</div>'
-        + f'<div style="width:220px;height:12px;border:1px solid #999;'
-          f'background:linear-gradient(to right,{_grad});"></div>'
-        + '<div style="display:flex;justify-content:space-between;">'
-        + f'<span>0</span><span>{vmax:,.0f}</span></div></div>')
-    m.get_root().html.add_child(folium.Element(_legend_html))
+    # Цвет заливки (модульный _palette_at) и CSS-легенда (_css_legend)
+    # считаются одним алгоритмом — шкала и раскраска совпадают точно
 
     extra_cols = list(hex_extra.columns) if hex_extra is not None else []
     # ключи свойств — машинно-безопасные (x0, x1…): русские ключи с пробелами
@@ -1943,7 +2027,7 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         # гамма-раскрытие: жёлтое начинается раньше, красный уходит к вершине
         t = (v / vmax) ** gamma if vmax > 0 else 0.0
         opacity = 0.03 if v <= 0 else 0.20 + 0.40 * t
-        return {"fillColor": cm(t), "color": "#555555", "weight": 0.6,
+        return {"fillColor": _palette_at(t), "color": "#555555", "weight": 0.6,
                 "fillOpacity": opacity}
 
     extra_aliases = extra_aliases or {}
@@ -1964,7 +2048,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                                         localize=False, max_width=280)),
     ).add_to(m)
 
-    # (легенда добавлена выше как HTML/CSS — без d3/CDN)
+    # Легенда на чистом CSS — без branca (branca тянул d3.v4.min.js с CDN,
+    # заблокированный скрипт стопорил парсинг iframe = белый экран)
+    m.add_child(_css_legend(f"{map_type} — {unit}", vmax, gamma))
 
     # легенда типов точек — каноничный паттерн MacroElement (стабилен в streamlit-folium)
     if legend:
@@ -2060,6 +2146,92 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     _view_saver.city_tag = _city_tag
     m.add_child(_view_saver)
 
+    # Диагностика тайлов и автоматический резервный фон. Ошибки загрузки
+    # изображений тайлов обычно НЕ являются JS-ошибками, поэтому старый
+    # window.onerror их не замечает. После нескольких tileerror или таймаута
+    # отключаем OSM и включаем CartoDB. Если недоступны оба источника, выводим
+    # сообщение, но сохраняем векторные гексы/точки поверх пустого фона.
+    _tile_fallback = MacroElement()
+    _tile_fallback._template = Template("""
+{% macro script(this, kwargs) %}
+(function() {
+  var map = {{ this._parent.get_name() }};
+  // ЦЕПОЧКА ПОДЛОЖЕК: OSM -> CartoDB Positron -> Wikimedia. Провайдер может
+  // резать любой из хостов — идём по цепочке, пока тайлы не загрузятся.
+  var chain = [{{ this.osm_name }}, {{ this.backup_name }}, {{ this.backup2_name }}];
+  var names = ['OpenStreetMap', 'CartoDB Positron', 'Wikimedia'];
+  var idx = 0;
+  var errors = [0, 0, 0];
+  var loaded = [false, false, false];
+  var switching = false;
+  var statusId = 'geohex-tile-status';
+
+  function status(message, isError) {
+    try {
+      var el = document.getElementById(statusId);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = statusId;
+        el.style.cssText = 'position:absolute;top:8px;right:8px;z-index:10000;' +
+          'max-width:360px;padding:8px 11px;border-radius:5px;' +
+          'font:12px/1.4 sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25);' +
+          'background:#fff;color:#222;white-space:pre-wrap;';
+        (map.getContainer() || document.body).appendChild(el);
+      }
+      el.style.border = isError ? '1px solid #b00020' : '1px solid #888';
+      el.textContent = message;
+      el.style.display = 'block';
+    } catch (e) {}
+  }
+
+  function switchNext(reason) {
+    if (idx + 1 >= chain.length) {
+      status('Не загружаются ни OpenStreetMap, ни резервные подложки ' +
+             '(CartoDB, Wikimedia). Проверьте доступ к картографическим ' +
+             'серверам/сетевые фильтры (вкладка Network). Расчётные гексы ' +
+             'должны оставаться доступны.', true);
+      return;
+    }
+    if (switching) return;
+    switching = true;
+    try {
+      if (map.hasLayer(chain[idx])) map.removeLayer(chain[idx]);
+      idx++;
+      chain[idx].addTo(map);
+      status('Подложка «' + names[idx - 1] + '» недоступна. Включена «' +
+             names[idx] + '». ' + (reason || ''), false);
+    } catch (e) {
+      status('Не удалось включить резервную подложку: ' +
+             (e && e.message ? e.message : ''), true);
+    }
+    setTimeout(function() { switching = false; }, 3000);
+  }
+
+  chain.forEach(function(layer, i) {
+    layer.on('tileload', function() { loaded[i] = true; });
+    layer.on('tileerror', function() {
+      errors[i] += 1;
+      if (i === idx && errors[i] >= 4) {
+        switchNext('Зафиксированы повторяющиеся ошибки загрузки тайлов.');
+      }
+    });
+  });
+
+  // На некоторых сетях запросы не завершаются и tileerror не приходит
+  setTimeout(function() {
+    if (!loaded[idx] && !switching) {
+      switchNext(errors[idx] ? 'Тайлы загрузились с ошибками или не загрузились.' :
+                               'Тайлы не ответили вовремя.');
+    }
+  }, 6500);
+})();
+{% endmacro %}
+""")
+    _tile_fallback.osm_name = _osm_tiles.get_name()
+    _tile_fallback.backup_name = _backup_tiles.get_name()
+    _tile_fallback.backup2_name = _backup2_tiles.get_name()
+    m.add_child(_tile_fallback)
+
     # Круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
     # Ключевое: они живут в ОТДЕЛЬНОМ FeatureGroup и передаются через
     # feature_group_to_add — streamlit-folium подменяет такой слой ДИНАМИЧЕСКИ,
@@ -2100,15 +2272,23 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
                     dash_array="8 6", fill=False)))
 
     if marker:
+        # DivIcon вместо folium.Icon: штатный Icon подключает awesome-markers
+        # + glyphicons/font-awesome с ещё двух CDN (картинки + шрифты) —
+        # ещё одна точка отказа при их блокировке. Эмодзи-метка — 0 запросов
         folium.Marker(
             location=[marker["lat"], marker["lon"]],
             tooltip=marker["display"],
-            icon=folium.Icon(color="blue", icon="glyphicon-map-marker"),
+            icon=folium.DivIcon(
+                html='<div style="font-size:28px;line-height:1;">📍</div>',
+                icon_size=(28, 28), icon_anchor=(14, 28)),
         ).add_to(m)
     # returned_objects ТОЛЬКО last_object_clicked: pan/zoom/драг карты не меняют
     # возвращаемое значение -> Streamlit НЕ делает rerun -> карта летает.
     # Клик по гексу меняет last_object_clicked -> один rerun -> новый
     # feature_group_to_add подменяет круги на лету, карта не пересобирается.
+    # инлайн Leaflet из static/ вместо внешнего unpkg (см. _inline_leaflet;
+    # файлов нет — остаются штатные ссылки, поведение как раньше)
+    _inline_leaflet(m.get_root())
     out = st_folium(m, width=1150, height=680,
                     returned_objects=["last_object_clicked"],
                     feature_group_to_add=circles_fg)
@@ -2423,14 +2603,6 @@ with st.sidebar:
                    f"детализация выше res{_max_res} недоступна. "
                    f"Переключитесь на суррогатный источник для res 9–10.")
 
-    st.radio("Отрисовка карты",
-             ["Интерактивная (Leaflet)", "Упрощённая (Plotly)"],
-             key="render_mode",
-             help="Если карта на вашем устройстве чисто белая — переключите "
-                  "в упрощённый режим: те же гексы, круги и точки через "
-                  "встроенный движок Streamlit. Минус: без кликов и "
-                  "выделения гексов, только просмотр.")
-
     st.header("Радиусы вокруг гекса")
     def _mode_changed():
         # мультивыбор работает ТОЛЬКО на res 8: колбэк идёт до отрисовки
@@ -2489,8 +2661,10 @@ if load_btn or st.session_state.pop("build_on_enter", False):
         fetch_city_data.clear()
         _compute_series_cached.clear()
         logger.info("кэши очищены: смена города %s -> %s", _prev, city)
-    with st.spinner("Загружаю данные OpenStreetMap через Overpass API "
-                    "(обычно 1–5 минут; города-миллионники — до 10–15)…"):
+    with st.spinner("Загружаю данные города: выгрузка PBF — обычно 1–2 "
+                    "минуты; город без готовой выгрузки через Overpass API — "
+                    "от 1 минуты до 10–15 в зависимости от загруженности "
+                    "зеркал…"):
         try:
             geo, nodes_df, ways_df = fetch_city_data(city)
         except Exception as e:  # noqa: BLE001 — любая сетевая/парсер-ошибка
@@ -2883,11 +3057,7 @@ if map_type.startswith("1."):
     _src = ("Kontur (2023)" if kontur_df is not None
             else "OSM: суррогат")
 
-if str(st.session_state.get("render_mode", "")).startswith("Упрощённая"):
-    render_plotly_compat(grid, series, unit, geo, marker=marker,
-                         points=points, circ_center=_circ_center)
-else:
-    render_map(grid, series, unit, geo, map_type, marker=marker,
+render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
            legend=legend, source=_src,
            yzoom={7: 13, 8: 15, 9: 16, 10: 17}.get(res_eff, 15),
