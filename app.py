@@ -71,11 +71,19 @@ from jinja2 import Template as _Jinja2Template
 # Порядок — по наблюдаемой живучести с нашего деплоя.
 # overpass-api.de УБРАН: со Streamlit Cloud он стабильно отвечает
 # Connection refused (TCP-бан IP), попытки только съедали время.
+# Порядок — по наблюдаемой живучести; circuit breaker сам отправляет
+# упавшие в карантин, поэтому длинный список = переживаем даунтаймы.
+# overpass-api.de УБРАН: со Streamlit Cloud он стабильно Connection refused
+# (TCP-бан IP). nchc и mail.ru оставлены: бывают живы, когда остальные лежат.
 OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.nchc.org.tw/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass.freizeitkarte-osm.de/api/interpreter",
+    "https://overpass.hotosm.org/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
     "https://overpass.maps.mail.ru/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
 ]
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 # резервный геокодер (komoot) — подхватывает город, пока Nominatim режет
@@ -641,6 +649,10 @@ CUSTOM_BBOX = {
     "тверь": [56.75, 56.95, 35.75, 35.95],
     "уфа": [54.65, 54.85, 55.75, 56.10],
     "челябинск": [54.95, 55.25, 61.20, 61.55],
+    # Тюмени здесь НЕТ намеренно: выгрузка с bbbike щедрая (весь город +
+    # окрестности), и граница автоматически строится по плотному ядру
+    # застройки из самого файла (_pbf_fallback_bbox). Ручной прямоугольник
+    # резал бы город хуже, чем данные.
 }
 
 
@@ -986,8 +998,11 @@ def _query_overpass(q: str, timeout: int = 600, attempts: int = 2) -> dict:
         # все зеркала молча пропущены — до конца карантина самого долгого
         left = max(int(max(_MIRROR_FAIL.get(u, 0) for u in OVERPASS_ENDPOINTS)
                        - now0), 1)
-        raise RuntimeError(f"все зеркала Overpass в карантине после недавних "
-                           f"ошибок — повторите через ~{left} сек")
+        raise RuntimeError(
+            f"все зеркала Overpass в карантине после недавних ошибок — "
+            f"повторите через ~{left} сек. Надёжнее: добавить выгрузку "
+            f"города (extract.bbbike.org, ~15–30 мин) в CUSTOM_PBF или "
+            f"файл cities/<город>.osm.pbf — тогда Overpass не нужен вовсе")
     logger.error("overpass: все зеркала отказали: %s", "; ".join(errors[-5:]))
     raise RuntimeError("Overpass недоступен на всех зеркалах: "
                        + "; ".join(errors[-4:]))
@@ -1020,9 +1035,14 @@ def _fetch_city_data_locked(city: str):
     # ТОЛЬКО если нет CUSTOM_BBOX (он есть у всех 15 городов из конфига — для
     # них геокодер вообще не трогаем) и ТОЛЬКО ради полигона границы.
     # Overpass на этом пути не вызывается НИ РАЗУ.
+    _pbf_fail = None          # причина, если выгрузка настроена, но не скачалась
     if _pbf_configured(city):
         _pbf = _try_pbf_city(city)
-        if _pbf is not None:
+        if _pbf is None:
+            _pbf_fail = ("выгрузка PBF для этого города настроена, но Google "
+                         "Drive в этот момент не отдал файл (таймаут/обрыв) — "
+                         "обычно помогает просто повторить «Построить сетку»")
+        else:
             _ways_df, _nodes_df = _pbf[0], _pbf[1]
             geo = None
             if _canon_key(city) not in {_canon_key(k) for k in CUSTOM_BBOX}:
@@ -1037,42 +1057,42 @@ def _fetch_city_data_locked(city: str):
                 logger.info("fetch_city_data %s: данные из PBF, граница от "
                             "внешнего геокодера", city)
                 return geo, _nodes_df, _ways_df
-        # fallback-граница: 1) CUSTOM_BBOX (ручные, точные) ->
-        # 2) эвристика по зданиям (плотное ядро + связность) ->
-        # 3) перцентили 2/98 по всем жилым зданиям
-        _cbbox = {_canon_key(k): v for k, v in CUSTOM_BBOX.items()}.get(
-            _canon_key(city))
-        if _cbbox is not None:
-            _s, _n, _w, _e = [float(x) for x in _cbbox]
-            logger.info("граница из CUSTOM_BBOX: %s", _cbbox)
-        else:
-            _bb = _pbf_fallback_bbox(_ways_df)
-            if _bb is not None:
-                _s, _n, _w, _e = _bb
+            # fallback-граница: 1) CUSTOM_BBOX (ручные, точные) ->
+            # 2) эвристика по зданиям (плотное ядро + связность) ->
+            # 3) перцентили 2/98 по всем жилым зданиям
+            _cbbox = {_canon_key(k): v for k, v in CUSTOM_BBOX.items()}.get(
+                _canon_key(city))
+            if _cbbox is not None:
+                _s, _n, _w, _e = [float(x) for x in _cbbox]
+                logger.info("граница из CUSTOM_BBOX: %s", _cbbox)
             else:
-                _blats, _blons = [], []
-                for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
-                    if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
-                        _blats.append(float(_c[:, 1].mean()))
-                        _blons.append(float(_c[:, 0].mean()))
-                if len(_blats) >= 50:
-                    _ba, _bo = np.asarray(_blats), np.asarray(_blons)
-                    _s = float(np.percentile(_ba, 2)); _n = float(np.percentile(_ba, 98))
-                    _w = float(np.percentile(_bo, 2)); _e = float(np.percentile(_bo, 98))
+                _bb = _pbf_fallback_bbox(_ways_df)
+                if _bb is not None:
+                    _s, _n, _w, _e = _bb
                 else:
-                    _s = _n = _w = _e = None
+                    _blats, _blons = [], []
+                    for _c, _t in zip(_ways_df["coords"].values, _ways_df["tags"].values):
+                        if len(_c) and _t.get("building") in RESIDENTIAL_BUILDINGS:
+                            _blats.append(float(_c[:, 1].mean()))
+                            _blons.append(float(_c[:, 0].mean()))
+                    if len(_blats) >= 50:
+                        _ba, _bo = np.asarray(_blats), np.asarray(_blons)
+                        _s = float(np.percentile(_ba, 2)); _n = float(np.percentile(_ba, 98))
+                        _w = float(np.percentile(_bo, 2)); _e = float(np.percentile(_bo, 98))
+                    else:
+                        _s = _n = _w = _e = None
 
-        if _s is not None and (_n - _s) > 0.01 and (_e - _w) > 0.01:
-                _mw = (_e - _w) * 0.03 or 0.01
-                _mh = (_n - _s) * 0.03 or 0.01
-                geo = {"lat": (_s + _n) / 2, "lon": (_w + _e) / 2,
-                       "display": f"{city.strip()} (выгрузка PBF)",
-                       "bbox": [_s - _mh, _n + _mh, _w - _mw, _e + _mw],
-                       "geojson": None, "src": "pbf"}
-                logger.info("fetch_city_data %s: данные из PBF, "
-                            "приблизительная граница по зданиям", city)
-                return geo, _nodes_df, _ways_df
-        logger.warning("PBF без зданий и геокодеров — данных нет")
+            if _s is not None and (_n - _s) > 0.01 and (_e - _w) > 0.01:
+                    _mw = (_e - _w) * 0.03 or 0.01
+                    _mh = (_n - _s) * 0.03 or 0.01
+                    geo = {"lat": (_s + _n) / 2, "lon": (_w + _e) / 2,
+                           "display": f"{city.strip()} (выгрузка PBF)",
+                           "bbox": [_s - _mh, _n + _mh, _w - _mw, _e + _mw],
+                           "geojson": None, "src": "pbf"}
+                    logger.info("fetch_city_data %s: данные из PBF, "
+                                "приблизительная граница по зданиям", city)
+                    return geo, _nodes_df, _ways_df
+            logger.warning("PBF без зданий и геокодеров — данных нет")
 
     # ── 2) ВЫГРУЗКИ НЕТ (или файл оборвался): геокод -> тайлы Overpass ───
     # Дошли сюда — значит, города нет в конфиге выгрузок либо скачивание
@@ -1087,6 +1107,10 @@ def _fetch_city_data_locked(city: str):
 
     # ПЛАН А: тайловый Overpass по границе от геокодера
     if geo is None:
+        if _pbf_fail is not None:
+            raise RuntimeError(
+                _pbf_fail + ". Запасной путь (геокодеры + Overpass) тоже "
+                "недоступен: границу города взять неоткуда.")
         return None, None, None
     if geo.get("geojson") and geo["geojson"].get("type") in ("Polygon", "MultiPolygon"):
         south, north, west, east = _geojson_bounds(geo["geojson"])  # гексы только в городе
@@ -1171,11 +1195,18 @@ out body;"""
 
     # 4 потока, не 8: каждый держит свой ответ в памяти — на тарифе 1 ГБ
     # половина параллелизма = половина пиковой памяти (защита от OOM-перезагрузок)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
-        _fw = _pool.submit(_run_tiled, q_ways)
-        _fn = _pool.submit(_run_tiled, q_nodes)
-        ways_raw = _fw.result()
-        nodes_raw = _fn.result()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
+            _fw = _pool.submit(_run_tiled, q_ways)
+            _fn = _pool.submit(_run_tiled, q_nodes)
+            ways_raw = _fw.result()
+            nodes_raw = _fn.result()
+    except RuntimeError:
+        if _pbf_fail is not None:
+            raise RuntimeError(
+                _pbf_fail + ". Запасной путь через Overpass тоже не сработал "
+                "(см. причину ниже).")
+        raise
 
     def _dedupe(els):  # стыки тайлов дублируют объекты — чистим по id
         _seen, _out = set(), []
@@ -2275,13 +2306,25 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     if marker:
         # DivIcon вместо folium.Icon: штатный Icon подключает awesome-markers
         # + glyphicons/font-awesome с ещё двух CDN (картинки + шрифты) —
-        # ещё одна точка отказа при их блокировке. Эмодзи-метка — 0 запросов
+        # точка отказа при их блокировке. Эмодзи нельзя: рендерится по-разному
+        # (у части юзеров — «красный круг на палочке» вместо капельки).
+        # Поэтому пин — ИНЛАЙН-SVG: 0 внешних запросов, одинаковый вид везде.
         folium.Marker(
             location=[marker["lat"], marker["lon"]],
             tooltip=marker["display"],
             icon=folium.DivIcon(
-                html='<div style="font-size:28px;line-height:1;">📍</div>',
-                icon_size=(28, 28), icon_anchor=(14, 28)),
+                html=(
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="44"'
+                    ' viewBox="0 0 24 36"'
+                    ' style="filter:drop-shadow(1px 2px 2px rgba(0,0,0,.45))">'
+                    '<path d="M12 1C6.2 1 1.5 5.7 1.5 11.6 1.5 19.9 12 35 12 35'
+                    's10.5-15.1 10.5-23.4C22.5 5.7 17.8 1 12 1z"'
+                    ' fill="#3186cc" stroke="#1a5a8a" stroke-width="1"/>'
+                    '<circle cx="12" cy="11.5" r="4.6" fill="#ffffff"/>'
+                    '</svg>'),
+                icon_size=(30, 44),          # пин
+                icon_anchor=(15, 43),        # остриё — точно в координате
+                popup_anchor=(0, -40)),
         ).add_to(m)
     # returned_objects ТОЛЬКО last_object_clicked: pan/zoom/драг карты не меняют
     # возвращаемое значение -> Streamlit НЕ делает rerun -> карта летает.
