@@ -600,6 +600,7 @@ CUSTOM_PBF = {
     "тверь": "https://drive.google.com/uc?export=download&id=1BY3TGZN1JoiE2W-tI8acH4-Bysdhcfp3",
     "уфа": "https://drive.google.com/uc?export=download&id=18ZnY-OZE7vk_SBMWiNOvWm1c25IZ2zTB",
     "челябинск": "https://drive.google.com/uc?export=download&id=1gCYNd-3XWC42Az95PxieUG6Fx2qhz2mn",
+    "тюмень": "https://drive.google.com/uc?export=download&id=16jP9rjbUwIk7zVLDylb9DVHEMmxegCNF",
 }
 
 # ЛОКАЛЬНЫЕ выгрузки: папка cities/ рядом с app.py в репозитории.
