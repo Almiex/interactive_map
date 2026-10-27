@@ -1941,11 +1941,25 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
         name="Резервная подложка", overlay=False,
         control=False, show=False,
     ).add_to(m)
-    # третий резерв в цепочке: если режутся и OSM, и CartoDB
+    # резерв №2 — Esri World Street Map: самый живучий бесплатный вендор,
+    # ключ не нужен, корпоративные прокси почти никогда не режут
     _backup2_tiles = folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
+              "World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, Maxar, Earthstar Geographics", name="Резерв Esri",
+        overlay=False, control=False, show=False,
+    ).add_to(m)
+    # резерв №3 — Wikimedia
+    _backup3_tiles = folium.TileLayer(
         tiles="https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png",
-        attr="Wikimedia Maps", name="Резервная подложка 2", overlay=False,
+        attr="Wikimedia Maps", name="Резервная подложка 3", overlay=False,
         control=False, show=False,
+    ).add_to(m)
+    # резерв №4 — OpenTopoMap (последний в цепочке)
+    _backup4_tiles = folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="OpenTopoMap (CC-BY-SA)", name="Резервная подложка 4",
+        overlay=False, control=False, show=False,
     ).add_to(m)
 
     # верстка тултипов: таблица сжата по содержимому (width:auto),
@@ -2190,8 +2204,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
   var map = {{ this._parent.get_name() }};
   // ЦЕПОЧКА ПОДЛОЖЕК: OSM -> CartoDB Positron -> Wikimedia. Провайдер может
   // резать любой из хостов — идём по цепочке, пока тайлы не загрузятся.
-  var chain = [{{ this.osm_name }}, {{ this.backup_name }}, {{ this.backup2_name }}];
-  var names = ['OpenStreetMap', 'CartoDB Positron', 'Wikimedia'];
+  var chain = [{{ this.osm_name }}, {{ this.backup_name }}, {{ this.backup2_name }}, {{ this.backup3_name }}, {{ this.backup4_name }}];
+  var names = ['OpenStreetMap', 'CartoDB Positron', 'Esri World Street Map', 'Wikimedia Maps', 'OpenTopoMap'];
   var idx = 0;
   var errors = [0, 0, 0];
   var loaded = [false, false, false];
@@ -2262,6 +2276,8 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     _tile_fallback.osm_name = _osm_tiles.get_name()
     _tile_fallback.backup_name = _backup_tiles.get_name()
     _tile_fallback.backup2_name = _backup2_tiles.get_name()
+    _tile_fallback.backup3_name = _backup3_tiles.get_name()
+    _tile_fallback.backup4_name = _backup4_tiles.get_name()
     m.add_child(_tile_fallback)
 
     # Круги вокруг выбранного кликом гекса: 2 км (зелёный) и 5 км (красный).
