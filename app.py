@@ -26,6 +26,11 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
      и НЕ перебирается по кругу каждым тайлом; общий бюджет 240 с на
      тайловую выгрузку. Для городов с выгрузкой PBF Overpass вообще не
      вызывается — ни за данными, ни ради границы.
+  6) «Финт ушами»: профиль адреса в .xlsx считается ПОЛНОСТЬЮ на сервере
+     и не зависит от отрисовки карты/подложки — при найденном адресе
+     кнопка «Скачать профиль адреса» отдаёт все 7 карт в радиусах
+     1/2/5 км в формате «Цель документа», даже если у пользователя
+     белый экран.
 
 Запуск:  streamlit run app.py
 """
@@ -1387,6 +1392,22 @@ def roads_gdf(ways_df):
         return _EMPTY.copy()
     return pd.concat(_parts, ignore_index=True)
 
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=16)
+def _buildings_cached(data_ver: str):
+    """buildings_gdf по версии данных: res 8 и res 10 в профиле адреса
+    используют ОДНИ И ТЕ ЖЕ здания — без кэша каждый resolution заново
+    гонял geopandas по 300 тыс. полигонов (минуты впустую)."""
+    stored = st.session_state["data"]
+    return buildings_gdf(stored["ways"])
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=16)
+def _roads_cached(data_ver: str):
+    """То же кэширование для roads_gdf (карта 6 — пеший и авто трафик)."""
+    stored = st.session_state["data"]
+    return roads_gdf(stored["ways"])
+
+
 def dorm_centroids(ways_df):
     """Общежития (building=dormitory) — центроиды для точек и подсчёта по гексам."""
     empty = pd.DataFrame(columns=["lat", "lon"])
@@ -1526,7 +1547,8 @@ def _norm100(s):
     return s / mx * 100.0 if mx > 0 else s * 0.0
 
 
-def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_person=30):
+def compute_series(map_type, sub_option, res, data, kontur_df=None,
+                   m2_per_person=30, data_ver=""):
     geo, nodes_df, ways_df = data
     wcent = ways_centroids(ways_df)
 
@@ -1536,7 +1558,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
                      for c in kontur_df["h3"]]
             s = kontur_df.assign(cell=cells).groupby("cell")["population"].sum()
             return s, "чел.", None, None
-        b = buildings_gdf(ways_df)
+        b = _buildings_cached(data_ver) if data_ver else buildings_gdf(ways_df)
         if b.empty:
             return pd.Series(dtype=float), "чел. (оценка)", None, None
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
@@ -1545,7 +1567,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         return vol / m2_per_person, f"чел. (суррогат, {m2_per_person} м²/чел)", None, None
 
     if map_type.startswith("2."):
-        b = buildings_gdf(ways_df)
+        b = _buildings_cached(data_ver) if data_ver else buildings_gdf(ways_df)
         if b.empty:
             return pd.Series(dtype=float), "м²", None, None
         cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
@@ -1557,7 +1579,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
         # ---- Индекс спроса (суррогат платёжеспособности), 0-100 ----
         # 40% жилой фонд (люди) + 20% розница/общепит + 15% банки/офисы
         # + 15% остановки + 10% парковки/АЗС; каждый компонент в индексе 0-100
-        b = buildings_gdf(ways_df)
+        b = _buildings_cached(data_ver) if data_ver else buildings_gdf(ways_df)
         parts = {}
         if not b.empty:
             cells = [h3.latlng_to_cell(a, b_, res) for a, b_ in zip(b["lat"], b["lon"])]
@@ -1669,7 +1691,7 @@ def compute_series(map_type, sub_option, res, data, kontur_df=None, m2_per_perso
 
     if map_type.startswith("6."):
         # ---- Трафик: оба показателя нормируем в индекс 0-100 ----
-        r = roads_gdf(ways_df)
+        r = _roads_cached(data_ver) if data_ver else roads_gdf(ways_df)
         if r.empty:
             return pd.Series(dtype=float), "индекс 0-100", None, None
         area = hex_area_km2(res)
@@ -1720,7 +1742,137 @@ def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
     _kontur = st.session_state.get("_kontur") if kontur_loaded else None
     return compute_series(map_type, sub_option, res_eff,
                           (stored["geo"], stored["nodes"], stored["ways"]),
-                          kontur_df=_kontur, m2_per_person=m2_per_person)
+                          kontur_df=_kontur, m2_per_person=m2_per_person,
+                          data_ver=data_ver)
+
+
+# План профиля адреса: (ключ, название группы, тип карты, под-опция,
+# resolution, агрегация). Размеры — как в шаблоне «Цель документа».
+ADDRESS_PROFILE_PLANS = [
+    ("kontur",   "1. (Контур) Плотность населения",        MAP_TYPES[0], None,            8,  "sum"),
+    ("surrogat", "1. (Суррогат) Плотность населения",      MAP_TYPES[0], None,            10, "sum"),
+    ("housing",  "2. Объём жилого фонда",                  MAP_TYPES[1], None,            10, "sum"),
+    ("demand",   "3. Индекс спроса (платёжесп.)",          MAP_TYPES[2], None,            10, "avg"),
+    ("poi",      "4. Инфраструктура и POI",                MAP_TYPES[3], None,            8,  "sum"),
+    ("social",   "5. Социальная инфраструктура",           MAP_TYPES[4], None,            8,  "sum"),
+    ("ped",      "6. Трафик — пешеходный",                 MAP_TYPES[5], TRAFFIC_MODES[0], 8, "avg"),
+    ("auto",     "6. Трафик — автомобильный",              MAP_TYPES[5], TRAFFIC_MODES[1], 8, "avg"),
+    ("med",      "7. Мед. учреждения и аптеки",            MAP_TYPES[6], None,            10, "sum"),
+]
+# группы для Excel: (подпись размера, название, ключ) — порядок колонок строго
+# как в «Цель документа (3).xlsx»
+PROFILE_XLSX_GROUPS = [
+    ("Размер 8",  "1. (Контур) Плотность населения",        "kontur"),
+    ("Размер 10", "1. (Суррогат) Плотность населения",      "surrogat"),
+    ("Размер 10", "2. Объём жилого фонда",                  "housing"),
+    ("Размер 10", "3. Индекс спроса (платёжесп.)",          "demand"),
+    ("Размер 8",  "4. Инфраструктура и POI",                "poi"),
+    ("Размер 8",  "5. Социальная инфраструктура",           "social"),
+    ("Размер 8",  "6. Трафик — пешеходный",                 "ped"),
+    ("Размер 8",  "6. Трафик — автомобильный",              "auto"),
+    ("Размер 10", "7. Мед. учреждения и аптеки",            "med"),
+    ("Размер 10", "Контур/мед.учреждения (считается автоматически)", "kontur_per_med"),
+]
+RADII = (1.0, 2.0, 5.0)
+
+
+def build_address_profile(center, stored, kontur_df, m2_per_person):
+    """Полный профиль точки: 9 расчётов × 3 радиуса + производное
+    «Контур/мед.учреждения». Считается на сервере — работает даже если
+    карта у пользователя не отрисовалась (белый экран, нет подложки)."""
+    prof = {}
+    for key, _title, mt, sub, res_p, agg in ADDRESS_PROFILE_PLANS:
+        if key == "kontur" and kontur_df is None:
+            prof[key] = None          # колонки останутся пустыми
+            continue
+        series, _unit, _hx, _pt = _compute_series_cached(
+            mt, sub, res_p, stored.get("ver", 0),
+            kontur_df is not None, m2_per_person)
+        sums = sums_in_circles(series, center) or {}
+        row = {}
+        for r in RADII:
+            s, n = sums.get(r, (0.0, 0))
+            v = (s / n) if (agg == "avg" and n) else s
+            row[r] = round(v, 1) if agg == "avg" else round(v)
+        prof[key] = row
+    # производное: люди Kontur на 1 мед.объект (считается автоматически)
+    ratio = {}
+    _kp, _md = prof.get("kontur"), prof.get("med")
+    for r in RADII:
+        ratio[r] = (round(_kp[r] / _md[r])
+                    if (_kp and _md and _md.get(r)) else None)
+    prof["kontur_per_med"] = ratio
+    return prof
+
+
+def _profile_to_xlsx(city, address, prof, kontur_loaded):
+    """Сборка .xlsx строго по макету «Цель документа»: строка 1–2 — merged-
+    подписи размеров, строка 3 — заголовки, строка 4 — значения. Без
+    pandas ExcelWriter — только openpyxl (он и так в requirements)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Профиль адреса"
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    size_fill = PatternFill("solid", fgColor="DDEBF7")
+    hdr_fill = PatternFill("solid", fgColor="F2F2F2")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    ws.cell(3, 1, "Город")
+    ws.cell(3, 2, "Адрес")
+    for c in (1, 2):
+        ws.cell(3, c).font = Font(bold=True, size=9)
+        ws.cell(3, c).fill = hdr_fill
+        ws.cell(3, c).border = border
+        ws.cell(3, c).alignment = center
+    ws.cell(4, 1, city)
+    ws.cell(4, 2, address)
+
+    col = 3
+    for size_lbl, title, key in PROFILE_XLSX_GROUPS:
+        ws.merge_cells(start_row=1, start_column=col, end_row=2, end_column=col + 2)
+        c = ws.cell(1, col, size_lbl)
+        c.font = Font(bold=True, size=9)
+        c.fill = size_fill
+        c.alignment = center
+        for k, r in enumerate(RADII):
+            h = ws.cell(3, col + k, f"{title} {r:.0f} км.")
+            h.font = Font(bold=True, size=9)
+            h.fill = hdr_fill
+            h.border = border
+            h.alignment = center
+            v = (prof.get(key) or {}).get(r)
+            cell = ws.cell(4, col + k, v if v is not None else None)
+            cell.border = border
+            if isinstance(v, float):
+                cell.number_format = "0.0"
+        col += 3
+
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 26
+    for i in range(3, col):
+        ws.column_dimensions[get_column_letter(i)].width = 13
+    ws.row_dimensions[3].height = 60
+    ws.freeze_panes = "C4"
+    note = ("Примечания: индексы (спроса, трафика) — СРЕДНЕЕ по гексам радиуса; "
+            "остальные показатели — СУММА. «Контур/мед.учреждения» = население "
+            "Kontur в радиусе ÷ число мед. объектов в радиусе.")
+    if not kontur_loaded:
+        note += (" Колонки «(Контур)» и «Контур/мед.учреждения» пусты — файл "
+                 "Kontur Population не был загружен в сайдбаре.")
+    ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=col - 1)
+    nc = ws.cell(6, 1, note)
+    nc.font = Font(italic=True, size=9, color="808080")
+    nc.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[6].height = 42
+
+    _buf = io.BytesIO()
+    wb.save(_buf)
+    return _buf.getvalue()
 
 
 def build_all_maps_summary(center, res_eff, stored, kontur_df, m2_per_person):
@@ -2862,6 +3014,43 @@ if address.strip() and city.strip().lower() == stored["city"].lower():
     else:
         st.info(f"📌 Метка: {marker['display']} "
                 f"({marker['lat']:.5f}, {marker['lon']:.5f})")
+
+        # «ФИНТ УШАМИ»: цифры считаются на сервере и не зависят от того,
+        # отрисовалась ли у пользователя карта/подложка. Кнопка только при
+        # найденном адресе — выгружает все 7 карт в радиусах 1/2/5 км
+        # (res 8+10) в .xlsx по макету «Цель документа».
+        _prof_key = (stored.get("ver"), marker["display"],
+                     kontur_df is not None, m2_per_person)
+        _prof = st.session_state.get("addr_profile")
+        if not (_prof and _prof.get("key") == _prof_key):
+            if st.button("📥 Сформировать профиль адреса (.xlsx)",
+                         help="Все 7 карт в радиусах 1/2/5 км вокруг метки, "
+                              "res 8 и res 10, в формате «Цель документа». "
+                              "Считается на сервере — работает даже если "
+                              "карта не отрисовалась. Первый запуск до ~1 мин "
+                              "(кэшируется)."):
+                with st.spinner("Считаю профиль адреса: 9 показателей × "
+                                "3 радиуса, res 8 и res 10…"):
+                    try:
+                        _p = build_address_profile(
+                            (marker["lat"], marker["lon"]),
+                            stored, kontur_df, m2_per_person)
+                        _x = _profile_to_xlsx(stored["city"],
+                                              marker["display"], _p,
+                                              kontur_df is not None)
+                        st.session_state["addr_profile"] = {"key": _prof_key,
+                                                            "data": _x}
+                    except Exception as e:  # noqa: BLE001
+                        st.session_state.pop("addr_profile", None)
+                        st.error(f"Не удалось посчитать профиль: {e}")
+        _prof = st.session_state.get("addr_profile")
+        if _prof and _prof.get("key") == _prof_key:
+            _fn = re.sub(r"[^\w\-.]+", "_",
+                         f"профиль_{stored['city']}_{address.strip()}")[:80] + ".xlsx"
+            st.download_button("⬇ Скачать профиль адреса (.xlsx)",
+                               data=_prof["data"], file_name=_fn,
+                               mime="application/vnd.openxmlformats-"
+                                    "officedocument.spreadsheetml.sheet")
 
 # ЭФФЕКТИВНЫЙ ЦЕНТР КРУГОВ: метка адреса (если выбран флажок и метка
 # найдена), иначе центр выбранного гекса. От него строятся круги,
