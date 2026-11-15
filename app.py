@@ -20,8 +20,11 @@ GeoHex Analytics — Streamlit-сервис аналитики города по
      Файлов нет — остаются внешние ссылки (поведение как раньше).
   3) Метка адреса — DivIcon с эмодзи: штатный folium.Icon тянул
      awesome-markers + glyphicons/font-awesome с ещё двух CDN.
-  4) Подложки — цепочка OSM -> CartoDB (явный URL cartocdn, без ключа)
-     -> Wikimedia с авто-переключением при блокировке любого хоста.
+  4) Подложки — цепочка OSM -> Esri -> Wikimedia -> OpenTopoMap -> OSM.fr
+     с авто-переключением при блокировке любого хоста. CartoDB ИСКЛЮЧЁН:
+     CARTO теперь отдаёт на бесключевые URL код 200 с водяным знаком
+     «API KEY REQUIRED» вместо тайла — обманка не даёт сработать
+     детектору ошибок, цепочка замирала на мёртвом слое.
   5) Overpass — CIRCUIT BREAKER: упавшее зеркало уходит в карантин на 5 мин
      и НЕ перебирается по кругу каждым тайлом; общий бюджет 240 с на
      тайловую выгрузку. Для городов с выгрузкой PBF Overpass вообще не
@@ -1749,8 +1752,9 @@ def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
 # План профиля адреса: (ключ, название группы, тип карты, под-опция,
 # resolution, агрегация). Размеры — как в шаблоне «Цель документа».
 ADDRESS_PROFILE_PLANS = [
-    ("kontur",   "1. (Контур) Плотность населения",        MAP_TYPES[0], None,            8,  "sum"),
-    ("surrogat", "1. (Суррогат) Плотность населения",      MAP_TYPES[0], None,            10, "sum"),
+    ("kontur",    "1. (Контур) Плотность населения",      MAP_TYPES[0], None,            8,  "sum"),
+    ("surrogat8", "1. (Суррогат) Плотность населения",    MAP_TYPES[0], None,            8,  "sum"),
+    ("surrogat",  "1. (Суррогат) Плотность населения",    MAP_TYPES[0], None,            10, "sum"),
     ("housing",  "2. Объём жилого фонда",                  MAP_TYPES[1], None,            10, "sum"),
     ("demand",   "3. Индекс спроса (платёжесп.)",          MAP_TYPES[2], None,            10, "avg"),
     ("poi",      "4. Инфраструктура и POI",                MAP_TYPES[3], None,            8,  "sum"),
@@ -1759,10 +1763,12 @@ ADDRESS_PROFILE_PLANS = [
     ("auto",     "6. Трафик — автомобильный",              MAP_TYPES[5], TRAFFIC_MODES[1], 8, "avg"),
     ("med",      "7. Мед. учреждения и аптеки",            MAP_TYPES[6], None,            10, "sum"),
 ]
-# группы для Excel: (подпись размера, название, ключ) — порядок колонок строго
-# как в «Цель документа (3).xlsx»
+# группы для Excel: (подпись размера, название, ключ). Порядок — как в
+# «Цель документа (3).xlsx», плюс добавлена колонка «1. (Суррогат) Размер 8»
+# (запрос пользователя 2026-11-16: суррогат нужен и для res 8, и для res 10)
 PROFILE_XLSX_GROUPS = [
     ("Размер 8",  "1. (Контур) Плотность населения",        "kontur"),
+    ("Размер 8",  "1. (Суррогат) Плотность населения",      "surrogat8"),
     ("Размер 10", "1. (Суррогат) Плотность населения",      "surrogat"),
     ("Размер 10", "2. Объём жилого фонда",                  "housing"),
     ("Размер 10", "3. Индекс спроса (платёжесп.)",          "demand"),
@@ -1859,8 +1865,11 @@ def _profile_to_xlsx(city, address, prof, kontur_loaded):
     ws.row_dimensions[3].height = 60
     ws.freeze_panes = "C4"
     note = ("Примечания: индексы (спроса, трафика) — СРЕДНЕЕ по гексам радиуса; "
-            "остальные показатели — СУММА. «Контур/мед.учреждения» = население "
-            "Kontur в радиусе ÷ число мед. объектов в радиусе.")
+            "остальные показатели — СУММА. Суррогатная плотность посчитана "
+            "дважды: res 8 — для сопоставления с кнопкой «Σ на карте» (карта "
+            "считает на res 8), res 10 — основная точная оценка. "
+            "«Контур/мед.учреждения» = население Kontur в радиусе ÷ число "
+            "мед. объектов в радиусе.")
     if not kontur_loaded:
         note += (" Колонки «(Контур)» и «Контур/мед.учреждения» пусты — файл "
                  "Kontur Population не был загружен в сайдбаре.")
@@ -2076,41 +2085,45 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
     # SVG-рендер (без prefer_canvas): на старых ноутбуках/драйверах canvas
     # даёт чисто БЕЛЫЙ экран без ошибок. Сетки у нас компактные (сотни
     # гексов), SVG с ними справляется на любом железе — надёжность важнее
-    # Две независимые подложки: если OSM недоступен у конкретного пользователя,
-    # клиентский JS автоматически переключится на CartoDB Positron. Слои данных
-    # (гексы/точки) остаются на карте независимо от доступности фоновых тайлов.
+    # Подложки — цепочка из 5 вендоров: если OSM недоступен у конкретного
+    # пользователя, клиентский JS идёт по резервам (Esri -> Wikimedia ->
+    # OpenTopoMap -> OSM.fr). Слои данных (гексы/точки) остаются на карте
+    # независимо от доступности фоновых тайлов.
     m = folium.Map(location=center, tiles=None, control_scale=True)
     _osm_tiles = folium.TileLayer(
         tiles="OpenStreetMap", name="OpenStreetMap", overlay=False,
         control=False, show=True,
     ).add_to(m)
-    # NB: tiles="CartoDB positron" в folium 0.20 требует API-ключ CARTO и
-    # отдаёт тайлы с водяным знаком «API KEY REQUIRED» (это тот самый
-    # водяной знак на скриншотах) — поэтому явный URL cartocdn, ключ не нужен
-    _backup_tiles = folium.TileLayer(
-        tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-        attr="&copy; OpenStreetMap contributors &copy; CARTO",
-        name="Резервная подложка", overlay=False,
-        control=False, show=False,
-    ).add_to(m)
-    # резерв №2 — Esri World Street Map: самый живучий бесплатный вендор,
+    # CartoDB/cartocdn ИЗ ЦЕПОЧКИ ИЗЪЯТ (ноябрь 2026): CARTO отдаёт на
+    # бесключевые URL HTTP 200 с картинкой-водяным знаком «API KEY REQUIRED»
+    # вместо тайла. Обманка ломала авто-фолбэк: tileerror не срабатывает
+    # (ответ-то 200), цепочка замирала на мёртвом слое и до живых
+    # резервов не доходила. Баннер «включена CartoDB Positron» + водяные
+    # знаки = именно этот случай.
+    # Резерв №1 — Esri World Street Map: самый живучий бесплатный вендор,
     # ключ не нужен, корпоративные прокси почти никогда не режут
-    _backup2_tiles = folium.TileLayer(
+    _backup_tiles = folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
               "World_Street_Map/MapServer/tile/{z}/{y}/{x}",
         attr="Esri, Maxar, Earthstar Geographics", name="Резерв Esri",
         overlay=False, control=False, show=False,
     ).add_to(m)
-    # резерв №3 — Wikimedia
-    _backup3_tiles = folium.TileLayer(
+    # резерв №2 — Wikimedia
+    _backup2_tiles = folium.TileLayer(
         tiles="https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png",
-        attr="Wikimedia Maps", name="Резервная подложка 3", overlay=False,
+        attr="Wikimedia Maps", name="Резерв Wikimedia", overlay=False,
         control=False, show=False,
     ).add_to(m)
-    # резерв №4 — OpenTopoMap (последний в цепочке)
-    _backup4_tiles = folium.TileLayer(
+    # резерв №3 — OpenTopoMap
+    _backup3_tiles = folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap (CC-BY-SA)", name="Резервная подложка 4",
+        attr="OpenTopoMap (CC-BY-SA)", name="Резерв OpenTopoMap",
+        overlay=False, control=False, show=False,
+    ).add_to(m)
+    # резерв №4 — французский тайловый сервер OSM (бесключевой)
+    _backup4_tiles = folium.TileLayer(
+        tiles="https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
+        attr="&copy; OpenStreetMap France", name="Резерв OSM.fr",
         overlay=False, control=False, show=False,
     ).add_to(m)
 
@@ -2354,10 +2367,12 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
 {% macro script(this, kwargs) %}
 (function() {
   var map = {{ this._parent.get_name() }};
-  // ЦЕПОЧКА ПОДЛОЖЕК: OSM -> CartoDB Positron -> Wikimedia. Провайдер может
-  // резать любой из хостов — идём по цепочке, пока тайлы не загрузятся.
+  // ЦЕПОЧКА ПОДЛОЖЕК: OSM -> Esri -> Wikimedia -> OpenTopoMap -> OSM.fr.
+  // Провайдер может резать любой из хостов — идём по цепочке, пока тайлы
+  // не загрузятся. CartoDB намеренно НЕТ: отдаёт водяной знак с кодом 200,
+  // обманывая этот детектор (см. комментарий у создания слоёв).
   var chain = [{{ this.osm_name }}, {{ this.backup_name }}, {{ this.backup2_name }}, {{ this.backup3_name }}, {{ this.backup4_name }}];
-  var names = ['OpenStreetMap', 'CartoDB Positron', 'Esri World Street Map', 'Wikimedia Maps', 'OpenTopoMap'];
+  var names = ['OpenStreetMap', 'Esri World Street Map', 'Wikimedia Maps', 'OpenTopoMap', 'OpenStreetMap.fr'];
   var idx = 0;
   var errors = [0, 0, 0];
   var loaded = [false, false, false];
@@ -2385,9 +2400,9 @@ def render_map(grid, series, unit, geo, map_type, marker=None,
   function switchNext(reason) {
     if (idx + 1 >= chain.length) {
       status('Не загружаются ни OpenStreetMap, ни резервные подложки ' +
-             '(CartoDB, Wikimedia). Проверьте доступ к картографическим ' +
-             'серверам/сетевые фильтры (вкладка Network). Расчётные гексы ' +
-             'должны оставаться доступны.', true);
+             '(Esri, Wikimedia, OpenTopoMap, OSM.fr). Проверьте доступ к ' +
+             'картографическим серверам/сетевые фильтры (вкладка Network). ' +
+             'Расчётные гексы должны оставаться доступны.', true);
       return;
     }
     if (switching) return;
