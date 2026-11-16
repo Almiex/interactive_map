@@ -2893,14 +2893,26 @@ if st.session_state.get("_sel_mode_prev") != st.session_state.get("sel_mode"):
     st.session_state.pop("hex_chain", None)
     st.session_state.pop("circle_center", None)
 
-# ---- ПРОФИЛЬ АДРЕСА БЕЗ ПОСТРОЕНИЯ СЕТКИ/КАРТЫ («финт ушами» в полный рост) ----
-# Сетка и карта — чисто отображение: профилю нужны только данные города
-# (выгрузку PBF не пропустить — цифры из неё) и геокод адреса.
-# ДВА ШАГА: сначала «Найти адрес» (подтверждение геокодом — текст мог быть
-# с опечаткой или введён не до конца), затем «Сформировать профиль».
-# Кнопка «Построить сетку» выводит из режима в обычный (карта строится штатно).
-_want_map = bool(load_btn or st.session_state.get("build_on_enter"))
-if address.strip() and city.strip() and not _want_map:
+# ---- ПОДТВЕРЖДЕНИЕ АДРЕСА ПЕРЕД ВЫБОРОМ: КАРТА ИЛИ ТАБЛИЦА («финт ушами») ----
+# Порядок: 1) «Найти адрес» (геокод — текст мог быть с опечаткой или введён
+# не до конца) → 2) выбор: «Построить сетку» (карта) или «Таблица без
+# сетки» (.xlsx). Сетка/карта — чисто отображение: таблице нужны только
+# данные города (выгрузку PBF не пропустить — цифры из неё) и геокод.
+# Режим активен, ТОЛЬКО пока карта для этого города не построена — иначе
+# работает штатный экран карты (с кнопкой профиля рядом с меткой).
+# NB: флаг извлекаем ОДИН РАЗ — он же запускает загрузку ниже (блок
+# «if load_btn or ... or _build_after»): иначе «Построить сетку» из
+# режима таблицы только закрывал бы блок, но карта не строилась бы.
+_build_after = st.session_state.pop("build_after_confirm", False)
+_want_map = bool(load_btn
+                 or st.session_state.get("build_on_enter")
+                 or _build_after)
+# «Карта построена» = ЯВНЫЙ флаг map_built_for, а не наличие данных:
+# данные города скачивает и режим таблицы (.xlsx) — иначе после генерации
+# файла экран переключался бы на карту и кнопки двух режимов дублировались
+_map_ready = (st.session_state.get("map_built_for", "").strip().lower()
+              == city.strip().lower())
+if address.strip() and city.strip() and not _want_map and not _map_ready:
     _addr_txt = address.strip()
     _np_conf_key = (city.strip(), _addr_txt)
     # смена города или текста адреса = сброс подтверждения и готового профиля:
@@ -2916,7 +2928,7 @@ if address.strip() and city.strip() and not _want_map:
                    "и покажет, что именно поняла.")
         if st.button("🔎 Найти адрес",
                      help="Геокодинг: адрес + город ищутся в Nominatim. "
-                          "После подтверждения появится кнопка расчёта таблицы."):
+                          "После подтверждения выберите: карта или таблица."):
             # NB: город включаем в запрос — bbox города ещё не загружен
             # (данные тянуть раньше времени не хотим), а unbounded-поиск
             # с именем города держит результат в нужном населённом пункте
@@ -2931,7 +2943,7 @@ if address.strip() and city.strip() and not _want_map:
             st.rerun()
         st.stop()   # считаем только после подтверждённого адреса
 
-    # ── адрес подтверждён ──
+    # ── адрес подтверждён: выбор — карта или таблица ──
     _mk = _conf["mk"]
     st.info(f"📌 Адрес подтверждён: {_mk['display']} "
             f"({_mk['lat']:.5f}, {_mk['lon']:.5f})")
@@ -2939,19 +2951,23 @@ if address.strip() and city.strip() and not _want_map:
                kontur_df is not None, m2_per_person)
     _np = st.session_state.get("nomap_profile")
     if not (_np and _np.get("key") == _np_key):
-        # ── ШАГ 2: расчёт таблицы ──
-        st.caption("Шаг 2 из 2: расчёт показателей в радиусах 1/2/5 км "
-                   "(res 8 и res 10).")
-        if st.button("📥 Сформировать профиль адреса (.xlsx)",
-                     help="Город + ПОДТВЕРЖДЁННЫЙ адрес → готовый .xlsx по "
-                          "макету «Цель документа» без построения сетки "
-                          "и карты. Данные города скачиваются с выгрузки "
-                          "PBF (1–2 мин при первом запуске, потом из кэша)."):
-            # данные города: переиспользуем сессию, если город тот же
-            _st_data = st.session_state.get("data")
-            if not (_st_data
-                    and _st_data.get("city", "").strip().lower()
-                        == city.strip().lower()):
+        st.caption("Шаг 2 из 2: что делаем с подтверждённой точкой?")
+        _c_map, _c_tbl = st.columns(2)
+        with _c_map:
+            if st.button("🗺 Построить сетку",
+                         use_container_width=True,
+                         help="Обычный режим: сетка H3 на карте, метка, "
+                              "круги, суммы по клику. Данные города "
+                              "скачиваются с выгрузки PBF (1–2 мин при "
+                              "первом запуске, потом из кэша)."):
+                st.session_state["build_after_confirm"] = True
+                st.rerun()
+        with _c_tbl:
+            if st.button("📥 Таблица без сетки (.xlsx)",
+                         use_container_width=True,
+                         help="Готовый .xlsx по макету «Цель документа» "
+                              "без построения сетки и карты: 10 показателей "
+                              "в радиусах 1/2/5 км, res 8 и res 10."):
                 try:
                     with st.spinner("Загружаю данные города (выгрузка PBF)…"):
                         _geo, _nodes, _ways = fetch_city_data(city)
@@ -2965,20 +2981,21 @@ if address.strip() and city.strip() and not _want_map:
                     "city": city.strip(), "geo": _geo,
                     "nodes": _nodes, "ways": _ways,
                     "ver": f"{city.strip()}-{time.time():.0f}"}
-            with st.spinner("Считаю профиль: 10 показателей × 3 радиуса "
-                            "(res 8 и res 10)…"):
-                _prof = build_address_profile(
-                    (_mk["lat"], _mk["lon"]),
-                    st.session_state["data"],
-                    kontur_df, m2_per_person)
-                _x = _profile_to_xlsx(city.strip(), _mk["display"], _prof,
-                                      kontur_df is not None)
-            _fname = re.sub(r"[^\w\-.]+", "_",
-                            f"профиль_{city.strip()}_{_addr_txt}")[:80] + ".xlsx"
-            st.session_state["nomap_profile"] = {"key": _np_key, "data": _x,
-                                                 "fname": _fname,
-                                                 "addr": _mk["display"]}
-            st.rerun()
+                with st.spinner("Считаю профиль: 10 показателей × 3 радиуса "
+                                "(res 8 и res 10)…"):
+                    _prof = build_address_profile(
+                        (_mk["lat"], _mk["lon"]),
+                        st.session_state["data"],
+                        kontur_df, m2_per_person)
+                    _x = _profile_to_xlsx(city.strip(), _mk["display"],
+                                          _prof, kontur_df is not None)
+                _fname = re.sub(r"[^\w\-.]+", "_",
+                                f"профиль_{city.strip()}_{_addr_txt}")[:80] + ".xlsx"
+                st.session_state["nomap_profile"] = {"key": _np_key,
+                                                     "data": _x,
+                                                     "fname": _fname,
+                                                     "addr": _mk["display"]}
+                st.rerun()
 
     _np = st.session_state.get("nomap_profile")
     if _np and _np.get("key") == _np_key:
@@ -2990,10 +3007,10 @@ if address.strip() and city.strip() and not _want_map:
             mime="application/vnd.openxmlformats-"
                  "officedocument.spreadsheetml.sheet")
         st.caption("Адрес не тот? Измените текст в поле — подтверждение "
-                   "сбросится. Нужна карта? Нажмите «🔍 Построить сетку».")
+                   "сбросится. Нужна карта? Нажмите «🗺 Построить сетку» выше.")
     st.stop()
 
-if load_btn or st.session_state.pop("build_on_enter", False):
+if load_btn or st.session_state.pop("build_on_enter", False) or _build_after:
     st.session_state.pop("nomap_profile", None)  # просят карту — режим таблицы сбрасываем
     st.session_state.pop("geocode_trace", None)  # свежая диагностика
     # СМЕНА ГОРОДА = чистка кэшей: держим в памяти только текущий город
@@ -3033,6 +3050,9 @@ if load_btn or st.session_state.pop("build_on_enter", False):
     st.session_state["data"] = {"city": city.strip(), "geo": geo,
                                 "nodes": nodes_df, "ways": ways_df,
                                 "ver": f"{city.strip()}-{time.time():.0f}"}
+    # сетка построена (явно): режим таблицы для этого города закрыт,
+    # профиль дальше собирается только кнопкой у метки на карте
+    st.session_state["map_built_for"] = city.strip()
 
 stored = st.session_state.get("data")
 # миграция: старая сессия хранила кортеж, новый код ждёт словарь — сбрасываем
@@ -3131,6 +3151,11 @@ if not grid:
 
 marker = None
 if address.strip() and city.strip().lower() == stored["city"].lower():
+    # адрес уже подтверждён в режиме таблицы — переиспользуем геокод
+    _conf = st.session_state.get("_np_confirmed")
+    if _conf and _conf.get("for") == (city.strip(), address.strip()):
+        marker = _conf["mk"]
+if marker is None and address.strip() and city.strip().lower() == stored["city"].lower():
     with st.spinner(f"Ищу адрес «{address.strip()}»…"):
         try:
             # NB: НЕ добавляем имя города к запросу — с bounded=1 оно
