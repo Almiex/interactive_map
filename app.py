@@ -2730,7 +2730,7 @@ with st.sidebar:
                          on_change=_city_committed,
                          help="Enter в поле = кнопка «Построить сетку»")
     address = st.text_input("Улица и дом (необязательно)",
-                            placeholder="пр. Ленина, 1", key="addr_input",
+                            placeholder="пример: 9 мая 19а", key="addr_input",
                             help="Если заполнить, на карте появится метка по этому адресу")
     # КОНТЕКСТНАЯ главная кнопка: адрес введён и сетка ещё НЕ построена —
     # сначала подтверждение адреса («Найти адрес»); после подтверждения на
@@ -2972,7 +2972,7 @@ if address.strip() and city.strip() and not _want_map and not _map_ready:
         _c_map, _c_tbl = st.columns(2)
         with _c_map:
             if st.button("🗺 Построить сетку",
-                         use_container_width=True,
+                         type="primary", use_container_width=True,
                          help="Обычный режим: сетка H3 на карте, метка, "
                               "круги, суммы по клику. Данные города "
                               "скачиваются с выгрузки PBF (1–2 мин при "
@@ -2981,7 +2981,7 @@ if address.strip() and city.strip() and not _want_map and not _map_ready:
                 st.rerun()
         with _c_tbl:
             if st.button("📥 Таблица без сетки (.xlsx)",
-                         use_container_width=True,
+                         type="primary", use_container_width=True,
                          help="Готовый .xlsx по макету «Цель документа» "
                               "без построения сетки и карты: 10 показателей "
                               "в радиусах 1/2/5 км, res 8 и res 10."):
