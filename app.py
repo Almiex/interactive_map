@@ -2895,13 +2895,91 @@ if st.session_state.get("_sel_mode_prev") != st.session_state.get("sel_mode"):
 
 # ---- ПРОФИЛЬ АДРЕСА БЕЗ ПОСТРОЕНИЯ СЕТКИ/КАРТЫ («финт ушами» в полный рост) ----
 # Сетка и карта — чисто отображение: профилю нужны только данные города
-# (выгрузку PBF не пропустить — цифры из неё) и геокод адреса. Режим
-# срабатывает, только когда профиль уже собран; кнопка «Построить сетку»
-# выводит из режима в обычный (карта строится штатно).
+# (выгрузку PBF не пропустить — цифры из неё) и геокод адреса.
+# ДВА ШАГА: сначала «Найти адрес» (подтверждение геокодом — текст мог быть
+# с опечаткой или введён не до конца), затем «Сформировать профиль».
+# Кнопка «Построить сетку» выводит из режима в обычный (карта строится штатно).
 _want_map = bool(load_btn or st.session_state.get("build_on_enter"))
 if address.strip() and city.strip() and not _want_map:
-    _np_key = (city.strip(), address.strip(),
+    _addr_txt = address.strip()
+    _np_conf_key = (city.strip(), _addr_txt)
+    # смена города или текста адреса = сброс подтверждения и готового профиля:
+    # таблица всегда соответствует тому, что видно на экране
+    if st.session_state.get("_np_confirmed", {}).get("for") != _np_conf_key:
+        st.session_state.pop("_np_confirmed", None)
+        st.session_state.pop("nomap_profile", None)
+
+    _conf = st.session_state.get("_np_confirmed")
+    if _conf is None:
+        # ── ШАГ 1: подтверждение адреса ──
+        st.caption("Шаг 1 из 2: подтвердите адрес — система найдёт точку "
+                   "и покажет, что именно поняла.")
+        if st.button("🔎 Найти адрес",
+                     help="Геокодинг: адрес + город ищутся в Nominatim. "
+                          "После подтверждения появится кнопка расчёта таблицы."):
+            # NB: город включаем в запрос — bbox города ещё не загружен
+            # (данные тянуть раньше времени не хотим), а unbounded-поиск
+            # с именем города держит результат в нужном населённом пункте
+            with st.spinner(f"Ищу «{_addr_txt}»…"):
+                _mk = geocode_address(f"{city.strip()}, {_addr_txt}")
+            if _mk is None:
+                st.error(f"Адрес «{_addr_txt}» не найден — проверьте "
+                         f"написание (пример: «9 мая 19а»).")
+            else:
+                st.session_state["_np_confirmed"] = {"for": _np_conf_key,
+                                                     "mk": _mk}
+            st.rerun()
+        st.stop()   # считаем только после подтверждённого адреса
+
+    # ── адрес подтверждён ──
+    _mk = _conf["mk"]
+    st.info(f"📌 Адрес подтверждён: {_mk['display']} "
+            f"({_mk['lat']:.5f}, {_mk['lon']:.5f})")
+    _np_key = (city.strip(), _mk["display"],
                kontur_df is not None, m2_per_person)
+    _np = st.session_state.get("nomap_profile")
+    if not (_np and _np.get("key") == _np_key):
+        # ── ШАГ 2: расчёт таблицы ──
+        st.caption("Шаг 2 из 2: расчёт показателей в радиусах 1/2/5 км "
+                   "(res 8 и res 10).")
+        if st.button("📥 Сформировать профиль адреса (.xlsx)",
+                     help="Город + ПОДТВЕРЖДЁННЫЙ адрес → готовый .xlsx по "
+                          "макету «Цель документа» без построения сетки "
+                          "и карты. Данные города скачиваются с выгрузки "
+                          "PBF (1–2 мин при первом запуске, потом из кэша)."):
+            # данные города: переиспользуем сессию, если город тот же
+            _st_data = st.session_state.get("data")
+            if not (_st_data
+                    and _st_data.get("city", "").strip().lower()
+                        == city.strip().lower()):
+                try:
+                    with st.spinner("Загружаю данные города (выгрузка PBF)…"):
+                        _geo, _nodes, _ways = fetch_city_data(city)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Не удалось загрузить данные для «{city}»: {e}")
+                    st.stop()
+                if _geo is None:
+                    st.error("Город не найден. Уточните название.")
+                    st.stop()
+                st.session_state["data"] = {
+                    "city": city.strip(), "geo": _geo,
+                    "nodes": _nodes, "ways": _ways,
+                    "ver": f"{city.strip()}-{time.time():.0f}"}
+            with st.spinner("Считаю профиль: 10 показателей × 3 радиуса "
+                            "(res 8 и res 10)…"):
+                _prof = build_address_profile(
+                    (_mk["lat"], _mk["lon"]),
+                    st.session_state["data"],
+                    kontur_df, m2_per_person)
+                _x = _profile_to_xlsx(city.strip(), _mk["display"], _prof,
+                                      kontur_df is not None)
+            _fname = re.sub(r"[^\w\-.]+", "_",
+                            f"профиль_{city.strip()}_{_addr_txt}")[:80] + ".xlsx"
+            st.session_state["nomap_profile"] = {"key": _np_key, "data": _x,
+                                                 "fname": _fname,
+                                                 "addr": _mk["display"]}
+            st.rerun()
+
     _np = st.session_state.get("nomap_profile")
     if _np and _np.get("key") == _np_key:
         st.success(f"✅ Профиль готов: {city.strip()} — {_np['addr']} "
@@ -2911,45 +2989,9 @@ if address.strip() and city.strip() and not _want_map:
             data=_np["data"], file_name=_np["fname"],
             mime="application/vnd.openxmlformats-"
                  "officedocument.spreadsheetml.sheet")
-        st.caption("Нужна карта? Нажмите «🔍 Построить сетку» в боковой "
-                   "панели — режим таблицы закроется, карта построится штатно.")
-        st.stop()
-    if st.button("📥 Профиль адреса БЕЗ карты (.xlsx)",
-                 help="Город + адрес → готовый .xlsx по макету «Цель "
-                      "документа» без построения сетки и карты. Данные города "
-                      "всё равно скачиваются с выгрузки PBF (1–2 мин при "
-                      "первом запуске, повторно — из кэша за секунды)."):
-        try:
-            with st.spinner("Загружаю данные города (выгрузка PBF)…"):
-                _geo, _nodes, _ways = fetch_city_data(city)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Не удалось загрузить данные для «{city}»: {e}")
-            st.stop()
-        if _geo is None:
-            st.error("Город не найден. Уточните название.")
-            st.stop()
-        st.session_state["data"] = {
-            "city": city.strip(), "geo": _geo, "nodes": _nodes, "ways": _ways,
-            "ver": f"{city.strip()}-{time.time():.0f}"}
-        with st.spinner(f"Ищу адрес «{address.strip()}»…"):
-            _mk = geocode_address(address.strip(), _geo["bbox"])
-        if _mk is None:
-            st.error(f"Адрес «{address.strip()}» не найден в городе "
-                     f"«{city.strip()}» — проверьте написание улицы и дома.")
-            st.stop()
-        with st.spinner("Считаю профиль: 10 показателей × 3 радиуса "
-                        "(res 8 и res 10)…"):
-            _prof = build_address_profile((_mk["lat"], _mk["lon"]),
-                                          st.session_state["data"],
-                                          kontur_df, m2_per_person)
-            _x = _profile_to_xlsx(city.strip(), _mk["display"], _prof,
-                                  kontur_df is not None)
-        _fname = re.sub(r"[^\w\-.]+", "_",
-                        f"профиль_{city.strip()}_{address.strip()}")[:80] + ".xlsx"
-        st.session_state["nomap_profile"] = {"key": _np_key, "data": _x,
-                                             "fname": _fname,
-                                             "addr": _mk["display"]}
-        st.rerun()
+        st.caption("Адрес не тот? Измените текст в поле — подтверждение "
+                   "сбросится. Нужна карта? Нажмите «🔍 Построить сетку».")
+    st.stop()
 
 if load_btn or st.session_state.pop("build_on_enter", False):
     st.session_state.pop("nomap_profile", None)  # просят карту — режим таблицы сбрасываем
