@@ -2760,40 +2760,45 @@ with st.sidebar:
 
 
     m2_per_person = 30
-    kontur_df = None
     if map_type.startswith("1."):
-        src = st.radio("Источник численности",
+        src = st.radio("Источник численности (карта)",
                        ["Суррогатная оценка (OSM-здания)", "Kontur Population (файл)"],
                        key="pop_src")  # явный ключ — состояние переживает
         # переключение на другой тип карты (виджет тогда уничтожается)
         if src.startswith("Суррогат"):
             m2_per_person = st.slider("Норма м² жилья на человека", 15, 60, 30)
-        else:
-            f = st.file_uploader("Файл Kontur Population (.gpkg / .geojson / .parquet)",
-                                 type=["gpkg", "geojson", "json", "parquet"],
-                                 key="kontur_file")
-            # Распарсенные данные живут в session_state и ПЕРЕЖИВАЮТ уход
-            # с карты 1: виджет uploader при возврате может быть пустым
-            # (Streamlit теряет файл при уничтожении виджета), но повторно
-            # парсить мегабайты не нужно — подхватываем из кэша.
-            kontur_df = st.session_state.get("_kontur")
-            if f is not None:
-                _kkey = (f.name, f.size)
-                if st.session_state.get("_kontur_key") != _kkey or kontur_df is None:
-                    with st.spinner("Загружаю Kontur Population…"):
-                        _prev = (st.session_state.get("data") or {}).get("geo")
-                        kontur_df = load_kontur(f, 8,
-                                                _prev["bbox"] if _prev else None)
-                    if kontur_df is not None:
-                        st.session_state["_kontur"] = kontur_df
-                        st.session_state["_kontur_key"] = _kkey
-            elif kontur_df is not None:
-                st.caption("Kontur Population загружен ранее — файл можно "
-                           "не перезагружать.")
+
+    # Kontur — загрузка доступна ВСЕГДА, независимо от выбранного типа карты:
+    # файл нужен и карте 1 (если выбран этот источник), и профилю адреса
+    # в .xlsx (колонка «(Контур)», в т.ч. в режиме «без карты»).
+    with st.expander("📦 Kontur Population (файл)"):
+        st.caption("Нужен для колонки «1. (Контур)» в профиле адреса (.xlsx) "
+                   "и для карты плотности с реальной численностью.")
+        f = st.file_uploader("Файл Kontur Population (.gpkg / .geojson / .parquet)",
+                             type=["gpkg", "geojson", "json", "parquet"],
+                             key="kontur_file")
+        # Распарсенные данные живут в session_state и ПЕРЕЖИВАЮТ уход
+        # с карты 1 / смену типа карты: виджет uploader при возврате может
+        # быть пустым (Streamlit теряет файл при уничтожении виджета), но
+        # повторно парсить мегабайты не нужно — подхватываем из кэша.
+        kontur_df = st.session_state.get("_kontur")
+        if f is not None:
+            _kkey = (f.name, f.size)
+            if st.session_state.get("_kontur_key") != _kkey or kontur_df is None:
+                with st.spinner("Загружаю Kontur Population…"):
+                    _prev = (st.session_state.get("data") or {}).get("geo")
+                    kontur_df = load_kontur(f, 8,
+                                            _prev["bbox"] if _prev else None)
+                if kontur_df is not None:
+                    st.session_state["_kontur"] = kontur_df
+                    st.session_state["_kontur_key"] = _kkey
+        elif kontur_df is not None:
+            st.caption("Kontur Population загружен ранее — файл можно "
+                       "не перезагружать.")
 
     # слайдер — в конце сайдбара: если выбран Kontur, его res ограничивает максимум
     _max_res = 10
-    if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
+    if (_use_kontur_on_map and not kontur_df.empty):
         _max_res = h3.get_resolution(kontur_df["h3"].iloc[0])
         if st.session_state.get("res_slider", 8) > _max_res:
             try:
@@ -2869,6 +2874,12 @@ with st.sidebar:
 
 
 # ------------------------------- логика ----------------------------------- #
+# карта 1 показывает Kontur ТОЛЬКО когда выбран этот источник в радио;
+# профиль адреса в .xlsx использует его всегда, как только файл загружен
+_use_kontur_on_map = (map_type.startswith("1.")
+                      and kontur_df is not None
+                      and str(st.session_state.get("pop_src", "")).startswith("Kontur"))
+
 # суммы в кругах живут только в рамках одного типа карты: переключил слой —
 # старое значение удаляется, на новой карте не покажется
 if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_type):
@@ -3007,7 +3018,7 @@ res_eff = res
 if str(st.session_state.get("sel_mode", "")).startswith("Мульти") and res_eff != 8:
     res_eff = 8  # мультивыбор работает только на res 8 (слайдер ограничен
     # колбэками, здесь — страховка для старых сессий)
-if map_type.startswith("1.") and kontur_df is not None and not kontur_df.empty:
+if _use_kontur_on_map and not kontur_df.empty:
     src_res = h3.get_resolution(kontur_df["h3"].iloc[0])
     if res > src_res:
         res_eff = src_res
@@ -3039,7 +3050,7 @@ try:
     with st.spinner("Считаю агрегаты по гексам…"):
         series, unit, hex_extra, points = _compute_series_cached(
             map_type, sub_option, res_eff, stored.get("ver", 0),
-            kontur_df is not None, m2_per_person)
+            _use_kontur_on_map, m2_per_person)
 except Exception:
     logger.exception("compute_series упал — полный трейсбэк")  # в UI редатится,
     raise                                                  # в логах — нет
@@ -3201,7 +3212,7 @@ elif map_type.startswith("7."):
 if map_type.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.")):
     _sums_center = _circ_center
     # отпечаток текущих фильтров/настроек, влияющих на серию показателей
-    _fkey = f"{sub_option}|{'K' if kontur_df is not None else ''}|{m2_per_person}"
+    _fkey = f"{sub_option}|{'K' if _use_kontur_on_map else ''}|{m2_per_person}"
     if st.button("Σ  Сумма показателей в кругах", disabled=not _sums_center,
                  help="По гексам текущей карты (с учётом фильтров), центры "
                       "которых попадают в радиус 1, 2 и 5 км: сумма для "
@@ -3270,7 +3281,9 @@ if _circ_center:
             with st.spinner("Считаю все 7 карт для сводки (первый раз 10–30 сек)…"):
                 try:
                     _results = {_r: build_all_maps_summary(
-                        _circ_center, _r, stored, kontur_df, m2_per_person)
+                        _circ_center, _r, stored,
+                        kontur_df if _use_kontur_on_map else None,
+                        m2_per_person)
                         for _r in _res_list}
                     _buf = io.BytesIO()
                     _fmt = "xlsx"
@@ -3379,8 +3392,7 @@ if st.session_state.get("circle_center"):
 
 _src = None
 if map_type.startswith("1."):
-    _src = ("Kontur (2023)" if kontur_df is not None
-            else "OSM: суррогат")
+    _src = ("Kontur (2023)" if _use_kontur_on_map else "OSM: суррогат")
 
 render_map(grid, series, unit, geo, map_type, marker=marker,
            points=points, hex_extra=hex_extra, extra_aliases=extra_aliases,
