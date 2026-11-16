@@ -1750,19 +1750,23 @@ def _compute_series_cached(map_type, sub_option, res_eff, data_ver,
 
 
 # План профиля адреса: (ключ, название группы, тип карты, под-опция,
-# resolution, агрегация). Размеры — как в шаблоне «Цель документа».
+# resolution, агрегация, use_kontur). Флаг КРИТИЧЕН: без него при загруженном
+# Kontur ВСЕ планы карты 1 получали контурную серию — суррогат затирался
+# контуром (баг 2026-11-16: одинаковые 19897/83064/238863 в трёх колонках).
+# Суррогатные планы ПРИНУДИТЕЛЬНО идут без Kontur.
 ADDRESS_PROFILE_PLANS = [
-    ("kontur",    "1. (Контур) Плотность населения",      MAP_TYPES[0], None,            8,  "sum"),
-    ("surrogat8", "1. (Суррогат) Плотность населения",    MAP_TYPES[0], None,            8,  "sum"),
-    ("surrogat",  "1. (Суррогат) Плотность населения",    MAP_TYPES[0], None,            10, "sum"),
-    ("housing",  "2. Объём жилого фонда",                  MAP_TYPES[1], None,            10, "sum"),
-    ("demand",   "3. Индекс спроса (платёжесп.)",          MAP_TYPES[2], None,            10, "avg"),
-    ("poi",      "4. Инфраструктура и POI",                MAP_TYPES[3], None,            8,  "sum"),
-    ("social",   "5. Социальная инфраструктура",           MAP_TYPES[4], None,            8,  "sum"),
-    ("ped",      "6. Трафик — пешеходный",                 MAP_TYPES[5], TRAFFIC_MODES[0], 8, "avg"),
-    ("auto",     "6. Трафик — автомобильный",              MAP_TYPES[5], TRAFFIC_MODES[1], 8, "avg"),
-    ("med",      "7. Мед. учреждения и аптеки",            MAP_TYPES[6], None,            10, "sum"),
+    ("kontur",    "1. (Контур) Плотность населения",      MAP_TYPES[0], None,            8,  "sum", True),
+    ("surrogat8", "1. (Суррогат) Плотность населения",    MAP_TYPES[0], None,            8,  "sum", False),
+    ("surrogat",  "1. (Суррогат) Плотность населения",    MAP_TYPES[0], None,            10, "sum", False),
+    ("housing",  "2. Объём жилого фонда",                 MAP_TYPES[1], None,            10, "sum", False),
+    ("demand",   "3. Индекс спроса (платёжесп.)",         MAP_TYPES[2], None,            10, "avg", False),
+    ("poi",      "4. Инфраструктура и POI",               MAP_TYPES[3], None,            8,  "sum", False),
+    ("social",   "5. Социальная инфраструктура",          MAP_TYPES[4], None,            8,  "sum", False),
+    ("ped",      "6. Трафик — пешеходный",                MAP_TYPES[5], TRAFFIC_MODES[0], 8, "avg", False),
+    ("auto",     "6. Трафик — автомобильный",             MAP_TYPES[5], TRAFFIC_MODES[1], 8, "avg", False),
+    ("med",      "7. Мед. учреждения и аптеки",           MAP_TYPES[6], None,            10, "sum", False),
 ]
+
 # группы для Excel: (подпись размера, название, ключ). Порядок — как в
 # «Цель документа (3).xlsx», плюс добавлена колонка «1. (Суррогат) Размер 8»
 # (запрос пользователя 2026-11-16: суррогат нужен и для res 8, и для res 10)
@@ -1777,23 +1781,25 @@ PROFILE_XLSX_GROUPS = [
     ("Размер 8",  "6. Трафик — пешеходный",                 "ped"),
     ("Размер 8",  "6. Трафик — автомобильный",              "auto"),
     ("Размер 10", "7. Мед. учреждения и аптеки",            "med"),
-    ("Размер 10", "Контур/мед.учреждения (считается автоматически)", "kontur_per_med"),
+    # «Контур/мед.учреждения» УДАЛЕНО: данные некорректны (запрос 2026-11-16)
 ]
 RADII = (1.0, 2.0, 5.0)
 
 
 def build_address_profile(center, stored, kontur_df, m2_per_person):
-    """Полный профиль точки: 9 расчётов × 3 радиуса + производное
-    «Контур/мед.учреждения». Считается на сервере — работает даже если
-    карта у пользователя не отрисовалась (белый экран, нет подложки)."""
+    """Полный профиль точки: 10 расчётов × 3 радиуса. Считается на сервере —
+    работает даже если карта у пользователя не отрисовалась (белый экран,
+    нет подложки). NB: суррогатные планы ПРИНУДИТЕЛЬНО без Kontur."""
     prof = {}
-    for key, _title, mt, sub, res_p, agg in ADDRESS_PROFILE_PLANS:
+    for key, _title, mt, sub, res_p, agg, use_kontur in ADDRESS_PROFILE_PLANS:
         if key == "kontur" and kontur_df is None:
             prof[key] = None          # колонки останутся пустыми
             continue
+        # use_kontur=False выключает Kontur для суррогатных планов — иначе
+        # при загруженном файле сюда приходила контурная серия (баг 2026-11-16)
+        _kl = bool(kontur_df is not None and use_kontur)
         series, _unit, _hx, _pt = _compute_series_cached(
-            mt, sub, res_p, stored.get("ver", 0),
-            kontur_df is not None, m2_per_person)
+            mt, sub, res_p, stored.get("ver", 0), _kl, m2_per_person)
         sums = sums_in_circles(series, center) or {}
         row = {}
         for r in RADII:
@@ -1801,13 +1807,7 @@ def build_address_profile(center, stored, kontur_df, m2_per_person):
             v = (s / n) if (agg == "avg" and n) else s
             row[r] = round(v, 1) if agg == "avg" else round(v)
         prof[key] = row
-    # производное: люди Kontur на 1 мед.объект (считается автоматически)
-    ratio = {}
-    _kp, _md = prof.get("kontur"), prof.get("med")
-    for r in RADII:
-        ratio[r] = (round(_kp[r] / _md[r])
-                    if (_kp and _md and _md.get(r)) else None)
-    prof["kontur_per_med"] = ratio
+    # NB: производное «Контур/мед.учреждения» УДАЛЕНО (данные некорректны)
     return prof
 
 
@@ -1867,12 +1867,10 @@ def _profile_to_xlsx(city, address, prof, kontur_loaded):
     note = ("Примечания: индексы (спроса, трафика) — СРЕДНЕЕ по гексам радиуса; "
             "остальные показатели — СУММА. Суррогатная плотность посчитана "
             "дважды: res 8 — для сопоставления с кнопкой «Σ на карте» (карта "
-            "считает на res 8), res 10 — основная точная оценка. "
-            "«Контур/мед.учреждения» = население Kontur в радиусе ÷ число "
-            "мед. объектов в радиусе.")
+            "считает на res 8), res 10 — основная точная оценка.")
     if not kontur_loaded:
-        note += (" Колонки «(Контур)» и «Контур/мед.учреждения» пусты — файл "
-                 "Kontur Population не был загружен в сайдбаре.")
+        note += (" Колонка «(Контур)» пуста — файл Kontur Population не "
+                 "был загружен в сайдбаре.")
     ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=col - 1)
     nc = ws.cell(6, 1, note)
     nc.font = Font(italic=True, size=9, color="808080")
@@ -2851,6 +2849,10 @@ with st.sidebar:
     # когда адрес введён для ТЕКУЩЕГО города (иначе адрес игнорируется)
     _addr_city = (st.session_state.get("data") or {}).get("city")
     if address.strip() and _addr_city and city.strip() == _addr_city:
+        # по умолчанию ВКЛ при введённом адресе: иначе «Σ на карте» считается
+        # от центра кликнутого гекса и расходится с профилем адреса в .xlsx
+        # (на res 8 круг 1 км от центра гекса = 7 гексов, от точки дома = 3–4)
+        st.session_state.setdefault("center_on_marker", True)
         st.checkbox("Центр кругов — метка адреса", key="center_on_marker",
                     help="Включите, чтобы круги 1/2/5 км строились от "
                          "найденного адреса, а не от выбранного гекса. "
@@ -2878,7 +2880,66 @@ if st.session_state.get("_sel_mode_prev") != st.session_state.get("sel_mode"):
     st.session_state.pop("hex_chain", None)
     st.session_state.pop("circle_center", None)
 
+# ---- ПРОФИЛЬ АДРЕСА БЕЗ ПОСТРОЕНИЯ СЕТКИ/КАРТЫ («финт ушами» в полный рост) ----
+# Сетка и карта — чисто отображение: профилю нужны только данные города
+# (выгрузку PBF не пропустить — цифры из неё) и геокод адреса. Режим
+# срабатывает, только когда профиль уже собран; кнопка «Построить сетку»
+# выводит из режима в обычный (карта строится штатно).
+_want_map = bool(load_btn or st.session_state.get("build_on_enter"))
+if address.strip() and city.strip() and not _want_map:
+    _np_key = (city.strip(), address.strip(),
+               kontur_df is not None, m2_per_person)
+    _np = st.session_state.get("nomap_profile")
+    if _np and _np.get("key") == _np_key:
+        st.success(f"✅ Профиль готов: {city.strip()} — {_np['addr']} "
+                   f"(сетка и карта не строились)")
+        st.download_button(
+            "⬇ Скачать профиль адреса (.xlsx)",
+            data=_np["data"], file_name=_np["fname"],
+            mime="application/vnd.openxmlformats-"
+                 "officedocument.spreadsheetml.sheet")
+        st.caption("Нужна карта? Нажмите «🔍 Построить сетку» в боковой "
+                   "панели — режим таблицы закроется, карта построится штатно.")
+        st.stop()
+    if st.button("📥 Профиль адреса БЕЗ карты (.xlsx)",
+                 help="Город + адрес → готовый .xlsx по макету «Цель "
+                      "документа» без построения сетки и карты. Данные города "
+                      "всё равно скачиваются с выгрузки PBF (1–2 мин при "
+                      "первом запуске, повторно — из кэша за секунды)."):
+        try:
+            with st.spinner("Загружаю данные города (выгрузка PBF)…"):
+                _geo, _nodes, _ways = fetch_city_data(city)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Не удалось загрузить данные для «{city}»: {e}")
+            st.stop()
+        if _geo is None:
+            st.error("Город не найден. Уточните название.")
+            st.stop()
+        st.session_state["data"] = {
+            "city": city.strip(), "geo": _geo, "nodes": _nodes, "ways": _ways,
+            "ver": f"{city.strip()}-{time.time():.0f}"}
+        with st.spinner(f"Ищу адрес «{address.strip()}»…"):
+            _mk = geocode_address(address.strip(), _geo["bbox"])
+        if _mk is None:
+            st.error(f"Адрес «{address.strip()}» не найден в городе "
+                     f"«{city.strip()}» — проверьте написание улицы и дома.")
+            st.stop()
+        with st.spinner("Считаю профиль: 10 показателей × 3 радиуса "
+                        "(res 8 и res 10)…"):
+            _prof = build_address_profile((_mk["lat"], _mk["lon"]),
+                                          st.session_state["data"],
+                                          kontur_df, m2_per_person)
+            _x = _profile_to_xlsx(city.strip(), _mk["display"], _prof,
+                                  kontur_df is not None)
+        _fname = re.sub(r"[^\w\-.]+", "_",
+                        f"профиль_{city.strip()}_{address.strip()}")[:80] + ".xlsx"
+        st.session_state["nomap_profile"] = {"key": _np_key, "data": _x,
+                                             "fname": _fname,
+                                             "addr": _mk["display"]}
+        st.rerun()
+
 if load_btn or st.session_state.pop("build_on_enter", False):
+    st.session_state.pop("nomap_profile", None)  # просят карту — режим таблицы сбрасываем
     st.session_state.pop("geocode_trace", None)  # свежая диагностика
     # СМЕНА ГОРОДА = чистка кэшей: держим в памяти только текущий город
     # (бесплатный тариф 1 ГБ). Возврат к прошлому городу = повторная
@@ -3044,7 +3105,7 @@ if address.strip() and city.strip().lower() == stored["city"].lower():
                               "Считается на сервере — работает даже если "
                               "карта не отрисовалась. Первый запуск до ~1 мин "
                               "(кэшируется)."):
-                with st.spinner("Считаю профиль адреса: 9 показателей × "
+                with st.spinner("Считаю профиль адреса: 10 показателей × "
                                 "3 радиуса, res 8 и res 10…"):
                     try:
                         _p = build_address_profile(
