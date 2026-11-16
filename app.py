@@ -2796,6 +2796,14 @@ with st.sidebar:
             st.caption("Kontur Population загружен ранее — файл можно "
                        "не перезагружать.")
 
+    # карта 1 показывает Kontur ТОЛЬКО когда выбран этот источник в радио;
+    # профиль адреса в .xlsx использует его всегда, как только файл загружен.
+    # NB: определяем ЗДЕСЬ, а не ниже по коду — кламп слайдера res использует
+    # флаг ещё внутри сайдбара (был NameError на старте приложения).
+    _use_kontur_on_map = (map_type.startswith("1.")
+                          and kontur_df is not None
+                          and str(st.session_state.get("pop_src", "")).startswith("Kontur"))
+
     # слайдер — в конце сайдбара: если выбран Kontur, его res ограничивает максимум
     _max_res = 10
     if (_use_kontur_on_map and not kontur_df.empty):
@@ -2874,12 +2882,6 @@ with st.sidebar:
 
 
 # ------------------------------- логика ----------------------------------- #
-# карта 1 показывает Kontur ТОЛЬКО когда выбран этот источник в радио;
-# профиль адреса в .xlsx использует его всегда, как только файл загружен
-_use_kontur_on_map = (map_type.startswith("1.")
-                      and kontur_df is not None
-                      and str(st.session_state.get("pop_src", "")).startswith("Kontur"))
-
 # суммы в кругах живут только в рамках одного типа карты: переключил слой —
 # старое значение удаляется, на новой карте не покажется
 if st.session_state.get("circle_sums", {}).get("map_type") not in (None, map_type):
